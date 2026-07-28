@@ -159,8 +159,9 @@ func initTheme() {
 // ── Slash commands ──
 
 type slashCommand struct {
-	name string
-	desc string
+	name    string
+	desc    string
+	isSkill bool // true if this is a skill (shown with [Skill] prefix)
 }
 
 // commandReg is the global command registry.
@@ -1401,8 +1402,13 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// ── Tab ──
 	case msg.Code == tea.KeyTab:
 		if m.showSuggestions && len(m.suggestions) > 0 {
-			// autocomplete
-			m.input = "/" + m.suggestions[m.selectedSuggest].name
+			// autocomplete — preserve the prefix ($ or /)
+			selected := m.suggestions[m.selectedSuggest].name
+			if strings.HasPrefix(m.input, "$") {
+				m.input = "$" + selected
+			} else {
+				m.input = "/" + selected
+			}
 			m.cursor = utf8.RuneCountInString(m.input)
 			m.showSuggestions = false
 		} else {
@@ -1695,7 +1701,28 @@ func (m *tuiModel) toggleFocusedCollapse() {
 }
 
 func (m *tuiModel) updateSuggestions() {
-	if strings.HasPrefix(m.input, "/") {
+	if strings.HasPrefix(m.input, "$") {
+		// $ prefix: skill-only lookup
+		filter := strings.ToLower(m.input[1:])
+		m.suggestions = nil
+		if m.skillCatalog != nil {
+			for _, s := range m.skillCatalog.List() {
+				if !s.IsUserActivatable() {
+					continue
+				}
+				name := s.Name
+				if strings.HasPrefix(strings.ToLower(name), filter) {
+					m.suggestions = append(m.suggestions, slashCommand{
+						name:    name,
+						desc:    truncateDesc(s.Description, 60),
+						isSkill: true,
+					})
+				}
+			}
+		}
+		m.showSuggestions = len(m.suggestions) > 0
+		m.selectedSuggest = 0
+	} else if strings.HasPrefix(m.input, "/") {
 		filter := strings.ToLower(m.input[1:])
 		m.suggestions = nil
 		// Built-in commands always shown
@@ -1714,8 +1741,9 @@ func (m *tuiModel) updateSuggestions() {
 				name := s.SlashName()
 				if strings.HasPrefix(strings.ToLower(name), filter) {
 					m.suggestions = append(m.suggestions, slashCommand{
-						name: name,
-						desc: truncateDesc(s.Description, 60),
+						name:    name,
+						desc:    truncateDesc(s.Description, 60),
+						isSkill: true,
 					})
 				}
 			}
@@ -1859,16 +1887,50 @@ func firstUserPrompt(store *session.SessionStore, sessionID string) string {
 	return ""
 }
 
-// parseSkillCommand extracts the skill name and arguments from a /skill: invocation.
+// parseSkillCommand extracts the skill name and arguments from a /skill: or $ invocation.
 // Input: "/skill:interview-me how to improve" → name="interview-me", args="how to improve"
+// Input: "$dev-cycle fix bugs" → name="dev-cycle", args="fix bugs"
 func parseSkillCommand(input string) (name, args string) {
-	raw := strings.TrimPrefix(input, "/skill:")
+	var raw string
+	if strings.HasPrefix(input, "$") {
+		raw = strings.TrimPrefix(input, "$")
+	} else {
+		raw = strings.TrimPrefix(input, "/skill:")
+	}
 	parts := strings.SplitN(raw, " ", 2)
 	name = parts[0]
 	if len(parts) > 1 {
 		args = strings.TrimSpace(parts[1])
 	}
 	return name, args
+}
+
+// executeSkill activates a skill and starts streaming its prompt.
+func (m tuiModel) executeSkill(s *skill.Skill, skillArgs, displayInput string) (tea.Model, tea.Cmd) {
+	m.activeSkill = &activeSkillInfo{name: s.Name, args: skillArgs}
+	m.messages = append(m.messages, chatMessage{"user", displayInput})
+	m.messages = append(m.messages, chatMessage{"system",
+		fmt.Sprintf("Skill loaded: %s", s.Name)})
+	m.input = ""
+	m.cursor = 0
+	m.showSuggestions = false
+	// Build prompt: skill body + user args
+	prompt := s.Body
+	if skillArgs != "" {
+		prompt = s.Body + "\n\n---\n\n" + skillArgs
+	}
+	m.turnCount++
+	m.cancelCh = make(chan struct{})
+	m.streaming = true
+	m.streamThinking = ""
+	m.streamResponse = ""
+	m.mdBuffer = MarkdownBuffer{}
+	m.streamToolGroups = nil
+	m.streamStep = 0
+	m.turnStartTime = time.Now()
+	m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
+	m.rebuildCollapsibles()
+	return m, m.runLLMStream(prompt)
 }
 
 func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
@@ -2451,38 +2513,40 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.showSuggestions = false
 		return m, nil
 
-	case strings.HasPrefix(input, "/skill:"):
+	case strings.HasPrefix(input, "$"):
 		skillName, skillArgs := parseSkillCommand(input)
+		if skillName == "" {
+			m.messages = append(m.messages, chatMessage{"user", input})
+			m.messages = append(m.messages, chatMessage{"system",
+				"Usage: $skill-name [args]. Type $ to browse skills."})
+			m.input = ""
+			m.cursor = 0
+			m.showSuggestions = false
+			return m, nil
+		}
 		if m.skillCatalog != nil {
 			if s := m.skillCatalog.Get(skillName); s != nil {
-				m.activeSkill = &activeSkillInfo{name: s.Name, args: skillArgs}
-				m.messages = append(m.messages, chatMessage{"user", input})
-				m.messages = append(m.messages, chatMessage{"system",
-					fmt.Sprintf("Skill loaded: %s", s.Name)})
-				m.input = ""
-				m.showSuggestions = false
-				// Build prompt: skill body + user args
-				prompt := s.Body
-				if skillArgs != "" {
-					prompt = s.Body + "\n\n---\n\n" + skillArgs
-				}
-				m.turnCount++
-				m.cancelCh = make(chan struct{})
-				m.streaming = true
-				m.streamThinking = ""
-				m.streamResponse = ""
-				m.mdBuffer = MarkdownBuffer{}
-				m.streamToolGroups = nil
-				m.streamStep = 0
-				m.turnStartTime = time.Now()
-				m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
-				m.rebuildCollapsibles()
-				return m, m.runLLMStream(prompt)
+				return m.executeSkill(s, skillArgs, input)
 			}
 		}
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"system",
-			fmt.Sprintf("Unknown skill: %s. Type / to see available skills.", skillName)})
+			fmt.Sprintf("Unknown skill: %s. Type $ to see available skills.", skillName)})
+		m.input = ""
+		m.cursor = 0
+		m.showSuggestions = false
+		return m, nil
+
+	case strings.HasPrefix(input, "/skill:"):
+		skillName, skillArgs := parseSkillCommand(input)
+		if m.skillCatalog != nil {
+			if s := m.skillCatalog.Get(skillName); s != nil {
+				return m.executeSkill(s, skillArgs, input)
+			}
+		}
+		m.messages = append(m.messages, chatMessage{"user", input})
+		m.messages = append(m.messages, chatMessage{"system",
+			fmt.Sprintf("Unknown skill: %s. Type /skill: to see available skills.", skillName)})
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false
@@ -2499,29 +2563,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				if parts := strings.SplitN(rawAfterSlash, " ", 2); len(parts) > 1 {
 					subArgs = strings.TrimSpace(parts[1])
 				}
-				m.activeSkill = &activeSkillInfo{name: s.Name, args: subArgs}
-				m.messages = append(m.messages, chatMessage{"user", input})
-				m.messages = append(m.messages, chatMessage{"system",
-					fmt.Sprintf("Skill loaded: %s", s.Name)})
-				m.input = ""
-				m.showSuggestions = false
-				// Build prompt: skill body + user args
-				prompt := s.Body
-				if subArgs != "" {
-					prompt = s.Body + "\n\n---\n\n" + subArgs
-				}
-				m.turnCount++
-				m.cancelCh = make(chan struct{})
-				m.streaming = true
-				m.streamThinking = ""
-				m.streamResponse = ""
-				m.mdBuffer = MarkdownBuffer{}
-				m.streamToolGroups = nil
-				m.streamStep = 0
-				m.turnStartTime = time.Now()
-				m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
-				m.rebuildCollapsibles()
-				return m, m.runLLMStream(prompt)
+				return m.executeSkill(s, subArgs, input)
 			}
 		}
 		m.messages = append(m.messages, chatMessage{"user", input})
@@ -2843,11 +2885,17 @@ func (m tuiModel) renderSuggestions() string {
 		sel = n - 1
 	}
 
-	// Calculate max name width (for alignment) across all suggestions
+	// Calculate max display width (for alignment) across all suggestions,
+	// accounting for the optional [Skill] label prefix.
+	const skillLabelW = 8 // len("[Skill] ")
 	maxNameW := 0
 	for _, s := range m.suggestions {
-		if len(s.name) > maxNameW {
-			maxNameW = len(s.name)
+		w := len(s.name)
+		if s.isSkill {
+			w += skillLabelW
+		}
+		if w > maxNameW {
+			maxNameW = w
 		}
 	}
 
@@ -2871,13 +2919,19 @@ func (m tuiModel) renderSuggestions() string {
 	for i := start; i < end; i++ {
 		s := m.suggestions[i]
 		name := s.name
-		pad := strings.Repeat(" ", maxNameW-len(name)+2)
+		// Show [Skill] prefix for skill entries
+		label := ""
+		if s.isSkill {
+			label = "[Skill] "
+		}
+		displayW := len(name) + len(label)
+		pad := strings.Repeat(" ", maxNameW-displayW+2)
 		if i == sel {
-			b.WriteString(fmt.Sprintf("  → %s%s%s\n",
-				strongStyle.Render(name), pad, primaryStyle.Render(s.desc)))
+			b.WriteString(fmt.Sprintf("  → %s%s%s%s\n",
+				dimStyle.Render(label), strongStyle.Render(name), pad, primaryStyle.Render(s.desc)))
 		} else {
-			b.WriteString(fmt.Sprintf("    %s%s%s\n",
-				textStyle.Render(name), pad, dimStyle.Render(s.desc)))
+			b.WriteString(fmt.Sprintf("    %s%s%s%s\n",
+				dimStyle.Render(label), textStyle.Render(name), pad, dimStyle.Render(s.desc)))
 		}
 	}
 
@@ -3315,7 +3369,7 @@ func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog, active *acti
 			skillLines = append(skillLines, line)
 		}
 		if len(skillLines) > 0 {
-			sb.WriteString("\n\n## Available Skills\nThe following skills can be invoked by the user via slash commands:\n")
+			sb.WriteString("\n\n## Available Skills\nThe following skills can be invoked via $skill-name or /skill:skill-name:\n")
 			sb.WriteString(strings.Join(skillLines, "\n"))
 		}
 	}

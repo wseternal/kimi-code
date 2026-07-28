@@ -106,10 +106,8 @@ func TestHandleKey_MultipleRunesAfterClear(t *testing.T) {
 	}
 }
 
-// TestParseSkillCommand verifies that /skill:name with arguments correctly
-// separates the skill name from the arguments. This reproduces the bug where
-// "/skill:interview-me how to improve" tried to look up a skill named
-// "interview-me how to improve" instead of "interview-me".
+// TestParseSkillCommand verifies that /skill:name and $name with arguments correctly
+// separates the skill name from the arguments.
 func TestParseSkillCommand(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -121,6 +119,10 @@ func TestParseSkillCommand(t *testing.T) {
 		{"/skill:dev-cycle", "dev-cycle", ""},
 		{"/skill:dev-cycle --verbose", "dev-cycle", "--verbose"},
 		{"/skill:my-skill arg1 arg2 arg3", "my-skill", "arg1 arg2 arg3"},
+		// $ prefix
+		{"$dev-cycle", "dev-cycle", ""},
+		{"$dev-cycle fix bugs", "dev-cycle", "fix bugs"},
+		{"$interview-me how to improve", "interview-me", "how to improve"},
 	}
 	for _, tt := range tests {
 		name, args := parseSkillCommand(tt.input)
@@ -130,6 +132,186 @@ func TestParseSkillCommand(t *testing.T) {
 		if args != tt.wantArgs {
 			t.Errorf("parseSkillCommand(%q) args = %q, want %q", tt.input, args, tt.wantArgs)
 		}
+	}
+}
+
+// TestUpdateSuggestions_DollarPrefix verifies that $ prefix triggers
+// skill-only autocomplete (no built-in commands).
+func TestUpdateSuggestions_DollarPrefix(t *testing.T) {
+	cat := skill.NewCatalog([]skill.Skill{
+		{Name: "dev-cycle", Description: "Dev cycle skill"},
+		{Name: "pr-review", Description: "PR review skill"},
+		{Name: "test-driven-development", Description: "TDD skill"},
+	})
+
+	m := tuiModel{
+		input:        "$dev",
+		skillCatalog: cat,
+	}
+	m.updateSuggestions()
+
+	if !m.showSuggestions {
+		t.Fatal("expected showSuggestions to be true for $dev")
+	}
+
+	// Only skills should appear, no built-in commands
+	if len(m.suggestions) != 1 {
+		t.Errorf("expected 1 suggestion for '$dev', got %d", len(m.suggestions))
+	}
+	if m.suggestions[0].name != "dev-cycle" {
+		t.Errorf("expected suggestion 'dev-cycle', got %q", m.suggestions[0].name)
+	}
+	if !m.suggestions[0].isSkill {
+		t.Error("expected isSkill = true for skill suggestion")
+	}
+
+	// $ alone should show all skills
+	m.input = "$"
+	m.updateSuggestions()
+	if len(m.suggestions) != 3 {
+		t.Errorf("expected 3 suggestions for '$', got %d", len(m.suggestions))
+	}
+}
+
+// TestHandleSubmit_DollarSkillRoutesThroughLLM verifies that $skill-name args
+// routes the skill body through runLLMStream().
+func TestHandleSubmit_DollarSkillRoutesThroughLLM(t *testing.T) {
+	cat := skill.NewCatalog([]skill.Skill{
+		{
+			Name:        "test-skill",
+			Description: "A test skill",
+			Body:        "# Test Skill\nFollow these instructions carefully.",
+		},
+	})
+
+	m := tuiModel{
+		input:        "$test-skill do something useful",
+		cursor:       40,
+		skillCatalog: cat,
+	}
+
+	result, cmd := m.handleSubmit()
+	rm := result.(tuiModel)
+
+	if !rm.streaming {
+		t.Error("expected streaming to be true after $ skill invocation")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil tea.Cmd (should route through runLLMStream)")
+	}
+	if rm.turnCount != 1 {
+		t.Errorf("turnCount = %d, want 1", rm.turnCount)
+	}
+}
+
+// TestHandleSubmit_DollarAloneShowsUsage verifies that submitting "$" alone
+// (with no skill name) shows a usage hint instead of "Unknown skill: .".
+func TestHandleSubmit_DollarAloneShowsUsage(t *testing.T) {
+	cat := skill.NewCatalog([]skill.Skill{
+		{Name: "dev-cycle", Description: "Dev cycle skill"},
+	})
+
+	m := tuiModel{
+		input:        "$",
+		cursor:       1,
+		skillCatalog: cat,
+	}
+
+	result, cmd := m.handleSubmit()
+	rm := result.(tuiModel)
+
+	if rm.streaming {
+		t.Error("$ alone should not start streaming")
+	}
+	if cmd != nil {
+		t.Error("$ alone should not return a tea.Cmd")
+	}
+
+	// Should show usage message, not "Unknown skill: ."
+	found := false
+	for _, msg := range rm.messages {
+		if msg.role == "system" && strings.Contains(msg.content, "Usage: $skill-name") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Usage: $skill-name' system message for $ alone")
+	}
+}
+
+// TestRenderSuggestions_MixedSkillAlignment verifies that when built-in
+// commands and skills are mixed in the suggestion list, descriptions
+// are aligned (the [Skill] label width is accounted for in padding).
+func TestRenderSuggestions_MixedSkillAlignment(t *testing.T) {
+	suggestions := []slashCommand{
+		{name: "help", desc: "Show help"},
+		{name: "dev-cycle", desc: "Dev cycle workflow", isSkill: true},
+	}
+
+	m := tuiModel{
+		suggestions:    suggestions,
+		selectedSuggest: 0,
+	}
+
+	out := m.renderSuggestions()
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+
+	// stripANSI removes ANSI escape sequences to compare visual columns.
+	stripANSI := func(s string) string {
+		var b strings.Builder
+		inEsc := false
+		for _, r := range s {
+			if r == '\x1b' {
+				inEsc = true
+				continue
+			}
+			if inEsc {
+				if r == 'm' {
+					inEsc = false
+				}
+				continue
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
+	}
+
+	plain0 := stripANSI(lines[0])
+	plain1 := stripANSI(lines[1])
+
+	// runeIndex returns the rune position of substr in s (not byte position).
+	runeIndex := func(s, substr string) int {
+		sRunes := []rune(s)
+		subRunes := []rune(substr)
+		for i := 0; i <= len(sRunes)-len(subRunes); i++ {
+			match := true
+			for j := range subRunes {
+				if sRunes[i+j] != subRunes[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return i
+			}
+		}
+		return -1
+	}
+
+	helpDescIdx := runeIndex(plain0, "Show help")
+	skillDescIdx := runeIndex(plain1, "Dev cycle workflow")
+	if helpDescIdx < 0 || skillDescIdx < 0 {
+		t.Fatalf("descriptions not found in stripped output:\n%q\n%q", plain0, plain1)
+	}
+
+	// Descriptions should start at the same visual column
+	if helpDescIdx != skillDescIdx {
+		t.Errorf("description alignment mismatch: builtin at col %d, skill at col %d\n%s",
+			helpDescIdx, skillDescIdx, out)
 	}
 }
 

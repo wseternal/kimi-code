@@ -178,6 +178,6 @@ func (r *CommandRegistry) renderHelp() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString("Type / to see available commands and skills.")
+	b.WriteString("Type / to see available commands. Skills: $skill-name or /skill:skill-name.")
 	return b.String()
 }
