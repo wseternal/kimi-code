@@ -2,8 +2,11 @@ package session
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/di"
@@ -159,9 +162,65 @@ func (ss *SessionStore) Fork(ctx context.Context, sourceID, newTitle string, mgr
 }
 
 // DeleteSession removes a session and its history from the store.
+// Order matters: history (messages) is deleted first so the session
+// directory still contains session.json when FileStore.Del cleans up
+// empty parent directories. Reversing the order could leave orphan files.
 func (ss *SessionStore) DeleteSession(ctx context.Context, id string) error {
 	if err := ss.history.Clear(ctx, id); err != nil {
 		return err
 	}
 	return ss.persist.Delete(ctx, id)
+}
+
+// PurgeEmptySessions removes all sessions that have no user messages.
+// A session is considered empty if the user never sent any messages.
+func (ss *SessionStore) PurgeEmptySessions(ctx context.Context) error {
+	ids, err := ss.persist.ListIDs(ctx)
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for _, id := range ids {
+		hasUser, err := ss.hasUserMessages(ctx, id)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("check session %s: %w", id, err))
+			continue
+		}
+		if !hasUser {
+			if err := ss.DeleteSession(ctx, id); err != nil {
+				errs = append(errs, fmt.Errorf("delete session %s: %w", id, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// hasUserMessages checks if a session has any user messages by reading the JSONL directly.
+func (ss *SessionStore) hasUserMessages(ctx context.Context, sessionID string) (bool, error) {
+	data, err := ss.store.Get(ctx, messagesKey(sessionID))
+	if err != nil {
+		if errors.Is(err, persistence.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	// Scan JSONL for user messages
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var msg struct {
+			Role string `json:"role"`
+		}
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			continue
+		}
+		if msg.Role == "user" {
+			return true, nil
+		}
+	}
+	return false, nil
 }

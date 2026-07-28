@@ -513,17 +513,49 @@ func (m *tuiModel) replayHistory() {
 			for _, tc := range msg.ToolCalls {
 				m.history = append(m.history, kosong.CreateToolMessage(tc.ID, tc.Result))
 			}
-			// Track token usage
-			m.contextMgr.AddTurnUsage(agentctx.TurnEstimate(msg.Content))
 		}
 	}
-	// Restore cumulative session usage from persisted metadata
+	// Restore cumulative session usage from persisted metadata.
+	// Use the real API token counts (persisted as tokens_in/tokens_out)
+	// for the context manager instead of text-based estimates, which
+	// drastically undercount the actual context window usage.
 	if m.sess.Metadata != nil {
+		var tokensIn, tokensOut int
 		if v, ok := metaInt(m.sess.Metadata, "tokens_in"); ok {
+			tokensIn = v
 			m.sessionUsage.InputOther = v
 		}
 		if v, ok := metaInt(m.sess.Metadata, "tokens_out"); ok {
+			tokensOut = v
 			m.sessionUsage.Output = v
+		}
+		if v, ok := metaInt(m.sess.Metadata, "cache_read"); ok {
+			m.sessionUsage.InputCacheRead = v
+			// Move cache tokens from InputOther to InputCacheRead
+			// so InputTotal() stays correct.
+			m.sessionUsage.InputOther -= v
+		}
+		if v, ok := metaInt(m.sess.Metadata, "cache_creation"); ok {
+			m.sessionUsage.InputCacheCreation = v
+			m.sessionUsage.InputOther -= v
+		}
+		// Guard against negative InputOther from corrupted metadata.
+		if m.sessionUsage.InputOther < 0 {
+			m.sessionUsage.InputOther = 0
+		}
+		// Use persisted real token counts for context window display.
+		// tokens_in is the cumulative API input across all turns;
+		// this matches what the live session showed before exit.
+		if tokensIn > 0 {
+			m.contextMgr.Reset()
+			m.contextMgr.AddTurnUsage(tokensIn + tokensOut)
+		} else if len(m.completedTurns) > 0 {
+			// Fallback for sessions persisted before real token tracking:
+			// use text-based estimates so the context bar isn't empty.
+			m.contextMgr.Reset()
+			for _, td := range m.completedTurns {
+				m.contextMgr.AddTurnUsage(agentctx.TurnEstimate(td.text))
+			}
 		}
 	}
 	m.rebuildCollapsibles()
@@ -1090,6 +1122,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sess.Metadata["turns"] = m.turnCount
 				m.sess.Metadata["tokens_in"] = m.sessionUsage.InputTotal()
 				m.sess.Metadata["tokens_out"] = m.sessionUsage.Output
+				if m.sessionUsage.InputCacheRead > 0 {
+					m.sess.Metadata["cache_read"] = m.sessionUsage.InputCacheRead
+				}
+				if m.sessionUsage.InputCacheCreation > 0 {
+					m.sess.Metadata["cache_creation"] = m.sessionUsage.InputCacheCreation
+				}
 				_ = m.app.SessionStore.Save(context.Background(), m.sess)
 			}
 

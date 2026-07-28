@@ -1,17 +1,21 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/agentcore/di"
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
+	"github.com/visdomtech/kimi-code/internal/persistence"
 )
 
 // handleKey is a helper that calls handleKey and type-asserts the result back to tuiModel.
@@ -1215,5 +1219,64 @@ func TestNewlineWithCtrlJ(t *testing.T) {
 	}
 	if got.cursor != 4 {
 		t.Errorf("cursor should advance to 4, got: %d", got.cursor)
+	}
+}
+
+// TestReplayHistory_RestoresContextUsage verifies that replayHistory uses
+// persisted real API token counts (tokens_in/tokens_out) for the context
+// manager instead of text-based estimates, which drastically undercount.
+func TestReplayHistory_RestoresContextUsage(t *testing.T) {
+	dir, err := os.MkdirTemp("", "replay-ctx-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	store, err := persistence.NewFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appScope := di.NewAppScope("test")
+	sessStore := session.NewSessionStore(store, appScope)
+	sessID := "sess-ctx-1"
+
+	// Create a session with persisted token metadata (real API counts)
+	sess, err := session.NewSession(sessID, "Test", appScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Metadata["tokens_in"] = 196800  // real API input tokens
+	sess.Metadata["tokens_out"] = 6300    // real API output tokens
+	if err := sessStore.Save(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add history messages
+	ctx := context.Background()
+	_ = sessStore.History().AddMessage(ctx, sessID, session.Message{Role: "user", Content: "Hello"})
+	_ = sessStore.History().AddMessage(ctx, sessID, session.Message{Role: "assistant", Content: "Hi there"})
+
+	// Create a tuiModel and replay history
+	m := tuiModel{
+		sessionID:  sessID,
+		sess:       sess,
+		app:        &App{SessionStore: sessStore},
+		contextMgr: agentctx.NewContextManager(262144),
+	}
+	m.replayHistory()
+
+	// Context manager should use persisted real tokens, not text estimates.
+	// Expected: tokens_in + tokens_out = 196800 + 6300 = 203100
+	got := m.contextMgr.CurrentUsage()
+	want := 196800 + 6300
+	if got != want {
+		t.Errorf("contextMgr.CurrentUsage() = %d, want %d", got, want)
+	}
+
+	// Verify display format shows ~203.1K, not ~2.4K
+	display := m.contextMgr.UsageDisplay()
+	if !strings.Contains(display, "203.1K") {
+		t.Errorf("UsageDisplay() = %q, want to contain '203.1K'", display)
 	}
 }

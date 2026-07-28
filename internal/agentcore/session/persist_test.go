@@ -268,3 +268,52 @@ func TestSessionStoreFork(t *testing.T) {
 		t.Errorf("forked messages = %d, want 2", len(msgs))
 	}
 }
+
+func TestPurgeEmptySessions(t *testing.T) {
+	dir, err := os.MkdirTemp("", "session-purge-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	store, err := persistence.NewFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appScope := di.NewAppScope("test")
+	mgr := NewManager(appScope)
+	ss := NewSessionStore(store, appScope)
+	mgr.SetStore(ss)
+	ctx := context.Background()
+
+	// Create 3 sessions: one empty, one with user messages, one with only assistant messages
+	empty, _ := mgr.Create(ctx, "empty", "Empty Session")
+	_ = ss.Save(ctx, empty)
+
+	withUser, _ := mgr.Create(ctx, "with-user", "With User")
+	_ = ss.History().AddMessage(ctx, "with-user", Message{Role: "user", Content: "Hello"})
+	_ = ss.History().AddMessage(ctx, "with-user", Message{Role: "assistant", Content: "Hi"})
+	_ = ss.Save(ctx, withUser)
+
+	onlyAssistant, _ := mgr.Create(ctx, "only-assistant", "Only Assistant")
+	_ = ss.History().AddMessage(ctx, "only-assistant", Message{Role: "assistant", Content: "Solo"})
+	_ = ss.Save(ctx, onlyAssistant)
+
+	// Purge empty sessions
+	if err := ss.PurgeEmptySessions(ctx); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// Verify: only "with-user" should remain
+	remaining, err := ss.ListAll(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Errorf("got %d sessions, want 1", len(remaining))
+	}
+	if len(remaining) > 0 && remaining[0].ID != "with-user" {
+		t.Errorf("remaining session ID = %q, want 'with-user'", remaining[0].ID)
+	}
+}

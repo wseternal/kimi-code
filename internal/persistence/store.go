@@ -88,14 +88,31 @@ func (s *FileStore) Set(_ context.Context, key string, value []byte) error {
 	return os.Rename(tmp, path)
 }
 
+// Del removes the value for a key and cleans up any empty parent
+// directories up to the store root. This is safe for the current key
+// layout (e.g. sessions/<id>/<file>) where each entity has its own
+// subdirectory. Callers storing keys in shared hierarchies should be
+// aware that intermediate directories may be removed if they become empty.
 func (s *FileStore) Del(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err := os.Remove(s.keyToPath(key))
+	path := s.keyToPath(key)
+	err := os.Remove(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	// Try to remove empty parent directories up to root.
+	dir := filepath.Dir(path)
+	for dir != s.root && dir != "." {
+		if err := os.Remove(dir); err != nil {
+			break // directory not empty or other error
+		}
+		dir = filepath.Dir(dir)
+	}
+	return nil
 }
 
 func (s *FileStore) Has(_ context.Context, key string) (bool, error) {

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -224,6 +225,10 @@ func (a *App) runTUI(resumeID string, continueLast bool) error {
 	if a.SessionStore != nil {
 		sess.SetStatus(session.StatusIdle)
 		_ = a.SessionStore.Save(context.Background(), sess)
+		// Purge empty sessions (including current if user never sent messages)
+		if err := a.SessionStore.PurgeEmptySessions(context.Background()); err != nil {
+			slog.Debug("purge empty sessions", "error", err)
+		}
 	}
 
 	return err

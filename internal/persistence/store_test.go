@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -71,6 +72,44 @@ func TestFileStoreGetSetDel(t *testing.T) {
 	// Del nonexistent is no-op
 	if err := store.Del(ctx, "key1"); err != nil {
 		t.Fatalf("Del nonexistent should be nil, got %v", err)
+	}
+}
+
+func TestFileStoreDelOrphanCleanup(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create nested keys that produce empty parent directories.
+	store.Set(ctx, "sessions/s1/session.json", []byte("meta"))
+	store.Set(ctx, "sessions/s1/messages.jsonl", []byte("msgs"))
+	store.Set(ctx, "sessions/s2/session.json", []byte("meta2"))
+
+	// Delete s1's messages: directory still has session.json, so no cleanup.
+	if err := store.Del(ctx, "sessions/s1/messages.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(store.root, "sessions", "s1")); err != nil {
+		t.Errorf("s1 directory should still exist (contains session.json): %v", err)
+	}
+
+	// Delete s1's session.json: s1 directory is now empty and should be removed.
+	if err := store.Del(ctx, "sessions/s1/session.json"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(store.root, "sessions", "s1")); !os.IsNotExist(err) {
+		t.Errorf("s1 directory should have been cleaned up, stat err = %v", err)
+	}
+	// sessions/ directory should still exist because s2 is still there.
+	if _, err := os.Stat(filepath.Join(store.root, "sessions")); err != nil {
+		t.Errorf("sessions directory should still exist (contains s2): %v", err)
+	}
+
+	// Delete s2: sessions/ directory becomes empty and should be removed.
+	if err := store.Del(ctx, "sessions/s2/session.json"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(store.root, "sessions")); !os.IsNotExist(err) {
+		t.Errorf("sessions directory should have been cleaned up, stat err = %v", err)
 	}
 }
 
