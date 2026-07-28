@@ -26,6 +26,7 @@ import (
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
+	"github.com/visdomtech/kimi-code/internal/audit"
 	"github.com/visdomtech/kimi-code/internal/kosong"
 	"github.com/visdomtech/kimi-code/internal/kosong/providers"
 	"github.com/visdomtech/kimi-code/internal/oauth"
@@ -293,6 +294,9 @@ type tuiModel struct {
 
 	// OAuth login cancellation
 	oauthCancel context.CancelFunc
+
+	// Audit trail
+	auditWriter *audit.Writer
 }
 
 // pickerEntry is a single model entry in the model picker.
@@ -380,6 +384,7 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 		contextMgr:   agentctx.NewContextManager(maxCtx),
 		goalTracker:  goal.NewTracker(),
 		inputHistory: inputHist,
+		auditWriter:  app.AuditWriter,
 	}
 }
 
@@ -752,6 +757,15 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 		// Add user message to history
 		m.history = append(m.history, kosong.CreateUserMessage(prompt))
 
+		// Record audit: LLM request
+		if m.auditWriter != nil {
+			m.auditWriter.Record(audit.AuditEvent{
+				SessionID: m.sessionID,
+				Type:      audit.EvtLLMRequest,
+				Data:      map[string]any{"prompt": prompt, "model": m.model},
+			})
+		}
+
 		ctx := context.Background()
 		systemPrompt := buildSystemPrompt(m.cwd, m.branch, m.skillCatalog, m.activeSkill)
 
@@ -786,10 +800,24 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 			batchFlush := func() {
 				if batchThink != "" {
 					ch <- streamEvent{kind: "think", text: batchThink}
+					if m.auditWriter != nil {
+						m.auditWriter.Record(audit.AuditEvent{
+							SessionID: m.sessionID,
+							Type:      audit.EvtLLMDeltaThink,
+							Data:      map[string]any{"text": batchThink},
+						})
+					}
 					batchThink = ""
 				}
 				if batchText != "" {
 					ch <- streamEvent{kind: "text", text: batchText}
+					if m.auditWriter != nil {
+						m.auditWriter.Record(audit.AuditEvent{
+							SessionID: m.sessionID,
+							Type:      audit.EvtLLMDeltaText,
+							Data:      map[string]any{"text": batchText},
+						})
+					}
 					batchText = ""
 				}
 			}
@@ -872,6 +900,13 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 			}
 
 			ch <- streamEvent{kind: "step_done", step: step}
+			if m.auditWriter != nil {
+				m.auditWriter.Record(audit.AuditEvent{
+					SessionID: m.sessionID,
+					Type:      audit.EvtLLMStepDone,
+					Data:      map[string]any{"step": step, "tool_calls": len(msg.ToolCalls)},
+				})
+			}
 
 			// If no tool calls, we're done
 			if len(msg.ToolCalls) == 0 {
@@ -889,6 +924,13 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 					argsStr = *tc.Arguments
 				}
 				ch <- streamEvent{kind: "tool_start", toolName: tc.Name, toolArgs: argsStr}
+				if m.auditWriter != nil {
+					m.auditWriter.Record(audit.AuditEvent{
+						SessionID: m.sessionID,
+						Type:      audit.EvtLLMToolCall,
+						Data:      map[string]any{"id": tc.ID, "name": tc.Name, "arguments": argsStr},
+					})
+				}
 
 				tool, ok := m.toolRegistry.Get(tc.Name)
 				if !ok {
@@ -921,11 +963,29 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 				}
 
 				ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: truncateOutput(result.Output), toolErr: result.IsError, toolDur: toolDur}
+				if m.auditWriter != nil {
+					m.auditWriter.Record(audit.AuditEvent{
+						SessionID: m.sessionID,
+						Type:      audit.EvtLLMToolResult,
+						Data: map[string]any{
+							"name":     tc.Name,
+							"result":   truncateOutput(result.Output),
+							"isError":  result.IsError,
+							"duration": toolDur.String(),
+						},
+					})
+				}
 				m.history = append(m.history, kosong.CreateToolMessage(tc.ID, result.Output))
 			}
 		}
 
 		ch <- streamEvent{kind: "done"}
+		if m.auditWriter != nil {
+			m.auditWriter.Record(audit.AuditEvent{
+				SessionID: m.sessionID,
+				Type:      audit.EvtLLMDone,
+			})
+		}
 	}()
 
 	return listenStream(ch)
@@ -1044,6 +1104,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, listenStream(m.streamCh)
 		case "error":
 			m.streaming = false
+			// Record audit: LLM error
+			if m.auditWriter != nil {
+				m.auditWriter.Record(audit.AuditEvent{
+					SessionID: m.sessionID,
+					Type:      audit.EvtLLMError,
+					Data:      map[string]any{"error": msg.text},
+				})
+			}
 			// /btw: reset side-query state so next prompt isn't affected
 			if m.btwMode {
 				m.history = m.history[:m.btwHistoryLen]
@@ -1058,6 +1126,19 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "usage":
 			if msg.usage != nil {
 				m.turnUsage = kosong.AddUsage(m.turnUsage, *msg.usage)
+				// Record audit: usage event
+				if m.auditWriter != nil {
+					m.auditWriter.Record(audit.AuditEvent{
+						SessionID: m.sessionID,
+						Type:      audit.EvtLLMUsage,
+						Data: map[string]any{
+							"input":  msg.usage.InputTotal(),
+							"output": msg.usage.Output,
+							"cache_read":    msg.usage.InputCacheRead,
+							"cache_creation": msg.usage.InputCacheCreation,
+						},
+					})
+				}
 			}
 			return m, listenStream(m.streamCh)
 		case "done":
@@ -1131,6 +1212,56 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.app.SessionStore.Save(context.Background(), m.sess)
 			}
 
+			// Record audit: turn completed
+			if m.auditWriter != nil {
+				var lastUserContent string
+				for i := len(m.messages) - 1; i >= 0; i-- {
+					if m.messages[i].role == "user" {
+						lastUserContent = m.messages[i].content
+						break
+					}
+				}
+				var toolRecs []audit.ToolCallRecord
+				for _, tg := range m.streamToolGroups {
+					toolRecs = append(toolRecs, audit.ToolCallRecord{
+						Name:      tg.name,
+						Arguments: tg.args,
+						Result:    tg.result,
+						IsError:   tg.isError,
+						Duration:  tg.duration,
+					})
+				}
+				var usageRec *audit.UsageRecord
+				if m.turnUsage.GrandTotal() > 0 {
+					usageRec = &audit.UsageRecord{
+						InputOther:         m.turnUsage.InputOther,
+						Output:             m.turnUsage.Output,
+						InputCacheRead:     m.turnUsage.InputCacheRead,
+						InputCacheCreation: m.turnUsage.InputCacheCreation,
+					}
+				}
+				m.auditWriter.Record(audit.AuditEvent{
+					SessionID: m.sessionID,
+					Type:      audit.EvtTurnCompleted,
+					Data: audit.TurnRecord{
+						Prompt:   lastUserContent,
+						Response: m.streamResponse,
+						Thinking: m.streamThinking,
+						Tools:    toolRecs,
+						Usage:    usageRec,
+					},
+				})
+				// Also persist session metadata to audit store
+				m.auditWriter.SaveSession(audit.SessionRecord{
+					ID:        m.sessionID,
+					Title:     m.sess.Title,
+					Status:    string(m.sess.Status),
+					CreatedAt: m.sess.CreatedAt,
+					UpdatedAt: time.Now(),
+					Metadata:  m.sess.Metadata,
+				})
+			}
+
 			// Clear streaming state
 			m.streamThinking = ""
 			m.streamResponse = ""
@@ -1191,6 +1322,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					default:
 						close(m.cancelCh)
 					}
+				}
+				if m.auditWriter != nil {
+					m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserCancel})
 				}
 				return m, nil
 			case msg.Code == tea.KeyTab:
@@ -1997,6 +2131,13 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Audit: record slash command
+	if strings.HasPrefix(input, "/") {
+		if m.auditWriter != nil {
+			m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserCommand, Data: map[string]any{"command": input}})
+		}
+	}
+
 	// Handle slash commands
 	switch {
 	case input == "exit" || input == "quit" || input == "/exit":
@@ -2014,6 +2155,15 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	case input == "/new":
 		newSess, err := m.app.SessionManager.Create(nil, fmt.Sprintf("session_%d", os.Getpid()), "Interactive Session")
 		if err == nil {
+			// Audit: record session switch and switch BadgerDB
+			if m.auditWriter != nil {
+				m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserSessionSwitch, Data: map[string]any{"from": m.sessionID, "to": newSess.ID, "reason": "/new"}})
+			}
+			home, _ := os.UserHomeDir()
+			if home != "" {
+				m.app.switchAuditStore(newSess.ID, home)
+				m.auditWriter = m.app.AuditWriter
+			}
 			m.sess = newSess
 			m.sessionID = newSess.ID
 			m.messages = nil
@@ -2641,6 +2791,11 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 		// Set up cancel channel for mid-turn interaction
 		m.cancelCh = make(chan struct{})
+
+		// Audit: record user input
+		if m.auditWriter != nil {
+			m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserInput, Data: map[string]any{"prompt": input, "model": m.model}})
+		}
 
 		if m.provider != nil {
 			m.streaming = true
@@ -3573,6 +3728,16 @@ func (m *tuiModel) resumeSession(id string) {
 	m.sess = sess
 	m.sessionID = sess.ID
 	sess.SetStatus(session.StatusIdle)
+
+	// Audit: record session switch and switch BadgerDB
+	if m.auditWriter != nil {
+		m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserSessionSwitch, Data: map[string]any{"to": sess.ID, "reason": "resume"}})
+	}
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		m.app.switchAuditStore(sess.ID, home)
+		m.auditWriter = m.app.AuditWriter
+	}
 
 	// Reset display state
 	m.messages = nil
