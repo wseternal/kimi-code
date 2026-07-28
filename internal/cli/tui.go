@@ -209,6 +209,7 @@ type tuiModel struct {
 	streamCh           chan streamEvent
 	streamThinking     string
 	streamResponse     string
+	mdBuffer           MarkdownBuffer
 	streamToolGroups   []toolGroup
 	streamStep         int
 	responseCursor     int // scroll offset in response view
@@ -252,6 +253,13 @@ type tuiModel struct {
 
 	// External editor mode
 	editorMode bool
+
+	// Editor temp file (used for /editor command)
+	editorTempFile string
+
+	// Input history
+	inputHistory *InputHistory
+	savedInput   string // saved input when navigating history
 
 	// Bash mode output
 	bashOutput string
@@ -297,6 +305,14 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 
 	permChain := permission.DefaultChain()
 
+	// Initialize input history
+	var inputHist *InputHistory
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		inputHist = NewInputHistory(filepath.Join(home, ".kimi-code"))
+		_ = inputHist.Load()
+	}
+
 	return tuiModel{
 		sessionID:    sess.ID,
 		version:      version,
@@ -315,6 +331,7 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 		prompter:     permission.NewPrompter(),
 		contextMgr:   agentctx.NewContextManager(0),
 		goalTracker:  goal.NewTracker(),
+		inputHistory: inputHist,
 	}
 }
 
@@ -469,7 +486,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 		m.history = append(m.history, kosong.CreateUserMessage(prompt))
 
 		ctx := context.Background()
-		systemPrompt := buildSystemPrompt(m.cwd, m.branch)
+		systemPrompt := buildSystemPrompt(m.cwd, m.branch, m.skillCatalog)
 
 		// Convert tool definitions
 		var kosongTools []kosong.Tool
@@ -638,6 +655,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursorBlink = !m.cursorBlink
 		return m, m.tickCursor()
 
+	case editorResultMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Editor error: %s", msg.err)})
+			return m, nil
+		}
+		if msg.content != "" {
+			m.input = msg.content
+			m.cursor = utf8.RuneCountInString(m.input)
+			m.messages = append(m.messages, chatMessage{"system", "Editor content loaded. Press Enter to submit."})
+		}
+		return m, nil
+
 	case streamEvent:
 		switch msg.kind {
 		case "think":
@@ -645,7 +674,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rebuildCollapsibles()
 			return m, listenStream(m.streamCh)
 		case "text":
-			m.streamResponse += msg.text
+			if safe, ok := m.mdBuffer.Push(msg.text); ok {
+				m.streamResponse += safe
+			}
 			return m, listenStream(m.streamCh)
 		case "tool_start":
 			m.streamToolGroups = append(m.streamToolGroups, toolGroup{
@@ -673,6 +704,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "done":
 			m.streaming = false
+			// Flush any remaining buffered markdown
+			m.streamResponse += m.mdBuffer.Flush()
 			// Remove the "Thinking..." placeholder
 			if len(m.messages) > 0 && m.messages[len(m.messages)-1].role == "system" && m.messages[len(m.messages)-1].content == "Thinking..." {
 				m.messages = m.messages[:len(m.messages)-1]
@@ -710,6 +743,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Clear streaming state
 			m.streamThinking = ""
 			m.streamResponse = ""
+			m.mdBuffer = MarkdownBuffer{}
 			m.streamToolGroups = nil
 			m.streamStep = 0
 			m.streamCh = nil
@@ -725,6 +759,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streaming = true
 				m.streamThinking = ""
 				m.streamResponse = ""
+				m.mdBuffer = MarkdownBuffer{}
 				m.streamToolGroups = nil
 				m.streamStep = 0
 				m.turnStartTime = time.Now()
@@ -909,6 +944,15 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if strings.ContainsRune(m.input, '\n') {
 			// Navigate between lines in multi-line input
 			m.moveCursorUp()
+		} else if m.inputHistory != nil {
+			// Navigate input history
+			if m.inputHistory.index == -1 {
+				m.savedInput = m.input
+			}
+			if prev, ok := m.inputHistory.Prev(); ok {
+				m.input = prev
+				m.cursor = utf8.RuneCountInString(m.input)
+			}
 		}
 		return m, nil
 
@@ -922,6 +966,17 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if strings.ContainsRune(m.input, '\n') {
 			// Navigate between lines in multi-line input
 			m.moveCursorDown()
+		} else if m.inputHistory != nil && m.inputHistory.index >= 0 {
+			// Navigate input history (newer)
+			if next, ok := m.inputHistory.Next(); ok {
+				m.input = next
+				m.cursor = utf8.RuneCountInString(m.input)
+			} else {
+				// Past the end — restore saved input
+				m.input = m.savedInput
+				m.savedInput = ""
+				m.cursor = utf8.RuneCountInString(m.input)
+			}
 		}
 		return m, nil
 
@@ -943,13 +998,20 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case msg.Type == tea.KeyRunes:
+		isPaste := len(msg.Runes) > 5 // paste detection: many runes at once
 		for _, r := range msg.Runes {
 			runes := []rune(m.input)
 			runes = append(runes[:m.cursor], append([]rune{r}, runes[m.cursor:]...)...)
 			m.input = string(runes)
 			m.cursor++
 		}
-		m.updateSuggestions()
+		if !isPaste {
+			m.updateSuggestions()
+		}
+		// Reset history navigation when typing
+		if m.inputHistory != nil {
+			m.inputHistory.ResetNavigation()
+		}
 		return m, nil
 
 	case msg.Type == tea.KeySpace:
@@ -1644,15 +1706,10 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case input == "/editor":
-		m.editorMode = !m.editorMode
-		if m.editorMode {
-			m.messages = append(m.messages, chatMessage{"system", "External editor mode enabled. Press Ctrl+G to open $EDITOR."})
-		} else {
-			m.messages = append(m.messages, chatMessage{"system", "External editor mode disabled."})
-		}
+		// Open external editor for composing a prompt
 		m.input = ""
 		m.showSuggestions = false
-		return m, nil
+		return m, m.launchEditor()
 
 	case strings.HasPrefix(input, "/effort"):
 		args := strings.TrimSpace(strings.TrimPrefix(input, "/effort"))
@@ -1742,6 +1799,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				m.streaming = true
 				m.streamThinking = ""
 				m.streamResponse = ""
+				m.mdBuffer = MarkdownBuffer{}
 				m.streamToolGroups = nil
 				m.streamStep = 0
 				m.turnStartTime = time.Now()
@@ -1807,15 +1865,31 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case strings.HasPrefix(input, "/skill:"):
-		skillName, _ := parseSkillCommand(input)
+		skillName, skillArgs := parseSkillCommand(input)
 		if m.skillCatalog != nil {
 			if s := m.skillCatalog.Get(skillName); s != nil {
 				m.messages = append(m.messages, chatMessage{"user", input})
 				m.messages = append(m.messages, chatMessage{"system",
-					fmt.Sprintf("Skill loaded: %s\n\n%s", s.Name, s.Body)})
+					fmt.Sprintf("Skill loaded: %s", s.Name)})
 				m.input = ""
 				m.showSuggestions = false
-				return m, nil
+				// Build prompt: skill body + user args
+				prompt := s.Body
+				if skillArgs != "" {
+					prompt = s.Body + "\n\n---\n\n" + skillArgs
+				}
+				m.turnCount++
+				m.cancelCh = make(chan struct{})
+				m.streaming = true
+				m.streamThinking = ""
+				m.streamResponse = ""
+				m.mdBuffer = MarkdownBuffer{}
+				m.streamToolGroups = nil
+				m.streamStep = 0
+				m.turnStartTime = time.Now()
+				m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
+				m.rebuildCollapsibles()
+				return m, m.runLLMStream(prompt)
 			}
 		}
 		m.messages = append(m.messages, chatMessage{"user", input})
@@ -1826,15 +1900,38 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case strings.HasPrefix(input, "/"):
-		subName := strings.TrimPrefix(input, "/")
+		rawAfterSlash := strings.TrimPrefix(input, "/")
+		// Extract the command name (first word) for sub-skill lookup
+		subName := strings.SplitN(rawAfterSlash, " ", 2)[0]
 		if m.skillCatalog != nil {
 			if s := m.skillCatalog.Get(subName); s != nil && s.IsSubSkill {
+				// Extract args after the sub-skill name
+				var subArgs string
+				if parts := strings.SplitN(rawAfterSlash, " ", 2); len(parts) > 1 {
+					subArgs = strings.TrimSpace(parts[1])
+				}
 				m.messages = append(m.messages, chatMessage{"user", input})
 				m.messages = append(m.messages, chatMessage{"system",
-					fmt.Sprintf("Skill loaded: %s\n\n%s", s.Name, s.Body)})
+					fmt.Sprintf("Skill loaded: %s", s.Name)})
 				m.input = ""
 				m.showSuggestions = false
-				return m, nil
+				// Build prompt: skill body + user args
+				prompt := s.Body
+				if subArgs != "" {
+					prompt = s.Body + "\n\n---\n\n" + subArgs
+				}
+				m.turnCount++
+				m.cancelCh = make(chan struct{})
+				m.streaming = true
+				m.streamThinking = ""
+				m.streamResponse = ""
+				m.mdBuffer = MarkdownBuffer{}
+				m.streamToolGroups = nil
+				m.streamStep = 0
+				m.turnStartTime = time.Now()
+				m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
+				m.rebuildCollapsibles()
+				return m, m.runLLMStream(prompt)
 			}
 		}
 		m.messages = append(m.messages, chatMessage{"user", input})
@@ -1845,6 +1942,11 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 	default:
 		// Regular prompt — route through LLM provider
+		// Save to input history
+		if m.inputHistory != nil {
+			m.inputHistory.Add(input)
+			_ = m.inputHistory.Save()
+		}
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.turnCount++
 		m.input = ""
@@ -1857,6 +1959,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.streaming = true
 			m.streamThinking = ""
 			m.streamResponse = ""
+			m.mdBuffer = MarkdownBuffer{}
 			m.streamToolGroups = nil
 			m.streamStep = 0
 			m.turnStartTime = time.Now()
@@ -2029,9 +2132,9 @@ func (m tuiModel) renderMessages() string {
 					b.WriteString("\n")
 				}
 			}
-			// Render response text
+			// Render response text with markdown
 			if msg.content != "" {
-				b.WriteString(textStyle.Render(msg.content) + "\n\n")
+				b.WriteString(renderMarkdown(msg.content, m.width-4) + "\n\n")
 			}
 		case "system":
 			b.WriteString(warningStyle.Render("⚠ ") + dimStyle.Render(msg.content) + "\n\n")
@@ -2129,9 +2232,9 @@ func (m tuiModel) renderStreaming() string {
 		b.WriteString("\n")
 	}
 
-	// Response text (streaming)
+	// Response text (streaming) — render with markdown
 	if m.streamResponse != "" {
-		b.WriteString(textStyle.Render(m.streamResponse))
+		b.WriteString(renderMarkdown(m.streamResponse, m.width-4))
 		if m.streaming {
 			b.WriteString(dimStyle.Render("▌")) // streaming cursor
 		}
@@ -2319,11 +2422,12 @@ func getGitBranch(cwd string) string {
 }
 
 // buildSystemPrompt creates a context-aware system prompt for the LLM.
-func buildSystemPrompt(cwd, branch string) string {
+// It includes environment info, tool usage guidelines, and available skills.
+func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog) string {
 	osName := runtime.GOOS
 	arch := runtime.GOARCH
 
-	return fmt.Sprintf(`You are a helpful AI coding assistant with access to tools for file operations, code search, and shell commands.
+	prompt := fmt.Sprintf(`You are a helpful AI coding assistant with access to tools for file operations, code search, and shell commands.
 
 ## Environment
 - Working directory: %s
@@ -2344,15 +2448,40 @@ func buildSystemPrompt(cwd, branch string) string {
 - Use specific, targeted edits rather than rewriting entire files
 - Explain what you're doing and why
 - If a task requires multiple steps, plan them out first`, cwd, osName, arch, branch)
+
+	// Append available skills section
+	if skillCat != nil {
+		var skillLines []string
+		for _, s := range skillCat.List() {
+			if !s.IsUserActivatable() {
+				continue
+			}
+			line := fmt.Sprintf("- **%s**: %s", s.Name, s.Description)
+			if s.WhenToUse != "" {
+				line += fmt.Sprintf(" (use when: %s)", s.WhenToUse)
+			}
+			skillLines = append(skillLines, line)
+		}
+		if len(skillLines) > 0 {
+			prompt += "\n\n## Available Skills\nThe following skills can be invoked by the user via slash commands:\n" + strings.Join(skillLines, "\n")
+		}
+	}
+
+	return prompt
 }
 
-// truncateOutput truncates tool output to a reasonable display size.
+// truncateOutput truncates tool output using a head/tail pattern.
+// For outputs exceeding 20 lines, it shows the first 10 and last 10 lines
+// with a summary of hidden lines in between (matching goose's pattern).
 func truncateOutput(output string) string {
-	const maxLen = 500
-	if len(output) <= maxLen {
+	lines := strings.Split(output, "\n")
+	const maxLines = 20
+	if len(lines) <= maxLines {
 		return output
 	}
-	return output[:maxLen] + fmt.Sprintf("\n... (truncated, %d bytes total)", len(output))
+	head := strings.Join(lines[:10], "\n")
+	tail := strings.Join(lines[len(lines)-10:], "\n")
+	return fmt.Sprintf("%s\n... (%d lines hidden, %d bytes total)\n%s", head, len(lines)-maxLines, len(output), tail)
 }
 
 // ── Model Picker ──
@@ -2671,6 +2800,98 @@ func (m tuiModel) renderModelPicker() string {
 
 // ── Simple TUI fallback (for non-interactive stdin) ──
 
+// editorResultMsg is sent when the external editor exits.
+type editorResultMsg struct {
+	content string
+	err     error
+}
+
+// launchEditor opens an external text editor for composing a prompt.
+// It uses tea.ExecProcess to suspend the TUI while the editor runs.
+func (m *tuiModel) launchEditor() tea.Cmd {
+	editorCmd := resolveEditorCommand()
+
+	// Build recent context
+	var recentCtx string
+	if len(m.messages) > 0 {
+		var lines []string
+		start := len(m.messages) - 6
+		if start < 0 {
+			start = 0
+		}
+		for _, msg := range m.messages[start:] {
+			content := msg.content
+			if len(content) > 100 {
+				content = content[:100] + "..."
+			}
+			lines = append(lines, fmt.Sprintf("%s: %s", msg.role, content))
+		}
+		recentCtx = strings.Join(lines, "\n")
+	}
+
+	// Create temp file with template
+	f, err := os.CreateTemp("", "kimi-code-prompt-*.md")
+	if err != nil {
+		return func() tea.Msg {
+			return editorResultMsg{err: err}
+		}
+	}
+	tmpPath := f.Name()
+
+	var tmpl strings.Builder
+	tmpl.WriteString("# Write your prompt below (lines starting with # are comments):\n\n")
+	if m.input != "" {
+		tmpl.WriteString(m.input + "\n")
+	}
+	if recentCtx != "" {
+		tmpl.WriteString("\n---\n# Recent conversation:\n")
+		for _, line := range strings.Split(recentCtx, "\n") {
+			tmpl.WriteString("# " + line + "\n")
+		}
+	}
+	f.WriteString(tmpl.String())
+	f.Close()
+
+	// Store path for reading after editor exits
+	m.editorTempFile = tmpPath
+
+	// Use tea.ExecProcess to suspend TUI and run editor
+	args := strings.Fields(editorCmd)
+	cmd := exec.Command(args[0], append(args[1:], tmpPath)...)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		defer os.Remove(tmpPath)
+		if err != nil {
+			return editorResultMsg{err: err}
+		}
+		data, readErr := os.ReadFile(tmpPath)
+		if readErr != nil {
+			return editorResultMsg{err: readErr}
+		}
+		// Extract user content: remove comment lines
+		var result strings.Builder
+		for _, line := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if trimmed == "---" {
+				break
+			}
+			result.WriteString(line)
+			result.WriteString("\n")
+		}
+		return editorResultMsg{content: strings.TrimSpace(result.String())}
+	})
+}
+
+// truncateStr truncates a string to maxLen characters.
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 func (a *App) runSimpleTUI(sess *session.Session) error {
 	cwd, _ := os.Getwd()
 	version := BuildVersion()
@@ -2708,7 +2929,12 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	permChain := permission.DefaultChain()
 
 	branch := getGitBranch(skill.FindProjectRoot(cwd))
-	systemPrompt := buildSystemPrompt(cwd, branch)
+	// Discover skills for simple mode
+	var skillCat *skill.Catalog
+	if cat, err := skill.Discover(cwd); err == nil {
+		skillCat = cat
+	}
+	systemPrompt := buildSystemPrompt(cwd, branch, skillCat)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	var history []kosong.Message

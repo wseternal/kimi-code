@@ -86,6 +86,19 @@ func (c *Catalog) Get(name string) *Skill {
 // Len returns the number of discovered skills.
 func (c *Catalog) Len() int { return len(c.skills) }
 
+// NewCatalog creates a Catalog from a pre-built list of skills.
+// This is primarily useful for testing; production code should use Discover.
+func NewCatalog(skills []Skill) *Catalog {
+	cat := &Catalog{skills: make(map[string]Skill), order: make([]string, 0, len(skills))}
+	for _, s := range skills {
+		if _, exists := cat.skills[s.Name]; !exists {
+			cat.skills[s.Name] = s
+			cat.order = append(cat.order, s.Name)
+		}
+	}
+	return cat
+}
+
 // Discover walks project and user directories looking for skill definitions.
 // It follows the TS scanner's search root resolution:
 //  1. <projectRoot>/.kimi-code/skills  (project)

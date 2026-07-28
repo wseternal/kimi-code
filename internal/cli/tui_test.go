@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
 )
 
 // handleKey is a helper that calls handleKey and type-asserts the result back to tuiModel.
@@ -122,5 +125,76 @@ func TestParseSkillCommand(t *testing.T) {
 		if args != tt.wantArgs {
 			t.Errorf("parseSkillCommand(%q) args = %q, want %q", tt.input, args, tt.wantArgs)
 		}
+	}
+}
+
+// TestHandleSubmit_SkillRoutesThroughLLM verifies that /skill:name args
+// routes the skill body through runLLMStream() instead of just displaying it.
+func TestHandleSubmit_SkillRoutesThroughLLM(t *testing.T) {
+	cat := skill.NewCatalog([]skill.Skill{
+		{
+			Name:        "test-skill",
+			Description: "A test skill",
+			Body:        "# Test Skill\nFollow these instructions carefully.",
+		},
+	})
+
+	m := tuiModel{
+		input:        "/skill:test-skill do something useful",
+		cursor:       40,
+		skillCatalog: cat,
+	}
+
+	result, cmd := m.handleSubmit()
+	rm := result.(tuiModel)
+
+	if !rm.streaming {
+		t.Error("expected streaming to be true after skill invocation")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil tea.Cmd (should route through runLLMStream)")
+	}
+	if rm.turnCount != 1 {
+		t.Errorf("turnCount = %d, want 1", rm.turnCount)
+	}
+	// Verify a "Skill loaded" system message was added
+	found := false
+	for _, msg := range rm.messages {
+		if msg.role == "system" && strings.Contains(msg.content, "Skill loaded: test-skill") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Skill loaded: test-skill' system message")
+	}
+}
+
+// TestHandleSubmit_SubSkillRoutesThroughLLM verifies that /subskill-name args
+// routes the sub-skill body through runLLMStream().
+func TestHandleSubmit_SubSkillRoutesThroughLLM(t *testing.T) {
+	cat := skill.NewCatalog([]skill.Skill{
+		{
+			Name:        "review.slop",
+			Description: "Sub-skill for slop review",
+			IsSubSkill:  true,
+			Body:        "# Slop Review\nCheck for slop patterns.",
+		},
+	})
+
+	m := tuiModel{
+		input:        "/review.slop check this code",
+		cursor:       30,
+		skillCatalog: cat,
+	}
+
+	result, cmd := m.handleSubmit()
+	rm := result.(tuiModel)
+
+	if !rm.streaming {
+		t.Error("expected streaming to be true after sub-skill invocation")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil tea.Cmd for sub-skill")
 	}
 }
