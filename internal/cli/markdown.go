@@ -1,10 +1,11 @@
 package cli
 
 import (
+	"os"
 	"sync"
 
 	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // markdownRenderer is a cached glamour renderer for a given theme.
@@ -26,7 +27,7 @@ func renderMarkdown(content string, width int) string {
 	if width <= 0 {
 		width = 80
 	}
-	dark := lipgloss.HasDarkBackground()
+	dark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
 
 	r := mdRenderer.get(dark, width)
 	if r == nil {

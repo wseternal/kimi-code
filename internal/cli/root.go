@@ -1,15 +1,13 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
@@ -197,11 +195,8 @@ func (a *App) runTUI(resumeID string, continueLast bool) error {
 		model.replayHistory()
 	}
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithInput(&shiftEnterReader{r: os.Stdin}))
+	p := tea.NewProgram(model)
 	_, err = p.Run()
-
-	// Ensure modifyOtherKeys is disabled on exit (safety net).
-	fmt.Fprint(os.Stdout, "\x1b[>4m")
 
 	// Save session on exit
 	if a.SessionStore != nil {
@@ -240,84 +235,3 @@ func resolveSessionsDir() string {
 
 // unused but available for future subcommand routing
 var _ = strings.TrimSpace
-
-// shiftEnterReader wraps an io.Reader (typically stdin) and translates the
-// xterm modifyOtherKeys escape sequence for Shift+Enter (\x1b[13;2~) into a
-// line-feed byte (\n / Ctrl+J), which bubbletea recognises as KeyCtrlJ.
-//
-// It also implements the term.File interface (Fd/Write/Close) so that
-// bubbletea can put the underlying TTY into raw mode.
-type shiftEnterReader struct {
-	r   io.Reader
-	buf []byte
-}
-
-// Fd returns the file descriptor of the underlying reader (if it is a
-// *os.File). This satisfies the term.File interface required by bubbletea
-// to enter raw mode.
-func (s *shiftEnterReader) Fd() uintptr {
-	if f, ok := s.r.(*os.File); ok {
-		return f.Fd()
-	}
-	return 0
-}
-
-// Write delegates to the underlying reader if it supports writing.
-func (s *shiftEnterReader) Write(p []byte) (int, error) {
-	if w, ok := s.r.(io.Writer); ok {
-		return w.Write(p)
-	}
-	return 0, fmt.Errorf("shiftEnterReader: underlying reader does not support Write")
-}
-
-// Close delegates to the underlying reader if it supports closing.
-func (s *shiftEnterReader) Close() error {
-	if c, ok := s.r.(io.Closer); ok {
-		return c.Close()
-	}
-	return nil
-}
-
-// shiftEnterSeq is the CSI sequence emitted by terminals with modifyOtherKeys
-// level 2 when Shift+Enter is pressed.
-var shiftEnterSeq = []byte("\x1b[13;2~")
-
-func (s *shiftEnterReader) Read(p []byte) (int, error) {
-	n, err := s.r.Read(p)
-	if n > 0 {
-		s.buf = append(s.buf, p[:n]...)
-	}
-	if len(s.buf) == 0 {
-		return 0, err
-	}
-	copyN := len(s.buf)
-	if copyN > len(p) {
-		copyN = len(p)
-	}
-	copy(p, s.buf[:copyN])
-	s.buf = s.buf[copyN:]
-
-	// Hold back trailing bytes that could be a partial prefix of the
-	// Shift+Enter sequence. Without this, a 7-byte sequence split across
-	// two reads would pass through untranslated.
-	for prefixLen := len(shiftEnterSeq) - 1; prefixLen > 0; prefixLen-- {
-		if copyN >= prefixLen && bytes.Equal(p[copyN-prefixLen:copyN], shiftEnterSeq[:prefixLen]) {
-			s.buf = append(s.buf, p[copyN-prefixLen:copyN]...)
-			copyN -= prefixLen
-			break
-		}
-	}
-
-	// Translate Shift+Enter sequence → LF (Ctrl+J).
-	for {
-		idx := bytes.Index(p[:copyN], shiftEnterSeq)
-		if idx == -1 {
-			break
-		}
-		// Replace the 7-byte sequence with a single LF byte.
-		p[idx] = '\n'
-		tail := copy(p[idx+1:], p[idx+len(shiftEnterSeq):copyN])
-		copyN = idx + 1 + tail
-	}
-	return copyN, err
-}

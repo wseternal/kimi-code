@@ -15,8 +15,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/background"
@@ -109,7 +109,7 @@ func init() {
 
 func initTheme() {
 	t := darkTheme
-	if !lipgloss.HasDarkBackground() {
+	if !lipgloss.HasDarkBackground(os.Stdin, os.Stdout) {
 		t = lightTheme
 	}
 
@@ -799,22 +799,10 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 
 func (m tuiModel) Init() tea.Cmd {
 	return tea.Batch(
-		tea.WindowSize(),
+		tea.RequestWindowSize,
 		m.tickCursor(),
-		// Enable xterm modifyOtherKeys level 2 so the terminal sends a
-		// distinguishable escape sequence for Shift+Enter (\x1b[13;2~).
-		// The shiftEnterReader in root.go translates this to Ctrl+J (LF).
-		func() tea.Msg { return enableModifyOtherKeysMsg{} },
 	)
 }
-
-// enableModifyOtherKeysMsg is an internal message that triggers the terminal
-// escape sequence to enable modifyOtherKeys level 2.
-type enableModifyOtherKeysMsg struct{}
-
-// disableModifyOtherKeysMsg is an internal message that triggers the terminal
-// escape sequence to disable modifyOtherKeys.
-type disableModifyOtherKeysMsg struct{}
 
 // cursorTickMsg is sent periodically to toggle cursor visibility.
 type cursorTickMsg struct{}
@@ -829,10 +817,6 @@ func (m tuiModel) tickCursor() tea.Cmd {
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case enableModifyOtherKeysMsg:
-		return m, tea.Printf("\x1b[>4;2m")
-	case disableModifyOtherKeysMsg:
-		return m, tea.Printf("\x1b[>4m")
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -1008,18 +992,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.quitting {
 			return m, nil
 		}
 		if m.streaming {
 			m.clampCursor() // guard against stale cursor after input clear
 			// Allow collapse navigation during streaming
-			switch msg.Type {
-			case tea.KeyCtrlC:
+			switch {
+			case msg.Code == '\x03': // ctrl+c
 				m.quitting = true
 				return m, tea.Quit
-			case tea.KeyEscape:
+			case msg.Code == tea.KeyEscape:
 				// Cancel the current stream
 				if m.cancelCh != nil {
 					select {
@@ -1029,36 +1013,32 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return m, nil
-			case tea.KeyTab:
+			case msg.Code == tea.KeyTab:
 				m.toggleFocusedCollapse()
 				return m, nil
-			case tea.KeyEnter:
+			case msg.Code == tea.KeyEnter:
 				m.toggleFocusedCollapse()
 				return m, nil
-			case tea.KeyUp:
+			case msg.Code == tea.KeyUp:
 				if m.focusIndex > 0 {
 					m.focusIndex--
 				}
 				return m, nil
-			case tea.KeyDown:
+			case msg.Code == tea.KeyDown:
 				if m.focusIndex < len(m.collapsibles)-1 {
 					m.focusIndex++
 				}
 				return m, nil
-			case tea.KeyRunes:
-				// Queue message during streaming (Cycle 5: mid-turn interaction)
-				if msg.String() != "" {
-					// Start capturing input for queued message
-					for _, r := range msg.Runes {
+			default:
+				// Queue printable text during streaming
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						runes := []rune(m.input)
 						runes = append(runes[:m.cursor], append([]rune{r}, runes[m.cursor:]...)...)
 						m.input = string(runes)
 						m.cursor++
 					}
 				}
-				return m, nil
-			default:
-				// Ignore other input during streaming
 				return m, nil
 			}
 		}
@@ -1073,7 +1053,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Reset cursor blink on any key
 	m.cursorBlink = false
 	// Clamp cursor to valid range — guards against stale cursor after
@@ -1081,17 +1061,13 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.clampCursor()
 
 	switch {
-	// ── Quit ──
-	case msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyCtrlD:
+	// ── Quit (Ctrl+C / Ctrl+D) ──
+	case msg.Code == '\x03' || msg.Code == '\x04':
 		m.quitting = true
-		return m, tea.Batch(
-			// Disable modifyOtherKeys before exiting.
-			func() tea.Msg { return disableModifyOtherKeysMsg{} },
-			tea.Quit,
-		)
+		return m, tea.Quit
 
-	// ── Newline (Alt+Enter / Option+Enter / Ctrl+J / Shift+Enter) ──
-	case msg.Type == tea.KeyEnter && msg.Alt, msg.Type == tea.KeyCtrlJ:
+	// ── Newline (Alt+Enter / Shift+Enter) ──
+	case msg.Code == tea.KeyEnter && (msg.Mod&tea.ModAlt != 0 || msg.Mod&tea.ModShift != 0):
 		runes := []rune(m.input)
 		runes = append(runes[:m.cursor], append([]rune{'\n'}, runes[m.cursor:]...)...)
 		m.input = string(runes)
@@ -1100,53 +1076,53 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// ── Submit ──
-	case msg.Type == tea.KeyEnter:
+	case msg.Code == tea.KeyEnter:
 		return m.handleSubmit()
 
 	// ── Open external editor (Ctrl+G) ──
-	case msg.Type == tea.KeyCtrlG:
+	case msg.Code == '\x07':
 		return m, m.launchEditor()
 
 	// ── Readline: Ctrl+A (start of line) ──
-	case msg.Type == tea.KeyCtrlA:
+	case msg.Code == '\x01':
 		m.cursor = 0
 		return m, nil
 
 	// ── Readline: Ctrl+E (end of line) ──
-	case msg.Type == tea.KeyCtrlE:
+	case msg.Code == '\x05':
 		m.cursor = utf8.RuneCountInString(m.input)
 		return m, nil
 
 	// ── Readline: Ctrl+K (kill to end) ──
-	case msg.Type == tea.KeyCtrlK:
+	case msg.Code == '\x0b':
 		runes := []rune(m.input)
 		m.input = string(runes[:m.cursor])
 		return m, nil
 
 	// ── Readline: Ctrl+U (kill to start) ──
-	case msg.Type == tea.KeyCtrlU:
+	case msg.Code == '\x15':
 		runes := []rune(m.input)
 		m.input = string(runes[m.cursor:])
 		m.cursor = 0
 		return m, nil
 
 	// ── Readline: Ctrl+W (delete word backward) ──
-	case msg.Type == tea.KeyCtrlW:
+	case msg.Code == '\x17':
 		m.deleteWordBackward()
 		return m, nil
 
-	// ── Readline: Alt+B / Ctrl+B (word back) ──
-	case msg.Type == tea.KeyCtrlB || (msg.Alt && msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && msg.Runes[0] == 'b'):
+	// ── Readline: Ctrl+B / Alt+B (word back) ──
+	case msg.Code == '\x02' || (msg.Mod&tea.ModAlt != 0 && msg.Text == "b"):
 		m.moveWordBackward()
 		return m, nil
 
-	// ── Readline: Alt+F / Ctrl+F (word forward) ──
-	case msg.Type == tea.KeyCtrlF || (msg.Alt && msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && msg.Runes[0] == 'f'):
+	// ── Readline: Ctrl+F / Alt+F (word forward) ──
+	case msg.Code == '\x06' || (msg.Mod&tea.ModAlt != 0 && msg.Text == "f"):
 		m.moveWordForward()
 		return m, nil
 
 	// ── Backspace (delete at cursor) ──
-	case msg.Type == tea.KeyBackspace:
+	case msg.Code == tea.KeyBackspace:
 		if m.cursor > 0 {
 			runes := []rune(m.input)
 			runes = append(runes[:m.cursor-1], runes[m.cursor:]...)
@@ -1157,7 +1133,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// ── Delete (forward) ──
-	case msg.Type == tea.KeyDelete:
+	case msg.Code == tea.KeyDelete:
 		runes := []rune(m.input)
 		if m.cursor < len(runes) {
 			runes = append(runes[:m.cursor], runes[m.cursor+1:]...)
@@ -1167,14 +1143,14 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// ── Left arrow ──
-	case msg.Type == tea.KeyLeft:
+	case msg.Code == tea.KeyLeft:
 		if m.cursor > 0 {
 			m.cursor--
 		}
 		return m, nil
 
 	// ── Right arrow ──
-	case msg.Type == tea.KeyRight:
+	case msg.Code == tea.KeyRight:
 		runeCount := utf8.RuneCountInString(m.input)
 		if m.cursor < runeCount {
 			m.cursor++
@@ -1182,7 +1158,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// ── Up arrow ──
-	case msg.Type == tea.KeyUp:
+	case msg.Code == tea.KeyUp:
 		if m.showSuggestions && len(m.suggestions) > 0 {
 			m.selectedSuggest--
 			if m.selectedSuggest < 0 {
@@ -1207,7 +1183,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// ── Down arrow ──
-	case msg.Type == tea.KeyDown:
+	case msg.Code == tea.KeyDown:
 		if m.showSuggestions && len(m.suggestions) > 0 {
 			m.selectedSuggest++
 			if m.selectedSuggest >= len(m.suggestions) {
@@ -1237,14 +1213,14 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// ── Scroll (PgUp / PgDown) ──
-	case msg.Type == tea.KeyPgUp:
+	case msg.Code == tea.KeyPgUp:
 		visibleH := m.height - 4
 		if visibleH < 1 {
 			visibleH = 1
 		}
 		m.scrollOffset += visibleH / 2
 		return m, nil
-	case msg.Type == tea.KeyPgDown:
+	case msg.Code == tea.KeyPgDown:
 		visibleH := m.height - 4
 		if visibleH < 1 {
 			visibleH = 1
@@ -1256,7 +1232,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// ── Tab ──
-	case msg.Type == tea.KeyTab:
+	case msg.Code == tea.KeyTab:
 		if m.showSuggestions && len(m.suggestions) > 0 {
 			// autocomplete
 			m.input = "/" + m.suggestions[m.selectedSuggest].name
@@ -1268,13 +1244,23 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case msg.Type == tea.KeyEscape:
+	case msg.Code == tea.KeyEscape:
 		m.showSuggestions = false
 		return m, nil
 
-	case msg.Type == tea.KeyRunes:
-		isPaste := len(msg.Runes) > 5 // paste detection: many runes at once
-		for _, r := range msg.Runes {
+	// ── Space ──
+	case msg.Code == tea.KeySpace:
+		runes := []rune(m.input)
+		runes = append(runes[:m.cursor], append([]rune{' '}, runes[m.cursor:]...)...)
+		m.input = string(runes)
+		m.cursor++
+		m.showSuggestions = false
+		return m, nil
+
+	// ── Printable text ──
+	case msg.Text != "":
+		isPaste := utf8.RuneCountInString(msg.Text) > 5 // paste detection
+		for _, r := range msg.Text {
 			runes := []rune(m.input)
 			runes = append(runes[:m.cursor], append([]rune{r}, runes[m.cursor:]...)...)
 			m.input = string(runes)
@@ -1287,14 +1273,6 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.inputHistory != nil {
 			m.inputHistory.ResetNavigation()
 		}
-		return m, nil
-
-	case msg.Type == tea.KeySpace:
-		runes := []rune(m.input)
-		runes = append(runes[:m.cursor], append([]rune{' '}, runes[m.cursor:]...)...)
-		m.input = string(runes)
-		m.cursor++
-		m.showSuggestions = false
 		return m, nil
 	}
 
@@ -2431,15 +2409,15 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 // ── View ──
 
-func (m tuiModel) View() string {
+func (m tuiModel) View() tea.View {
 	if m.quitting {
-		return "Goodbye!\n"
+		return tea.NewView("Goodbye!\n")
 	}
 	if m.showSessionPicker {
-		return m.renderSessionPicker()
+		return tea.NewView(m.renderSessionPicker())
 	}
 	if m.showModelPicker {
-		return m.renderModelPicker()
+		return tea.NewView(m.renderModelPicker())
 	}
 	if m.width == 0 {
 		m.width = 80
@@ -2537,7 +2515,9 @@ func (m tuiModel) View() string {
 	result.WriteString("\n")
 	result.WriteString(statusBarRendered)
 
-	return result.String()
+	v := tea.NewView(result.String())
+	v.AltScreen = true
+	return v
 }
 
 func (m tuiModel) renderWelcome() string {
@@ -3236,9 +3216,9 @@ func (m *tuiModel) openSessionPicker() {
 }
 
 // handleSessionPickerKey handles keyboard input for the session picker.
-func (m tuiModel) handleSessionPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC:
+func (m tuiModel) handleSessionPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.Code {
+	case '\x03': // ctrl+c
 		m.quitting = true
 		return m, tea.Quit
 
@@ -3454,11 +3434,11 @@ func (m tuiModel) providerNames() []string {
 	return names
 }
 
-func (m tuiModel) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m tuiModel) handlePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	filtered := m.filteredPickerModels()
 
-	switch msg.Type {
-	case tea.KeyCtrlC:
+	switch msg.Code {
+	case '\x03': // ctrl+c
 		m.quitting = true
 		return m, tea.Quit
 
@@ -3537,20 +3517,19 @@ func (m tuiModel) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyRunes:
-		for _, r := range msg.Runes {
-			m.pickerSearch += string(r)
-		}
-		m.pickerSelected = 0
-		return m, nil
-
 	case tea.KeySpace:
 		m.pickerSearch += " "
 		m.pickerSelected = 0
 		return m, nil
-	}
 
-	return m, nil
+	default:
+		// Printable text for picker search
+		if msg.Text != "" {
+			m.pickerSearch += msg.Text
+			m.pickerSelected = 0
+		}
+		return m, nil
+	}
 }
 
 func (m *tuiModel) cycleEffort(dir int) {
@@ -3740,15 +3719,10 @@ func (m *tuiModel) launchEditor() tea.Cmd {
 	m.editorTempFile = tmpPath
 
 	// Use tea.ExecProcess to suspend TUI and run editor.
-	// Disable modifyOtherKeys so the editor does not inherit the mode,
-	// then re-enable it in the callback after the editor exits.
-	fmt.Fprint(os.Stdout, "\x1b[>4m")
 	args := strings.Fields(editorCmd)
 	cmd := exec.Command(args[0], append(args[1:], tmpPath)...)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		defer os.Remove(tmpPath)
-		// Re-enable modifyOtherKeys for the TUI.
-		fmt.Fprint(os.Stdout, "\x1b[>4;2m")
 		if err != nil {
 			return editorResultMsg{err: err}
 		}

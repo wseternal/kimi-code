@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
@@ -15,7 +15,7 @@ import (
 )
 
 // handleKey is a helper that calls handleKey and type-asserts the result back to tuiModel.
-func handleKeyHelper(m tuiModel, msg tea.KeyMsg) (tuiModel, tea.Cmd) {
+func handleKeyHelper(m tuiModel, msg tea.KeyPressMsg) (tuiModel, tea.Cmd) {
 	result, cmd := m.handleKey(msg)
 	return result.(tuiModel), cmd
 }
@@ -36,7 +36,7 @@ func TestHandleKey_CursorExceedsInput(t *testing.T) {
 			t.Fatalf("handleKey panicked on KeyRunes with cursor > len(input): %v", r)
 		}
 	}()
-	m, _ = handleKeyHelper(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: 'a', Text: "a"})
 
 	if m.input != "a" {
 		t.Errorf("after typing 'a', input = %q, want %q", m.input, "a")
@@ -59,7 +59,7 @@ func TestHandleKey_SpaceWithStaleCursor(t *testing.T) {
 			t.Fatalf("handleKey panicked on KeySpace with cursor > len(input): %v", r)
 		}
 	}()
-	m, _ = handleKeyHelper(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeySpace})
 
 	if m.input != " " {
 		t.Errorf("after typing space, input = %q, want %q", m.input, " ")
@@ -79,7 +79,7 @@ func TestHandleKey_BackspaceWithStaleCursor(t *testing.T) {
 			t.Fatalf("handleKey panicked on KeyBackspace with cursor > len(input): %v", r)
 		}
 	}()
-	m, _ = handleKeyHelper(m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	// Should not panic; cursor should be clamped.
 }
 
@@ -98,7 +98,7 @@ func TestHandleKey_MultipleRunesAfterClear(t *testing.T) {
 	}()
 
 	for _, r := range "hello" {
-		m, _ = handleKeyHelper(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 
 	if m.input != "hello" {
@@ -781,7 +781,7 @@ func TestSessionPickerKey_Escape(t *testing.T) {
 		width:            80,
 		height:           24,
 	}
-	result, _ := m.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyEscape})
+	result, _ := m.handleSessionPickerKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	got := result.(tuiModel)
 	if got.showSessionPicker {
 		t.Error("Esc should close the session picker")
@@ -813,7 +813,7 @@ func TestSessionPickerKey_CtrlC(t *testing.T) {
 		width:            80,
 		height:           24,
 	}
-	result, cmd := m.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	result, cmd := m.handleSessionPickerKey(tea.KeyPressMsg{Code: '\x03'}) // ctrl+c
 	got := result.(tuiModel)
 	if !got.quitting {
 		t.Error("Ctrl+C should set quitting = true")
@@ -832,7 +832,7 @@ func TestSessionPickerKey_Enter(t *testing.T) {
 		width:             80,
 		height:            24,
 	}
-	_, _ = m.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.handleSessionPickerKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	// No panic means the guard works
 }
 
@@ -850,28 +850,28 @@ func TestSessionPickerKey_Navigation(t *testing.T) {
 	}
 
 	// Down should move selection from 0 to 1
-	result, _ := m.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+	result, _ := m.handleSessionPickerKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	got := result.(tuiModel)
 	if got.sessionPickerSel != 1 {
 		t.Errorf("after Down, sel = %d, want 1", got.sessionPickerSel)
 	}
 
 	// Down again should move to 2
-	result, _ = got.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+	result, _ = got.handleSessionPickerKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	got = result.(tuiModel)
 	if got.sessionPickerSel != 2 {
 		t.Errorf("after Down+Down, sel = %d, want 2", got.sessionPickerSel)
 	}
 
 	// Down at last item should stay at 2 (clamped)
-	result, _ = got.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+	result, _ = got.handleSessionPickerKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	got = result.(tuiModel)
 	if got.sessionPickerSel != 2 {
 		t.Errorf("after Down at end, sel = %d, want 2", got.sessionPickerSel)
 	}
 
 	// Up should move from 2 to 1
-	result, _ = got.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyUp})
+	result, _ = got.handleSessionPickerKey(tea.KeyPressMsg{Code: tea.KeyUp})
 	got = result.(tuiModel)
 	if got.sessionPickerSel != 1 {
 		t.Errorf("after Up, sel = %d, want 1", got.sessionPickerSel)
@@ -927,7 +927,7 @@ func TestScrollWithEmptyInput_UpDown(t *testing.T) {
 	}
 
 	// Press Up arrow — should scroll viewport up, NOT navigate input history
-	got, _ := handleKeyHelper(m, tea.KeyMsg{Type: tea.KeyUp})
+	got, _ := handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if got.scrollOffset == 0 {
 		t.Error("Up arrow with empty input should increase scrollOffset (scroll content up)")
 	}
@@ -936,13 +936,13 @@ func TestScrollWithEmptyInput_UpDown(t *testing.T) {
 	}
 
 	// Press Up again — scroll further
-	got2, _ := handleKeyHelper(got, tea.KeyMsg{Type: tea.KeyUp})
+	got2, _ := handleKeyHelper(got, tea.KeyPressMsg{Code: tea.KeyUp})
 	if got2.scrollOffset <= got.scrollOffset {
 		t.Error("Second Up arrow should increase scrollOffset further")
 	}
 
 	// Press Down arrow — should scroll viewport back down
-	got3, _ := handleKeyHelper(got2, tea.KeyMsg{Type: tea.KeyDown})
+	got3, _ := handleKeyHelper(got2, tea.KeyPressMsg{Code: tea.KeyDown})
 	if got3.scrollOffset >= got2.scrollOffset {
 		t.Error("Down arrow should decrease scrollOffset (scroll content down)")
 	}
@@ -964,7 +964,7 @@ func TestInputHistoryWithNonEmptyInput(t *testing.T) {
 	}
 
 	// Press Up with non-empty input — should navigate history
-	got, _ := handleKeyHelper(m, tea.KeyMsg{Type: tea.KeyUp})
+	got, _ := handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if got.input != "previous question" {
 		t.Errorf("Up arrow with non-empty input should navigate history, got: %q", got.input)
 	}
