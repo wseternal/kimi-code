@@ -124,6 +124,7 @@ type StreamedMessagePart struct {
 	ArgumentsPart *string                `json:"argumentsPart,omitempty"`
 	Index         interface{}            `json:"index,omitempty"`
 	Extras        map[string]interface{} `json:"extras,omitempty"`
+	Usage         *TokenUsage            `json:"usage,omitempty"`
 }
 
 // IsContentPart returns true if the part is a content block (text, think, image_url, etc.).

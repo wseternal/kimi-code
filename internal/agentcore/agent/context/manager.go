@@ -70,8 +70,8 @@ func (cm *ContextManager) UsageDisplay() string {
 	max := cm.maxTokens
 	pct := cm.UsagePercent()
 
-	usedStr := formatTokenCount(used)
-	maxStr := formatTokenCount(max)
+	usedStr := FormatTokenCount(used)
+	maxStr := FormatTokenCount(max)
 	return fmt.Sprintf("%s / %s tokens (%.1f%%)", usedStr, maxStr, pct)
 }
 
@@ -99,7 +99,8 @@ func (cm *ContextManager) NeedsCompaction(triggerRatio float64) bool {
 	return cm.UsagePercent() >= triggerRatio*100
 }
 
-func formatTokenCount(n int) string {
+// FormatTokenCount formats a token count with K/M suffix.
+func FormatTokenCount(n int) string {
 	if n >= 1000000 {
 		return fmt.Sprintf("%.1fM", float64(n)/1000000)
 	}

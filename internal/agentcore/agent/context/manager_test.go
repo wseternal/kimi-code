@@ -126,9 +126,9 @@ func TestFormatTokenCount(t *testing.T) {
 		{1500000, "1.5M"},
 	}
 	for _, tt := range tests {
-		got := formatTokenCount(tt.input)
+		got := FormatTokenCount(tt.input)
 		if got != tt.want {
-			t.Errorf("formatTokenCount(%d) = %q, want %q", tt.input, got, tt.want)
+			t.Errorf("FormatTokenCount(%d) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
 }

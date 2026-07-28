@@ -30,6 +30,11 @@ type openAIRequest struct {
 	Temperature    *float64           `json:"temperature,omitempty"`
 	MaxTokens      *int               `json:"max_tokens,omitempty"`
 	ResponseFormat *openAIRespFormat  `json:"response_format,omitempty"`
+	StreamOptions  *openAIStreamOpts  `json:"stream_options,omitempty"`
+}
+
+type openAIStreamOpts struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type openAIRespFormat struct {
@@ -268,11 +273,12 @@ func (p *OpenAIProvider) Generate(
 
 	// Build request body
 	reqBody := openAIRequest{
-		Model:       p.model,
-		Messages:    wireMessages,
-		Tools:       wireTools,
-		Stream:      true,
-		Temperature: p.temperature,
+		Model:         p.model,
+		Messages:      wireMessages,
+		Tools:         wireTools,
+		Stream:        true,
+		Temperature:   p.temperature,
+		StreamOptions: &openAIStreamOpts{IncludeUsage: true},
 	}
 	if p.maxTokens > 0 {
 		reqBody.MaxTokens = &p.maxTokens
@@ -389,6 +395,23 @@ func (p *OpenAIProvider) consumeSSEStream(
 		var chunk openAIResponseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue // skip malformed chunks
+		}
+
+		// Capture usage from chunk (usually in final chunk)
+		if chunk.Usage != nil {
+			usage := &kosong.TokenUsage{
+				InputOther: chunk.Usage.PromptTokens,
+				Output:     chunk.Usage.CompletionTokens,
+			}
+			if chunk.Usage.PromptDetails != nil {
+				usage.InputCacheRead = chunk.Usage.PromptDetails.CachedTokens
+				usage.InputOther -= usage.InputCacheRead
+			}
+			select {
+			case partsCh <- kosong.StreamedMessagePart{Type: "usage", Usage: usage}:
+			case <-ctx.Done():
+				return
+			}
 		}
 
 		// Process choices

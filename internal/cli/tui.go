@@ -241,7 +241,9 @@ type tuiModel struct {
 	queuedMessages  []string
 
 	// Cycle 6: Context management
-	contextMgr *agentctx.ContextManager
+	contextMgr   *agentctx.ContextManager
+	turnUsage    kosong.TokenUsage // real API usage for current turn (live during streaming)
+	sessionUsage kosong.TokenUsage // cumulative session token usage
 
 	// Cycle 8: Goal tracker
 	goalTracker *goal.Tracker
@@ -395,13 +397,14 @@ func (m *tuiModel) replayHistory() {
 // ── Streaming events for bubbletea ──
 
 type streamEvent struct {
-	kind     string // "think", "text", "tool_start", "tool_result", "step_done", "done", "error"
+	kind     string // "think", "text", "tool_start", "tool_result", "step_done", "done", "error", "usage"
 	text     string
 	toolName string
 	toolArgs string
 	toolOut  string
 	toolErr  bool
 	step     int
+	usage    *kosong.TokenUsage
 }
 
 // listenStream waits for the next streaming event from the channel.
@@ -525,6 +528,8 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 					ch <- streamEvent{kind: "think", text: part.Think}
 				case "text":
 					ch <- streamEvent{kind: "text", text: part.Text}
+				case "usage":
+					ch <- streamEvent{kind: "usage", usage: part.Usage}
 				}
 
 				// Merge parts to build final message (same logic as kosong.Generate)
@@ -702,6 +707,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error: %s", msg.text)})
 			return m, nil
+		case "usage":
+			if msg.usage != nil {
+				m.turnUsage = kosong.AddUsage(m.turnUsage, *msg.usage)
+			}
+			return m, listenStream(m.streamCh)
 		case "done":
 			m.streaming = false
 			// Flush any remaining buffered markdown
@@ -718,9 +728,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.completedTurns = append(m.completedTurns, td)
 
-			// Cycle 6: Track token usage
-			turnTokens := agentctx.TokenEstimate(m.streamResponse) + agentctx.TokenEstimate(m.streamThinking)
-			m.contextMgr.AddTurnUsage(turnTokens)
+			// Track token usage: prefer real API usage, fall back to estimation
+			if m.turnUsage.GrandTotal() > 0 {
+				m.contextMgr.AddTurnUsage(m.turnUsage.InputTotal() + m.turnUsage.Output)
+				m.sessionUsage = kosong.AddUsage(m.sessionUsage, m.turnUsage)
+			} else {
+				turnTokens := agentctx.TokenEstimate(m.streamResponse) + agentctx.TokenEstimate(m.streamThinking)
+				m.contextMgr.AddTurnUsage(turnTokens)
+			}
+			m.turnUsage = kosong.TokenUsage{} // reset for next turn
 
 			// Cycle 1: Persist session history
 			if m.app.SessionStore != nil {
@@ -2261,8 +2277,16 @@ func (m tuiModel) renderThinkingBlock(thinking string, streaming bool, turnIndex
 		if expanded {
 			header := focusPrefix + dimStyle.Render("▾ Thinking…")
 			display := thinking
-			if len(display) > 500 {
-				display = "…" + display[len(display)-500:]
+			// Height-based cap: min(2000 chars, m.height/3 lines)
+			maxLines := m.height / 3
+			if maxLines < 5 {
+				maxLines = 5
+			}
+			lines := strings.Split(display, "\n")
+			if len(lines) > maxLines {
+				display = "…\n" + strings.Join(lines[len(lines)-maxLines:], "\n")
+			} else if len(display) > 2000 {
+				display = "…" + display[len(display)-2000:]
 			}
 			body := dimStyle.Render(indentText(display, "    "))
 			return header + "\n" + body
@@ -2296,8 +2320,17 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 	}
 
 	var b strings.Builder
-	for i, tg := range groups {
-		if i > 0 {
+
+	// When collapsed and many tool groups, only show the last 5
+	startIdx := 0
+	if !expanded && len(groups) > 5 {
+		startIdx = len(groups) - 5
+		b.WriteString(fmt.Sprintf("  %s\n", dimStyle.Render(fmt.Sprintf("… %d earlier tool calls", startIdx))))
+	}
+
+	for i := startIdx; i < len(groups); i++ {
+		tg := groups[i]
+		if i > startIdx {
 			b.WriteString("\n")
 		}
 
@@ -2307,8 +2340,8 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 		if !expanded {
 			// Collapsed: single line
 			prefix := focusPrefix
-			if i > 0 {
-				prefix = "  " // only first line gets focus prefix
+			if i > startIdx {
+				prefix = "  " // only first visible line gets focus prefix
 			}
 			line := fmt.Sprintf("%s▸ %s %s", prefix, nameStyled, dimStyle.Render(summary))
 			if tg.result == "" && !tg.isError {
@@ -2318,7 +2351,7 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 		} else {
 			// Expanded: header + args + result
 			prefix := focusPrefix
-			if i > 0 {
+			if i > startIdx {
 				prefix = "  "
 			}
 			b.WriteString(fmt.Sprintf("%s▾ %s %s\n", prefix, nameStyled, dimStyle.Render(summary)))
@@ -2381,8 +2414,8 @@ func (m tuiModel) renderStatusBar() string {
 	// Middle: cwd + branch
 	middle := dimStyle.Render(filepath.Base(m.cwd)) + " " + mutedStyle.Render(m.branch)
 
-	// Right side: context usage
-	right := dimStyle.Render("context: " + m.contextMgr.UsageDisplay())
+		// Right side: context usage + live token breakdown
+	right := m.renderTokenStatus()
 
 	// Calculate padding
 	leftW := lipgloss.Width(leftStr)
@@ -2401,6 +2434,37 @@ func (m tuiModel) renderStatusBar() string {
 	bar := leftStr + strings.Repeat(" ", gap1) + middle + strings.Repeat(" ", gap2) + right
 
 	return statusBarStyle.Width(w - 2).Render(bar)
+}
+
+// renderTokenStatus returns the right side of the status bar with token breakdown.
+func (m tuiModel) renderTokenStatus() string {
+	ctxStr := m.contextMgr.UsageDisplay()
+
+	// During streaming, show live current-turn usage
+	if m.streaming && m.turnUsage.GrandTotal() > 0 {
+		u := m.turnUsage
+		parts := []string{"ctx: " + ctxStr}
+		if u.InputCacheRead > 0 {
+			parts = append(parts, fmt.Sprintf("cache: %s", agentctx.FormatTokenCount(u.InputCacheRead)))
+		}
+		parts = append(parts, fmt.Sprintf("in: %s", agentctx.FormatTokenCount(u.InputTotal())))
+		parts = append(parts, fmt.Sprintf("out: %s", agentctx.FormatTokenCount(u.Output)))
+		return dimStyle.Render(strings.Join(parts, " | "))
+	}
+
+	// Idle: show cumulative session usage
+	if m.sessionUsage.GrandTotal() > 0 {
+		u := m.sessionUsage
+		parts := []string{"ctx: " + ctxStr}
+		parts = append(parts, fmt.Sprintf("session in: %s out: %s", agentctx.FormatTokenCount(u.InputTotal()), agentctx.FormatTokenCount(u.Output)))
+		if u.InputCacheRead > 0 {
+			parts = append(parts, fmt.Sprintf("cache: %s", agentctx.FormatTokenCount(u.InputCacheRead)))
+		}
+		return dimStyle.Render(strings.Join(parts, " | "))
+	}
+
+	// Fallback: just context usage
+	return dimStyle.Render("ctx: " + ctxStr)
 }
 
 // ── Helpers ──
