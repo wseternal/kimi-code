@@ -298,6 +298,11 @@ func (p *OpenAIProvider) Generate(
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	// Fire raw request callback for audit/diagnostics
+	if opts != nil && opts.OnRawRequest != nil {
+		opts.OnRawRequest(bodyBytes)
+	}
+
 	// Fire callbacks
 	if opts != nil && opts.OnRequestStart != nil {
 		opts.OnRequestStart()
@@ -354,6 +359,10 @@ func (p *OpenAIProvider) Generate(
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		// Fire raw response callback with error body for diagnostics
+		if opts != nil && opts.OnRawResponse != nil {
+			opts.OnRawResponse([]string{string(body)})
+		}
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -394,9 +403,17 @@ func (p *OpenAIProvider) consumeSSEStream(
 
 	tracing := trace.Enabled()
 	var chunkCount int
+
+	// Accumulate raw SSE data lines for diagnostics (only when callback is set)
+	captureRaw := opts != nil && opts.OnRawResponse != nil
+	var rawLines []string
+
 	defer func() {
 		if tracing {
 			trace.Log("http", "stream_end", map[string]any{"chunks": chunkCount})
+		}
+		if captureRaw && opts.OnRawResponse != nil {
+			opts.OnRawResponse(rawLines)
 		}
 	}()
 
@@ -420,6 +437,11 @@ func (p *OpenAIProvider) consumeSSEStream(
 				opts.OnStreamEnd(&kosong.StreamDecodeStats{})
 			}
 			return
+		}
+
+		// Accumulate raw data line for verbatim audit
+		if captureRaw {
+			rawLines = append(rawLines, data)
 		}
 
 		var chunk openAIResponseChunk

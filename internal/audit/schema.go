@@ -35,6 +35,12 @@ const (
 	EvtLLMError      = "llm.error"
 	EvtLLMDone       = "llm.done"
 
+	// Raw HTTP payload events — verbatim request/response bodies for
+	// post-mortem diagnostics. These can be large and are stored
+	// uncompressed so they can be fed back to an LLM for analysis.
+	EvtLLMRawRequest  = "llm.raw_request"
+	EvtLLMRawResponse = "llm.raw_response"
+
 	// High-level turn event — recorded once per completed turn with the
 	// full prompt, response, thinking, and tool calls. The facade uses
 	// these to reconstruct session state without replaying deltas.

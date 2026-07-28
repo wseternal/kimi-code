@@ -869,7 +869,27 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 
 		maxSteps := 25
 		for step := 0; step < maxSteps; step++ {
-			stream, err := m.provider.Generate(ctx, systemPrompt, kosongTools, m.history, nil)
+			// Build GenerateOptions with raw payload capture for audit
+			var genOpts *kosong.GenerateOptions
+			if m.auditWriter != nil {
+				genOpts = &kosong.GenerateOptions{
+					OnRawRequest: func(body []byte) {
+						m.auditWriter.Record(audit.AuditEvent{
+							SessionID: m.sessionID,
+							Type:      audit.EvtLLMRawRequest,
+							Data:      map[string]any{"step": step, "body": string(body)},
+						})
+					},
+					OnRawResponse: func(lines []string) {
+						m.auditWriter.Record(audit.AuditEvent{
+							SessionID: m.sessionID,
+							Type:      audit.EvtLLMRawResponse,
+							Data:      map[string]any{"step": step, "sse_lines": lines},
+						})
+					},
+				}
+			}
+			stream, err := m.provider.Generate(ctx, systemPrompt, kosongTools, m.history, genOpts)
 			if err != nil {
 				ch <- streamEvent{kind: "error", text: err.Error()}
 				return
