@@ -669,3 +669,38 @@ func TestTruncateDesc_MultiByteUTF8(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildSystemPrompt_ActiveSkill(t *testing.T) {
+	cat := skill.NewCatalog(nil)
+
+	// Without active skill: no "Active Skill" section
+	prompt := buildSystemPrompt("/tmp", "main", cat, nil)
+	if strings.Contains(prompt, "Active Skill") {
+		t.Error("system prompt should not contain 'Active Skill' section when no skill is active")
+	}
+
+	// With active skill: section present with name and args
+	active := &activeSkillInfo{name: "pr-review", args: "COMMITS=abc123"}
+	prompt = buildSystemPrompt("/tmp", "main", cat, active)
+	if !strings.Contains(prompt, "## Active Skill: pr-review") {
+		t.Error("system prompt should contain '## Active Skill: pr-review' section")
+	}
+	if !strings.Contains(prompt, "Arguments: COMMITS=abc123") {
+		t.Error("system prompt should contain the skill arguments")
+	}
+	if !strings.Contains(prompt, "Do NOT perform actions outside this skill's scope") {
+		t.Error("system prompt should contain the scope guardrail")
+	}
+}
+
+func TestBuildSystemPrompt_ActiveSkillNoArgs(t *testing.T) {
+	cat := skill.NewCatalog(nil)
+	active := &activeSkillInfo{name: "dev-cycle", args: ""}
+	prompt := buildSystemPrompt("/tmp", "main", cat, active)
+	if !strings.Contains(prompt, "## Active Skill: dev-cycle") {
+		t.Error("system prompt should contain the active skill section")
+	}
+	if strings.Contains(prompt, "Arguments:") {
+		t.Error("system prompt should not contain 'Arguments:' when args are empty")
+	}
+}

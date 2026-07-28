@@ -168,6 +168,13 @@ type chatMessage struct {
 
 // ── Bubbletea model ──
 
+// activeSkillInfo tracks the currently executing skill so that its constraints
+// can be injected into the system prompt across all tool steps within a turn.
+type activeSkillInfo struct {
+	name string
+	args string
+}
+
 type tuiModel struct {
 	// State
 	sessionID string
@@ -227,6 +234,7 @@ type tuiModel struct {
 
 	// Skills
 	skillCatalog *skill.Catalog
+	activeSkill  *activeSkillInfo // currently executing skill (nil = none)
 
 	// Model picker
 	showModelPicker  bool
@@ -530,7 +538,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 		m.history = append(m.history, kosong.CreateUserMessage(prompt))
 
 		ctx := context.Background()
-		systemPrompt := buildSystemPrompt(m.cwd, m.branch, m.skillCatalog)
+		systemPrompt := buildSystemPrompt(m.cwd, m.branch, m.skillCatalog, m.activeSkill)
 
 		// Convert tool definitions
 		var kosongTools []kosong.Tool
@@ -1602,6 +1610,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.history = nil
 			m.contextMgr.Reset()
 			m.goalTracker.Clear()
+			m.activeSkill = nil
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("New session created: %s", newSess.ID)})
 		} else {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error: %s", err)})
@@ -1625,6 +1634,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.turnCount = 0
 		m.contextMgr.Reset()
 		m.goalTracker.Clear()
+		m.activeSkill = nil
 		m.rebuildCollapsibles()
 		m.messages = append(m.messages, chatMessage{"system", "Session reset to clean state."})
 		m.input = ""
@@ -2139,6 +2149,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		skillName, skillArgs := parseSkillCommand(input)
 		if m.skillCatalog != nil {
 			if s := m.skillCatalog.Get(skillName); s != nil {
+				m.activeSkill = &activeSkillInfo{name: s.Name, args: skillArgs}
 				m.messages = append(m.messages, chatMessage{"user", input})
 				m.messages = append(m.messages, chatMessage{"system",
 					fmt.Sprintf("Skill loaded: %s", s.Name)})
@@ -2182,6 +2193,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				if parts := strings.SplitN(rawAfterSlash, " ", 2); len(parts) > 1 {
 					subArgs = strings.TrimSpace(parts[1])
 				}
+				m.activeSkill = &activeSkillInfo{name: s.Name, args: subArgs}
 				m.messages = append(m.messages, chatMessage{"user", input})
 				m.messages = append(m.messages, chatMessage{"system",
 					fmt.Sprintf("Skill loaded: %s", s.Name)})
@@ -2215,6 +2227,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 	default:
 		// Regular prompt — route through LLM provider
+		m.activeSkill = nil // clear active skill on regular user input
 		// Save to input history
 		if m.inputHistory != nil {
 			m.inputHistory.Add(input)
@@ -2868,7 +2881,7 @@ func getGitBranch(cwd string) string {
 // comes first so the API prefix cache hits across turns and sessions.
 // Dynamic env info (cwd, branch, OS) is appended at the tail so that changes
 // to those values don't invalidate the cacheable prefix.
-func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog) string {
+func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog, active *activeSkillInfo) string {
 	osName := runtime.GOOS
 	arch := runtime.GOARCH
 
@@ -2912,6 +2925,20 @@ func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog) string {
 
 	// ── Dynamic env tail (changes per session; placed last to preserve cache prefix) ──
 	sb.WriteString(fmt.Sprintf("\n\n## Environment\n- Working directory: %s\n- OS: %s/%s\n- Git branch: %s", cwd, osName, arch, branch))
+
+	// ── Active skill guardrail ──
+	if active != nil {
+		sb.WriteString("\n\n## Active Skill: ")
+		sb.WriteString(active.name)
+		sb.WriteString("\nYou are currently executing this skill. Follow its workflow phases in order.\n")
+		sb.WriteString("Do NOT perform actions outside this skill's scope ")
+		sb.WriteString("(e.g., creating branches, pushing, opening PRs) unless the skill explicitly instructs it.\n")
+		if active.args != "" {
+			sb.WriteString("Arguments: ")
+			sb.WriteString(active.args)
+			sb.WriteString("\n")
+		}
+	}
 
 	return sb.String()
 }
@@ -3394,7 +3421,7 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	if cat, err := skill.Discover(cwd); err == nil {
 		skillCat = cat
 	}
-	systemPrompt := buildSystemPrompt(cwd, branch, skillCat)
+	systemPrompt := buildSystemPrompt(cwd, branch, skillCat, nil)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	var history []kosong.Message
