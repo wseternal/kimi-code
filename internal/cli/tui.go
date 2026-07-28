@@ -798,8 +798,23 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 // ── Init ──
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(tea.WindowSize(), m.tickCursor())
+	return tea.Batch(
+		tea.WindowSize(),
+		m.tickCursor(),
+		// Enable xterm modifyOtherKeys level 2 so the terminal sends a
+		// distinguishable escape sequence for Shift+Enter (\x1b[13;2~).
+		// The shiftEnterReader in root.go translates this to Ctrl+J (LF).
+		func() tea.Msg { return enableModifyOtherKeysMsg{} },
+	)
 }
+
+// enableModifyOtherKeysMsg is an internal message that triggers the terminal
+// escape sequence to enable modifyOtherKeys level 2.
+type enableModifyOtherKeysMsg struct{}
+
+// disableModifyOtherKeysMsg is an internal message that triggers the terminal
+// escape sequence to disable modifyOtherKeys.
+type disableModifyOtherKeysMsg struct{}
 
 // cursorTickMsg is sent periodically to toggle cursor visibility.
 type cursorTickMsg struct{}
@@ -814,6 +829,10 @@ func (m tuiModel) tickCursor() tea.Cmd {
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case enableModifyOtherKeysMsg:
+		return m, tea.Printf("\x1b[>4;2m")
+	case disableModifyOtherKeysMsg:
+		return m, tea.Printf("\x1b[>4m")
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -1065,21 +1084,24 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// ── Quit ──
 	case msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyCtrlD:
 		m.quitting = true
-		return m, tea.Quit
+		return m, tea.Batch(
+			// Disable modifyOtherKeys before exiting.
+			func() tea.Msg { return disableModifyOtherKeysMsg{} },
+			tea.Quit,
+		)
 
-	// ── Submit (Alt+Enter / Option+Enter) ──
-	case msg.Type == tea.KeyEnter && msg.Alt:
-		return m.handleSubmit()
-
-	// ── Newline (Enter) ──
-	case msg.Type == tea.KeyEnter:
+	// ── Newline (Alt+Enter / Option+Enter / Ctrl+J / Shift+Enter) ──
+	case msg.Type == tea.KeyEnter && msg.Alt, msg.Type == tea.KeyCtrlJ:
 		runes := []rune(m.input)
 		runes = append(runes[:m.cursor], append([]rune{'\n'}, runes[m.cursor:]...)...)
 		m.input = string(runes)
-		// Place cursor at the start of the new line (right after the inserted \n).
 		m.cursor++
 		m.showSuggestions = false
 		return m, nil
+
+	// ── Submit ──
+	case msg.Type == tea.KeyEnter:
+		return m.handleSubmit()
 
 	// ── Open external editor (Ctrl+G) ──
 	case msg.Type == tea.KeyCtrlG:
@@ -3717,11 +3739,16 @@ func (m *tuiModel) launchEditor() tea.Cmd {
 	// Store path for reading after editor exits
 	m.editorTempFile = tmpPath
 
-	// Use tea.ExecProcess to suspend TUI and run editor
+	// Use tea.ExecProcess to suspend TUI and run editor.
+	// Disable modifyOtherKeys so the editor does not inherit the mode,
+	// then re-enable it in the callback after the editor exits.
+	fmt.Fprint(os.Stdout, "\x1b[>4m")
 	args := strings.Fields(editorCmd)
 	cmd := exec.Command(args[0], append(args[1:], tmpPath)...)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		defer os.Remove(tmpPath)
+		// Re-enable modifyOtherKeys for the TUI.
+		fmt.Fprint(os.Stdout, "\x1b[>4;2m")
 		if err != nil {
 			return editorResultMsg{err: err}
 		}
