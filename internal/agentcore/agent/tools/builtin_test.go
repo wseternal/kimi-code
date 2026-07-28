@@ -4,12 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestGrepTool(t *testing.T) {
+	// Skip if rg (ripgrep) is not installed
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("rg (ripgrep) not found in $PATH, skipping TestGrepTool")
+	}
+
 	// Create test directory with test files
 	tmpDir := t.TempDir()
 
