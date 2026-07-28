@@ -2836,12 +2836,12 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 		nameStyled := warningStyle.Render(fmt.Sprintf("[%s]", tg.name))
 		verb := primaryStyle.Render(toolVerb(tg.name))
 		diff := diffStats(tg.name, tg.result)
-		diffLabel := ""
-		if diff != "" {
-			diffLabel = " " + dimStyle.Render(diff)
+		metaRaw := formatToolMetaRaw(tg)
+		// Combine diff and meta into a single dim suffix to avoid redundant ANSI sequences
+		suffix := ""
+		if diff != "" || metaRaw != "" {
+			suffix = dimStyle.Render(" " + diff + metaRaw)
 		}
-		// Meta label: duration + estimated tokens for this tool call
-		metaLabel := formatToolMeta(tg)
 
 		if !expanded {
 			// Collapsed: single line
@@ -2853,7 +2853,7 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 			if tg.result == "" && !tg.isError {
 				line += dimStyle.Render(" ⋯") // running
 			}
-			line += diffLabel + metaLabel
+			line += suffix
 			b.WriteString(line)
 		} else {
 			// Expanded: header + args + result
@@ -2861,7 +2861,7 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 			if i > startIdx {
 				prefix = "  "
 			}
-			b.WriteString(fmt.Sprintf("%s▾ %s %s%s%s%s\n", prefix, verb, nameStyled, dimStyle.Render(" "+summary), diffLabel, metaLabel))
+			b.WriteString(fmt.Sprintf("%s▾ %s %s%s%s\n", prefix, verb, nameStyled, dimStyle.Render(" "+summary), suffix))
 			if tg.args != "" && tg.args != "{}" {
 				b.WriteString(dimStyle.Render(indentText(tg.args, "      ")) + "\n")
 			}
@@ -2893,10 +2893,10 @@ func indentText(text, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-// formatToolMeta returns a dim label showing execution duration and estimated
-// tokens for a tool call, e.g. " · 1.2s, 456 tokens". Returns "" when there
-// is no useful metadata to display.
-func formatToolMeta(tg toolGroup) string {
+// formatToolMetaRaw returns a plain-text suffix showing execution duration and
+// estimated tokens for a tool call, e.g. " · 1.2s, 456 tokens". The caller is
+// responsible for applying styling. Returns "" when there is nothing to display.
+func formatToolMetaRaw(tg toolGroup) string {
 	if tg.duration == 0 && tg.result == "" && tg.args == "" {
 		return ""
 	}
@@ -2917,7 +2917,7 @@ func formatToolMeta(tg toolGroup) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return dimStyle.Render(" · " + strings.Join(parts, ", "))
+	return " · " + strings.Join(parts, ", ")
 }
 
 func (m tuiModel) renderStatusBar() string {
@@ -2990,17 +2990,18 @@ func (m tuiModel) renderStatusBar() string {
 // renderTokenStatus returns the right side of the status bar with token breakdown.
 func (m tuiModel) renderTokenStatus() string {
 	dot := mutedStyle.Render(" · ")
+	isLive := m.streaming && m.turnUsage.GrandTotal() > 0
 
 	// During streaming, include current turn tokens in context display (live)
 	var ctxStr string
-	if m.streaming && m.turnUsage.GrandTotal() > 0 {
+	if isLive {
 		ctxStr = m.contextMgr.UsageDisplay(m.turnUsage.InputTotal() + m.turnUsage.Output)
 	} else {
 		ctxStr = m.contextMgr.UsageDisplay()
 	}
 
 	// During streaming, show live current-turn usage
-	if m.streaming && m.turnUsage.GrandTotal() > 0 {
+	if isLive {
 		u := m.turnUsage
 		parts := []string{"ctx: " + ctxStr}
 		parts = append(parts, fmt.Sprintf("in: %s", agentctx.FormatTokenCount(u.InputTotal())))
