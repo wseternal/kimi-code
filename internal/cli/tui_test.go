@@ -704,3 +704,148 @@ func TestBuildSystemPrompt_ActiveSkillNoArgs(t *testing.T) {
 		t.Error("system prompt should not contain 'Arguments:' when args are empty")
 	}
 }
+
+func TestToolVerb(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"write_file", "Write"},
+		{"read_file", "Read"},
+		{"bash", "Bash"},
+		{"grep", "Search"},
+		{"search_replace", "Edit"},
+		{"unknown_tool", "Unknown_tool"},
+		{"", "Tool"},
+	}
+	for _, tt := range tests {
+		got := toolVerb(tt.name)
+		if got != tt.want {
+			t.Errorf("toolVerb(%q) = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestDiffStats(t *testing.T) {
+	tests := []struct {
+		name   string
+		result string
+		want   string
+	}{
+		{"empty", "", ""},
+		{"no diff lines", "hello world\nfoo bar", ""},
+		{"added lines", "+line1\n+line2\n-line3\nplain", "+2/-1"},
+		{"only removed", "-line1\n-line2\nplain", "+0/-2"},
+	}
+	for _, tt := range tests {
+		got := diffStats(tt.result)
+		if got != tt.want {
+			t.Errorf("diffStats(%q) = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestToolArgSummary_PriorityKeys(t *testing.T) {
+	// file_path should appear first (as raw value) instead of key=value
+	args := `{"file_path": "/src/foo.go", "mode": "read-only"}`
+	summary := toolArgSummary(args)
+	if !strings.HasPrefix(summary, "/src/foo.go") {
+		t.Errorf("summary should start with file_path value, got: %q", summary)
+	}
+	if !strings.Contains(summary, "mode=read-only") {
+		t.Errorf("summary should contain mode=read-only, got: %q", summary)
+	}
+
+	// command should appear first for bash
+	args = `{"command": "go test ./...", "timeout": 30}`
+	summary = toolArgSummary(args)
+	if !strings.HasPrefix(summary, "go test ./...") {
+		t.Errorf("summary should start with command value, got: %q", summary)
+	}
+}
+
+func TestSessionPickerKey_Escape(t *testing.T) {
+	m := tuiModel{
+		showSessionPicker: true,
+		sessionPickerList: []*session.SerializedSession{
+			{ID: "s1", Title: "Session 1"},
+			{ID: "s2", Title: "Session 2"},
+		},
+		sessionPickerSel: 0,
+		width:            80,
+		height:           24,
+	}
+	result, _ := m.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyEscape})
+	got := result.(tuiModel)
+	if got.showSessionPicker {
+		t.Error("Esc should close the session picker")
+	}
+}
+
+func TestSessionPickerKey_Navigation(t *testing.T) {
+	m := tuiModel{
+		showSessionPicker: true,
+		sessionPickerList: []*session.SerializedSession{
+			{ID: "s1", Title: "Session 1"},
+			{ID: "s2", Title: "Session 2"},
+			{ID: "s3", Title: "Session 3"},
+		},
+		sessionPickerSel: 0,
+		width:            80,
+		height:           24,
+	}
+
+	// Down should move selection from 0 to 1
+	result, _ := m.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+	got := result.(tuiModel)
+	if got.sessionPickerSel != 1 {
+		t.Errorf("after Down, sel = %d, want 1", got.sessionPickerSel)
+	}
+
+	// Down again should move to 2
+	result, _ = got.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+	got = result.(tuiModel)
+	if got.sessionPickerSel != 2 {
+		t.Errorf("after Down+Down, sel = %d, want 2", got.sessionPickerSel)
+	}
+
+	// Down at last item should stay at 2 (clamped)
+	result, _ = got.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+	got = result.(tuiModel)
+	if got.sessionPickerSel != 2 {
+		t.Errorf("after Down at end, sel = %d, want 2", got.sessionPickerSel)
+	}
+
+	// Up should move from 2 to 1
+	result, _ = got.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyUp})
+	got = result.(tuiModel)
+	if got.sessionPickerSel != 1 {
+		t.Errorf("after Up, sel = %d, want 1", got.sessionPickerSel)
+	}
+}
+
+func TestRenderSessionPicker(t *testing.T) {
+	m := tuiModel{
+		showSessionPicker: true,
+		sessionPickerList: []*session.SerializedSession{
+			{ID: "s1", Title: "First Session"},
+			{ID: "s2", Title: "Second Session"},
+		},
+		sessionPickerSel: 0,
+		width:            80,
+		height:           24,
+	}
+	rendered := m.renderSessionPicker()
+	if !strings.Contains(rendered, "Resume a session") {
+		t.Error("render should contain header 'Resume a session'")
+	}
+	if !strings.Contains(rendered, "First Session") {
+		t.Error("render should contain 'First Session'")
+	}
+	if !strings.Contains(rendered, "Second Session") {
+		t.Error("render should contain 'Second Session'")
+	}
+	if !strings.Contains(rendered, "Enter resume") {
+		t.Error("render should contain 'Enter resume' hint")
+	}
+}

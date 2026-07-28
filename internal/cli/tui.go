@@ -504,8 +504,24 @@ func toolArgSummary(args string) string {
 		}
 		return args
 	}
+	// Prioritize key fields for display: file paths and commands first.
 	var parts []string
+	priorityKeys := []string{"file_path", "path", "command", "query", "pattern"}
+	seen := map[string]bool{}
+	for _, k := range priorityKeys {
+		if v, ok := m[k]; ok {
+			s := fmt.Sprintf("%v", v)
+			if len(s) > 40 {
+				s = s[:37] + "..."
+			}
+			parts = append(parts, s)
+			seen[k] = true
+		}
+	}
 	for k, v := range m {
+		if seen[k] {
+			continue
+		}
 		s := fmt.Sprintf("%v", v)
 		if len(s) > 30 {
 			s = s[:27] + "..."
@@ -517,6 +533,64 @@ func toolArgSummary(args string) string {
 		result = result[:57] + "..."
 	}
 	return result
+}
+
+// toolVerb maps a tool name to a human-friendly action verb.
+func toolVerb(name string) string {
+	verbs := map[string]string{
+		"write_file":     "Write",
+		"edit_file":      "Edit",
+		"search_replace": "Edit",
+		"read_file":      "Read",
+		"list_dir":       "List",
+		"bash":           "Bash",
+		"execute":        "Bash",
+		"grep":           "Search",
+		"glob":           "Search",
+		"search":         "Search",
+		"search_codebase": "Search",
+		"lsp":            "LSP",
+		"fetch":          "Fetch",
+		"web_fetch":      "Fetch",
+		"delete_file":    "Delete",
+	}
+	lower := strings.ToLower(name)
+	if v, ok := verbs[lower]; ok {
+		return v
+	}
+	// Title-case fallback
+	if name == "" {
+		return "Tool"
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
+}
+
+// diffStats extracts a "+N/-M" badge from tool result text by counting
+// lines starting with '+' or '-' in the first 500 characters.
+func diffStats(result string) string {
+	if result == "" {
+		return ""
+	}
+	scan := result
+	if len(scan) > 500 {
+		scan = scan[:500]
+	}
+	var added, removed int
+	for _, line := range strings.Split(scan, "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		switch line[0] {
+		case '+':
+			added++
+		case '-':
+			removed++
+		}
+	}
+	if added == 0 && removed == 0 {
+		return ""
+	}
+	return fmt.Sprintf("+%d/-%d", added, removed)
 }
 
 // runLLMStream is a bubbletea Cmd that streams the LLM response with tool calling.
@@ -914,6 +988,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Ignore other input during streaming
 				return m, nil
 			}
+		}
+		if m.showSessionPicker {
+			return m.handleSessionPickerKey(msg)
 		}
 		if m.showModelPicker {
 			return m.handlePickerKey(msg)
@@ -1703,26 +1780,10 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	// Cycle 1: Session commands
 	case input == "/sessions":
 		m.messages = append(m.messages, chatMessage{"user", input})
-		if m.app.SessionStore != nil {
-			sessions, err := m.app.SessionStore.ListAll(context.Background())
-			if err != nil || len(sessions) == 0 {
-				m.messages = append(m.messages, chatMessage{"system", "No saved sessions found."})
-			} else {
-				// Backfill titles from history for sessions with generic title
-				for _, s := range sessions {
-					if s.Title == "Interactive Session" || s.Title == "" {
-						if fp := firstUserPrompt(m.app.SessionStore, s.ID); fp != "" {
-							if s.Metadata == nil {
-								s.Metadata = make(map[string]any)
-							}
-							s.Metadata["first_prompt"] = fp
-						}
-					}
-				}
-				m.messages = append(m.messages, chatMessage{"system", formatSessionList(sessions)})
-			}
-		} else {
+		if m.app.SessionStore == nil {
 			m.messages = append(m.messages, chatMessage{"system", "Session store not available."})
+		} else {
+			m.openSessionPicker()
 		}
 		m.input = ""
 		m.cursor = 0
@@ -2284,6 +2345,9 @@ func (m tuiModel) View() string {
 	if m.quitting {
 		return "Goodbye!\n"
 	}
+	if m.showSessionPicker {
+		return m.renderSessionPicker()
+	}
 	if m.showModelPicker {
 		return m.renderModelPicker()
 	}
@@ -2706,6 +2770,12 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 
 		summary := toolArgSummary(tg.args)
 		nameStyled := warningStyle.Render(fmt.Sprintf("[%s]", tg.name))
+		verb := primaryStyle.Render(toolVerb(tg.name))
+		diff := diffStats(tg.result)
+		diffLabel := ""
+		if diff != "" {
+			diffLabel = " " + dimStyle.Render(diff)
+		}
 
 		if !expanded {
 			// Collapsed: single line
@@ -2713,10 +2783,11 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 			if i > startIdx {
 				prefix = "  " // only first visible line gets focus prefix
 			}
-			line := fmt.Sprintf("%s▸ %s %s", prefix, nameStyled, dimStyle.Render(summary))
+			line := fmt.Sprintf("%s▸ %s %s%s", prefix, verb, nameStyled, dimStyle.Render(" "+summary))
 			if tg.result == "" && !tg.isError {
 				line += dimStyle.Render(" ⋯") // running
 			}
+			line += diffLabel
 			b.WriteString(line)
 		} else {
 			// Expanded: header + args + result
@@ -2724,7 +2795,7 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 			if i > startIdx {
 				prefix = "  "
 			}
-			b.WriteString(fmt.Sprintf("%s▾ %s %s\n", prefix, nameStyled, dimStyle.Render(summary)))
+			b.WriteString(fmt.Sprintf("%s▾ %s %s%s%s\n", prefix, verb, nameStyled, dimStyle.Render(" "+summary), diffLabel))
 			if tg.args != "" && tg.args != "{}" {
 				b.WriteString(dimStyle.Render(indentText(tg.args, "      ")) + "\n")
 			}
@@ -3008,6 +3079,208 @@ func (m *tuiModel) openModelPicker() {
 	}
 
 	m.showModelPicker = true
+}
+
+// openSessionPicker populates the session list and shows the interactive picker.
+func (m *tuiModel) openSessionPicker() {
+	if m.app.SessionStore == nil {
+		return
+	}
+	sessions, err := m.app.SessionStore.ListAll(context.Background())
+	if err != nil || len(sessions) == 0 {
+		m.messages = append(m.messages, chatMessage{"system", "No saved sessions found."})
+		return
+	}
+	// Backfill titles from history for sessions with generic title
+	for _, s := range sessions {
+		if s.Title == "Interactive Session" || s.Title == "" {
+			if fp := firstUserPrompt(m.app.SessionStore, s.ID); fp != "" {
+				if s.Metadata == nil {
+					s.Metadata = make(map[string]any)
+				}
+				s.Metadata["first_prompt"] = fp
+			}
+		}
+	}
+	m.sessionPickerList = sessions
+	m.sessionPickerSel = 0
+	m.showSessionPicker = true
+}
+
+// handleSessionPickerKey handles keyboard input for the session picker.
+func (m tuiModel) handleSessionPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quitting = true
+		return m, tea.Quit
+
+	case tea.KeyEscape:
+		m.showSessionPicker = false
+		return m, nil
+
+	case tea.KeyEnter:
+		if len(m.sessionPickerList) > 0 && m.sessionPickerSel < len(m.sessionPickerList) {
+			selected := m.sessionPickerList[m.sessionPickerSel]
+			m.showSessionPicker = false
+			m.resumeSession(selected.ID)
+		}
+		return m, nil
+
+	case tea.KeyUp:
+		if m.sessionPickerSel > 0 {
+			m.sessionPickerSel--
+		}
+		return m, nil
+
+	case tea.KeyDown:
+		if m.sessionPickerSel < len(m.sessionPickerList)-1 {
+			m.sessionPickerSel++
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// resumeSession loads a session by ID and replaces the current TUI state.
+func (m *tuiModel) resumeSession(id string) {
+	sess, err := m.app.SessionManager.Resume(id)
+	if err != nil {
+		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Failed to resume session: %s", err)})
+		return
+	}
+	// Swap to the resumed session
+	m.sess = sess
+	m.sessionID = sess.ID
+	sess.SetStatus(session.StatusIdle)
+
+	// Reset display state
+	m.messages = nil
+	m.completedTurns = nil
+	m.collapsibles = nil
+	m.streamToolGroups = nil
+	m.streamResponse = ""
+	m.streamThinking = ""
+	m.streaming = false
+	m.history = nil
+	m.turnCount = 0
+	m.scrollOffset = 0
+	m.focusIndex = -1
+	m.input = ""
+	m.cursor = 0
+
+	// Replay history into the clean state
+	m.replayHistory()
+	m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Resumed session: %s", sess.Title)})
+}
+
+// renderSessionPicker renders the interactive session picker UI.
+func (m tuiModel) renderSessionPicker() string {
+	w := m.width
+	if w < 40 {
+		w = 40
+	}
+
+	var b strings.Builder
+
+	// Header
+	title := boldPrimary.Render("Resume a session")
+	subtitle := dimStyle.Render(fmt.Sprintf(" (%d sessions)", len(m.sessionPickerList)))
+	b.WriteString(title + subtitle + "\n")
+	b.WriteString(dimStyle.Render("\xe2\x86\x91\xe2\x86\x93 navigate \xc2\xb7 Enter resume \xc2\xb7 Esc cancel"))
+	b.WriteString("\n\n")
+
+	// Session list with viewport clamping
+	sessions := m.sessionPickerList
+	maxVisible := 10
+	if m.height > 0 {
+		maxVisible = m.height - 10
+		if maxVisible < 3 {
+			maxVisible = 3
+		}
+	}
+
+	// Clamp selection
+	if m.sessionPickerSel >= len(sessions) {
+		m.sessionPickerSel = len(sessions) - 1
+	}
+	if m.sessionPickerSel < 0 {
+		m.sessionPickerSel = 0
+	}
+
+	start := 0
+	if m.sessionPickerSel >= maxVisible {
+		start = m.sessionPickerSel - maxVisible + 1
+	}
+	end := start + maxVisible
+	if end > len(sessions) {
+		end = len(sessions)
+	}
+
+	for i := start; i < end; i++ {
+		s := sessions[i]
+		// Build display title
+		displayTitle := s.Title
+		if displayTitle == "" || displayTitle == "Interactive Session" {
+			if fp, ok := s.Metadata["first_prompt"].(string); ok && fp != "" {
+				displayTitle = fp
+			} else if displayTitle == "" {
+				displayTitle = "(untitled)"
+			}
+		}
+		if runes := []rune(displayTitle); len(runes) > 60 {
+			displayTitle = string(runes[:57]) + "..."
+		}
+		displayTitle = strings.ReplaceAll(displayTitle, "\n", " ")
+
+		// Relative time
+		var relTime string
+		if s.UpdatedAt.IsZero() {
+			relTime = "unknown"
+		} else {
+			ago := time.Since(s.UpdatedAt)
+			switch {
+			case ago < time.Minute:
+				relTime = "just now"
+			case ago < time.Hour:
+				relTime = fmt.Sprintf("%dm ago", int(ago.Minutes()))
+			case ago < 24*time.Hour:
+				relTime = fmt.Sprintf("%dh ago", int(ago.Hours()))
+			case ago < 7*24*time.Hour:
+				relTime = fmt.Sprintf("%dd ago", int(ago.Hours()/24))
+			default:
+				relTime = s.UpdatedAt.Format("Jan 02")
+			}
+		}
+
+		// Turn count from metadata
+		var meta string
+		if v, ok := metaInt(s.Metadata, "turns"); ok && v > 0 {
+			meta = fmt.Sprintf("%d turns", v)
+		}
+		metaStr := dimStyle.Render(relTime)
+		if meta != "" {
+			metaStr = dimStyle.Render(meta+" \xc2\xb7 ") + metaStr
+		}
+
+		if i == m.sessionPickerSel {
+			arrow := primaryStyle.Render("\xe2\x9d\xaf")
+			name := primaryStyle.Copy().Bold(true).Render(displayTitle)
+			b.WriteString(fmt.Sprintf("  %s %s  %s\n", arrow, name, metaStr))
+		} else {
+			b.WriteString(fmt.Sprintf("    %s  %s\n", textStyle.Render(displayTitle), metaStr))
+		}
+	}
+
+	remaining := len(sessions) - end
+	if remaining > 0 {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  \xe2\x96\xbc %d more", remaining)))
+		b.WriteString("\n")
+	} else if len(sessions) == 0 {
+		b.WriteString(dimStyle.Render("  No sessions found"))
+		b.WriteString("\n")
+	}
+
+	return b.String()
 }
 
 // filteredPickerModels returns models matching the current search + filter.
