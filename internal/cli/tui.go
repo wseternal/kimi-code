@@ -915,8 +915,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						IsError:   tg.isError,
 					})
 				}
+				// Find the last user message to use as the prompt for persistence.
+				// m.messages ends with the assistant response just appended above;
+				// the user prompt is immediately before it.
+				var lastUserContent string
+				for i := len(m.messages) - 1; i >= 0; i-- {
+					if m.messages[i].role == "user" {
+						lastUserContent = m.messages[i].content
+						break
+					}
+				}
 				_ = m.app.SessionStore.History().AddTurn(context.Background(), m.sessionID,
-					m.messages[len(m.messages)-1].content, // last user message
+					lastUserContent,
 					m.streamResponse, m.streamThinking, toolCalls)
 				m.sess.SetStatus(session.StatusIdle)
 				// Persist session summary metadata for /sessions listing
