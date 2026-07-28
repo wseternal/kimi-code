@@ -331,6 +331,14 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 
 	permChain := permission.DefaultChain()
 
+	// Resolve the model's context window size from config so the status bar
+	// displays the correct total (e.g. "ctx: 0 / 128K tokens") instead of
+	// the hardcoded default.
+	var maxCtx int
+	if _, mc := app.Config.ResolveModel(); mc != nil {
+		maxCtx = mc.MaxContextSize
+	}
+
 	// Initialize input history
 	var inputHist *InputHistory
 	home, _ := os.UserHomeDir()
@@ -355,7 +363,7 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 		permChain:    permChain,
 		focusIndex:   -1,
 		prompter:     permission.NewPrompter(),
-		contextMgr:   agentctx.NewContextManager(0),
+		contextMgr:   agentctx.NewContextManager(maxCtx),
 		goalTracker:  goal.NewTracker(),
 		inputHistory: inputHist,
 	}
@@ -371,6 +379,11 @@ func (m *tuiModel) recreateProvider() {
 		if err == nil {
 			m.provider = p
 		}
+	}
+	// Sync the context manager's max tokens with the current model config
+	// so the status bar reflects the correct context window size.
+	if _, mc := m.app.Config.ResolveModel(); mc != nil && mc.MaxContextSize > 0 {
+		m.contextMgr.SetMaxTokens(mc.MaxContextSize)
 	}
 }
 

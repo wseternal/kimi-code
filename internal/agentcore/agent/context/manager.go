@@ -66,6 +66,16 @@ func (cm *ContextManager) MaxTokens() int {
 	return cm.maxTokens
 }
 
+// SetMaxTokens updates the context window size. If n <= 0, falls back to the
+// default (131072). This is called when the model is changed at runtime (e.g.
+// via /model) so the status bar reflects the correct limit.
+func (cm *ContextManager) SetMaxTokens(n int) {
+	if n <= 0 {
+		n = 131072 // default 128K
+	}
+	cm.maxTokens = n
+}
+
 // UsagePercent returns the percentage of context window used.
 func (cm *ContextManager) UsagePercent() float64 {
 	if cm.maxTokens == 0 {

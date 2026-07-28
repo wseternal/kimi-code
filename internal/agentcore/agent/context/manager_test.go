@@ -115,6 +115,43 @@ func TestCompactMessagesNotEnoughTurns(t *testing.T) {
 	}
 }
 
+func TestSetMaxTokens(t *testing.T) {
+	cm := NewContextManager(1000)
+	cm.AddTurnUsage(500)
+
+	// Verify initial state
+	if cm.MaxTokens() != 1000 {
+		t.Errorf("MaxTokens = %d, want 1000", cm.MaxTokens())
+	}
+	if cm.UsagePercent() != 50.0 {
+		t.Errorf("UsagePercent = %.1f, want 50.0", cm.UsagePercent())
+	}
+
+	// Update max tokens — usage should stay the same, percent should change
+	cm.SetMaxTokens(2000)
+	if cm.MaxTokens() != 2000 {
+		t.Errorf("after SetMaxTokens, MaxTokens = %d, want 2000", cm.MaxTokens())
+	}
+	if cm.CurrentUsage() != 500 {
+		t.Errorf("after SetMaxTokens, CurrentUsage = %d, want 500", cm.CurrentUsage())
+	}
+	if cm.UsagePercent() != 25.0 {
+		t.Errorf("after SetMaxTokens, UsagePercent = %.1f, want 25.0", cm.UsagePercent())
+	}
+
+	// Display should reflect the new max
+	display := cm.UsageDisplay()
+	if !strings.Contains(display, "2.0K") {
+		t.Errorf("UsageDisplay = %q, expected to contain '2.0K'", display)
+	}
+
+	// SetMaxTokens(0) should fall back to default (131072)
+	cm.SetMaxTokens(0)
+	if cm.MaxTokens() != 131072 {
+		t.Errorf("SetMaxTokens(0) → MaxTokens = %d, want 131072 (default)", cm.MaxTokens())
+	}
+}
+
 func TestFormatTokenCount(t *testing.T) {
 	tests := []struct {
 		input int
