@@ -425,6 +425,8 @@ func (p *OpenAIProvider) consumeSSEStream(
 
 	// Stream raw SSE data lines to a temp file for zero-buffer auditing.
 	// Only created when the OnRawResponse callback is set.
+	var finishEmitted bool
+
 	captureRaw := opts != nil && opts.OnRawResponse != nil
 	var rawFile *os.File
 	if captureRaw {
@@ -432,6 +434,9 @@ func (p *OpenAIProvider) consumeSSEStream(
 		rawFile, err = os.CreateTemp("", "kimi-raw-resp-*.jsonl")
 		if err != nil {
 			captureRaw = false // fall back to no capture on file error
+			if tracing {
+				trace.Log("http", "raw_capture_unavailable", map[string]any{"error": err.Error()})
+			}
 		}
 	}
 
@@ -475,6 +480,9 @@ func (p *OpenAIProvider) consumeSSEStream(
 		if captureRaw && rawFile != nil {
 			if _, err := rawFile.WriteString(data + "\n"); err != nil {
 				captureRaw = false // stop writing on first failure to avoid futile retries
+				if tracing {
+					trace.Log("http", "raw_capture_disabled", map[string]any{"error": err.Error()})
+				}
 			}
 		}
 
@@ -501,29 +509,6 @@ func (p *OpenAIProvider) consumeSSEStream(
 			case partsCh <- kosong.StreamedMessagePart{Type: "usage", Usage: usage}:
 			case <-ctx.Done():
 				return
-			}
-		}
-
-		// Capture finish_reason from any choice in the chunk.
-		// In OpenAI streaming, finish_reason appears in the last chunk's choice.
-		// Only emit the first finish_reason to avoid multiple "finish" parts.
-		for _, choice := range chunk.Choices {
-			if choice.FinishReason != nil {
-				// Populate stream-level metadata for callers using stream.FinishReason.
-				if stream != nil {
-					stream.RawFinishReason = choice.FinishReason
-					reason := MapFinishReason(choice.FinishReason)
-					stream.FinishReason = &reason
-				}
-				select {
-				case partsCh <- kosong.StreamedMessagePart{
-					Type:         "finish",
-					FinishReason: choice.FinishReason,
-				}:
-				case <-ctx.Done():
-					return
-				}
-				break // only first finish_reason
 			}
 		}
 
@@ -580,6 +565,31 @@ func (p *OpenAIProvider) consumeSSEStream(
 					case <-ctx.Done():
 						return
 					}
+				}
+			}
+		}
+
+		// Capture finish_reason after all content from this chunk has been emitted,
+		// so consumers always see content before the finish signal.
+		if !finishEmitted {
+			for _, choice := range chunk.Choices {
+				if choice.FinishReason != nil {
+					finishEmitted = true
+					// Populate stream-level metadata for callers using stream.FinishReason.
+					if stream != nil {
+						stream.RawFinishReason = choice.FinishReason
+						reason := MapFinishReason(choice.FinishReason)
+						stream.FinishReason = &reason
+					}
+					select {
+					case partsCh <- kosong.StreamedMessagePart{
+						Type:         "finish",
+						FinishReason: choice.FinishReason,
+					}:
+					case <-ctx.Done():
+						return
+					}
+					break // only first finish_reason in this chunk
 				}
 			}
 		}

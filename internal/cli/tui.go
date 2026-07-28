@@ -871,7 +871,9 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 		for step := 0; step < maxSteps; step++ {
 			// Reset finish reason per step via channel so the model's lastFinishReason
 			// doesn't carry over from a previous step if this step errors.
-			ch <- streamEvent{kind: "finish", finishReason: nil}
+			if step > 0 {
+				ch <- streamEvent{kind: "finish", finishReason: nil}
+			}
 			// Build GenerateOptions with raw payload capture for audit
 			var genOpts *kosong.GenerateOptions
 			if m.auditWriter != nil {
@@ -967,6 +969,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 					case "usage":
 						batchFlush() // flush pending text before usage event
 						ch <- streamEvent{kind: "usage", usage: part.Usage}
+						continue // don't treat as content part
 					case "finish":
 						batchFlush() // flush pending text before finish event
 						stepFinishReason = part.FinishReason
@@ -1302,6 +1305,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					diag += fmt.Sprintf(" [reasoning tokens: %d/%d output]", m.turnUsage.ReasoningTokens, m.turnUsage.Output)
 				}
 				diag += " The thinking budget may have been exhausted. Try rephrasing or reducing thinking effort."
+				m.messages = append(m.messages, chatMessage{"assistant", diag})
+			} else if m.streamResponse == "" && m.streamThinking == "" {
+				// Completely empty response — likely preceded by an error, but
+				// provide a diagnostic just in case.
+				diag := "⚠ The model produced no response."
+				if m.lastFinishReason != nil {
+					diag += fmt.Sprintf(" (finish_reason: %s)", *m.lastFinishReason)
+				}
 				m.messages = append(m.messages, chatMessage{"assistant", diag})
 			} else {
 				m.messages = append(m.messages, chatMessage{"assistant", m.streamResponse})
