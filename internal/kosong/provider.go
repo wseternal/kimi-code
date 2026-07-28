@@ -70,6 +70,14 @@ type GenerateOptions struct {
 	OnRequestSent  func()               `json:"-"`
 	OnTraceID      func(traceID *string) `json:"-"`
 	OnStreamEnd    func(stats *StreamDecodeStats) `json:"-"`
+	// OnRawRequest is called with the verbatim JSON request body before it is
+	// sent over the wire. Useful for audit/diagnostic recording.
+	OnRawRequest func(body []byte) `json:"-"`
+	// OnRawResponse is called with the path to a temporary file containing the
+	// accumulated raw SSE data lines from the response stream (one JSON object
+	// per line). The caller is responsible for reading and deleting the file.
+	// For error responses, the file contains the error body instead.
+	OnRawResponse func(filePath string) `json:"-"`
 }
 
 // StreamedMessage is a stream of message parts produced by a single LLM response.

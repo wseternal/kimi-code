@@ -125,6 +125,9 @@ type StreamedMessagePart struct {
 	Index         interface{}            `json:"index,omitempty"`
 	Extras        map[string]interface{} `json:"extras,omitempty"`
 	Usage         *TokenUsage            `json:"usage,omitempty"`
+	// FinishReason is the raw finish_reason from the upstream API (e.g. "stop",
+	// "length", "tool_calls"). Only set on "finish" type parts.
+	FinishReason *string `json:"finishReason,omitempty"`
 }
 
 // IsContentPart returns true if the part is a content block (text, think, image_url, etc.).

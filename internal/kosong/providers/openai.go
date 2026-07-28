@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/visdomtech/kimi-code/internal/kosong"
@@ -110,13 +111,18 @@ type openAIChoice struct {
 }
 
 type openAIUsage struct {
-	PromptTokens     int                `json:"prompt_tokens"`
-	CompletionTokens int                `json:"completion_tokens"`
-	PromptDetails    *openAIUsageDetail `json:"prompt_tokens_details,omitempty"`
+	PromptTokens        int                      `json:"prompt_tokens"`
+	CompletionTokens    int                      `json:"completion_tokens"`
+	PromptDetails       *openAIUsageDetail       `json:"prompt_tokens_details,omitempty"`
+	CompletionDetails   *openAICompletionDetail  `json:"completion_tokens_details,omitempty"`
 }
 
 type openAIUsageDetail struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+type openAICompletionDetail struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 type openAIErrorBody struct {
@@ -293,6 +299,11 @@ func (p *OpenAIProvider) Generate(
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	// Fire raw request callback for audit/diagnostics
+	if opts != nil && opts.OnRawRequest != nil {
+		opts.OnRawRequest(bodyBytes)
+	}
+
 	// Fire callbacks
 	if opts != nil && opts.OnRequestStart != nil {
 		opts.OnRequestStart()
@@ -336,6 +347,14 @@ func (p *OpenAIProvider) Generate(
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		trace.Log("http", "error", map[string]any{"error": err.Error()})
+		// Fire raw response callback with network error for diagnostics
+		if opts != nil && opts.OnRawResponse != nil {
+			if f, ferr := os.CreateTemp("", "kimi-raw-resp-*.jsonl"); ferr == nil {
+				fmt.Fprintf(f, "network_error: %s\n", err.Error())
+				f.Close()
+				opts.OnRawResponse(f.Name())
+			}
+		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 
@@ -349,6 +368,16 @@ func (p *OpenAIProvider) Generate(
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		// Fire raw response callback with error body for diagnostics
+		if opts != nil && opts.OnRawResponse != nil {
+			if f, ferr := os.CreateTemp("", "kimi-raw-resp-*.jsonl"); ferr == nil {
+				fmt.Fprintf(f, "http_status: %d\n", resp.StatusCode)
+				f.Write(body)
+				f.Write([]byte("\n"))
+				f.Close()
+				opts.OnRawResponse(f.Name())
+			}
+		}
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -369,17 +398,21 @@ func (p *OpenAIProvider) Generate(
 		TraceID:  traceID,
 	}
 
-	go p.consumeSSEStream(ctx, resp.Body, partsCh, opts)
+	go p.consumeSSEStream(ctx, resp.Body, partsCh, opts, stream)
 
 	return stream, nil
 }
 
 // consumeSSEStream reads SSE events from the response body and sends parts to the channel.
+// When raw response capture is enabled (OnRawResponse callback set), each SSE data line
+// is streamed directly to a temporary file on disk (zero-buffer auditing) instead of
+// accumulating in memory. The file path is passed to the callback when the stream ends.
 func (p *OpenAIProvider) consumeSSEStream(
 	ctx context.Context,
 	body io.ReadCloser,
 	partsCh chan<- kosong.StreamedMessagePart,
 	opts *kosong.GenerateOptions,
+	stream *kosong.StreamedMessage,
 ) {
 	defer close(partsCh)
 	defer body.Close()
@@ -389,9 +422,35 @@ func (p *OpenAIProvider) consumeSSEStream(
 
 	tracing := trace.Enabled()
 	var chunkCount int
+
+	// Stream raw SSE data lines to a temp file for zero-buffer auditing.
+	// Only created when the OnRawResponse callback is set.
+	var finishEmitted bool
+
+	captureRaw := opts != nil && opts.OnRawResponse != nil
+	var rawFile *os.File
+	if captureRaw {
+		var err error
+		rawFile, err = os.CreateTemp("", "kimi-raw-resp-*.jsonl")
+		if err != nil {
+			captureRaw = false // fall back to no capture on file error
+			if tracing {
+				trace.Log("http", "raw_capture_unavailable", map[string]any{"error": err.Error()})
+			}
+		}
+	}
+
 	defer func() {
 		if tracing {
 			trace.Log("http", "stream_end", map[string]any{"chunks": chunkCount})
+		}
+		if rawFile != nil {
+			rawFile.Close()
+			if opts.OnRawResponse != nil {
+				opts.OnRawResponse(rawFile.Name())
+			} else {
+				os.Remove(rawFile.Name()) // cleanup if callback gone
+			}
 		}
 	}()
 
@@ -417,6 +476,16 @@ func (p *OpenAIProvider) consumeSSEStream(
 			return
 		}
 
+		// Stream raw data line to temp file for verbatim audit (zero-copy to disk)
+		if captureRaw && rawFile != nil {
+			if _, err := rawFile.WriteString(data + "\n"); err != nil {
+				captureRaw = false // stop writing on first failure to avoid futile retries
+				if tracing {
+					trace.Log("http", "raw_capture_disabled", map[string]any{"error": err.Error()})
+				}
+			}
+		}
+
 		var chunk openAIResponseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue // skip malformed chunks
@@ -432,6 +501,9 @@ func (p *OpenAIProvider) consumeSSEStream(
 			if chunk.Usage.PromptDetails != nil {
 				usage.InputCacheRead = chunk.Usage.PromptDetails.CachedTokens
 				usage.InputOther -= usage.InputCacheRead
+			}
+			if chunk.Usage.CompletionDetails != nil {
+				usage.ReasoningTokens = chunk.Usage.CompletionDetails.ReasoningTokens
 			}
 			select {
 			case partsCh <- kosong.StreamedMessagePart{Type: "usage", Usage: usage}:
@@ -493,6 +565,31 @@ func (p *OpenAIProvider) consumeSSEStream(
 					case <-ctx.Done():
 						return
 					}
+				}
+			}
+		}
+
+		// Capture finish_reason after all content from this chunk has been emitted,
+		// so consumers always see content before the finish signal.
+		if !finishEmitted {
+			for _, choice := range chunk.Choices {
+				if choice.FinishReason != nil {
+					finishEmitted = true
+					// Populate stream-level metadata for callers using stream.FinishReason.
+					if stream != nil {
+						stream.RawFinishReason = choice.FinishReason
+						reason := MapFinishReason(choice.FinishReason)
+						stream.FinishReason = &reason
+					}
+					select {
+					case partsCh <- kosong.StreamedMessagePart{
+						Type:         "finish",
+						FinishReason: choice.FinishReason,
+					}:
+					case <-ctx.Done():
+						return
+					}
+					break // only first finish_reason in this chunk
 				}
 			}
 		}

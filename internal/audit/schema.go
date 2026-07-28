@@ -35,6 +35,12 @@ const (
 	EvtLLMError      = "llm.error"
 	EvtLLMDone       = "llm.done"
 
+	// Raw HTTP payload events — verbatim request/response bodies for
+	// post-mortem diagnostics. These can be large and are stored
+	// uncompressed so they can be fed back to an LLM for analysis.
+	EvtLLMRawRequest  = "llm.raw_request"
+	EvtLLMRawResponse = "llm.raw_response"
+
 	// High-level turn event — recorded once per completed turn with the
 	// full prompt, response, thinking, and tool calls. The facade uses
 	// these to reconstruct session state without replaying deltas.
@@ -83,13 +89,14 @@ type SessionSummary struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// TurnRecord captures a completed turn for session reconstruction.
+// TurnRecord captures the complete data for a single completed turn.
 type TurnRecord struct {
-	Prompt   string          `json:"prompt"`
-	Response string          `json:"response"`
-	Thinking string          `json:"thinking,omitempty"`
-	Tools    []ToolCallRecord `json:"tools,omitempty"`
-	Usage    *UsageRecord    `json:"usage,omitempty"`
+	Prompt       string           `json:"prompt"`
+	Response     string           `json:"response"`
+	Thinking     string           `json:"thinking,omitempty"`
+	Tools        []ToolCallRecord `json:"tools,omitempty"`
+	Usage        *UsageRecord     `json:"usage,omitempty"`
+	FinishReason string           `json:"finishReason,omitempty"`
 }
 
 // ToolCallRecord captures a tool invocation within a turn.
@@ -102,12 +109,13 @@ type ToolCallRecord struct {
 	Duration  time.Duration `json:"duration,omitempty"`
 }
 
-// UsageRecord captures token usage for a turn.
+// UsageRecord captures token usage for a single turn.
 type UsageRecord struct {
-	InputOther       int `json:"inputOther"`
-	Output           int `json:"output"`
-	InputCacheRead   int `json:"inputCacheRead"`
+	InputOther         int `json:"inputOther"`
+	Output             int `json:"output"`
+	InputCacheRead     int `json:"inputCacheRead"`
 	InputCacheCreation int `json:"inputCacheCreation"`
+	ReasoningTokens    int `json:"reasoningTokens,omitempty"`
 }
 
 // Key builder functions — pure, no I/O.
