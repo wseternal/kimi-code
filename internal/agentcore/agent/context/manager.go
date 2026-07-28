@@ -37,7 +37,7 @@ type ContextManager struct {
 // NewContextManager creates a new context manager with the given max tokens.
 func NewContextManager(maxTokens int) *ContextManager {
 	if maxTokens <= 0 {
-		maxTokens = 131072 // default 128K
+		maxTokens = 262144 // default 256K
 	}
 	return &ContextManager{maxTokens: maxTokens}
 }
@@ -67,11 +67,11 @@ func (cm *ContextManager) MaxTokens() int {
 }
 
 // SetMaxTokens updates the context window size. If n <= 0, falls back to the
-// default (131072). This is called when the model is changed at runtime (e.g.
+// default (262144). This is called when the model is changed at runtime (e.g.
 // via /model) so the status bar reflects the correct limit.
 func (cm *ContextManager) SetMaxTokens(n int) {
 	if n <= 0 {
-		n = 131072 // default 128K
+		n = 262144 // default 256K
 	}
 	cm.maxTokens = n
 }

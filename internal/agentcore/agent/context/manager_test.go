@@ -145,16 +145,16 @@ func TestSetMaxTokens(t *testing.T) {
 		t.Errorf("UsageDisplay = %q, expected to contain '2.0K'", display)
 	}
 
-	// SetMaxTokens(0) should fall back to default (131072)
+	// SetMaxTokens(0) should fall back to default (262144)
 	cm.SetMaxTokens(0)
-	if cm.MaxTokens() != 131072 {
-		t.Errorf("SetMaxTokens(0) → MaxTokens = %d, want 131072 (default)", cm.MaxTokens())
+	if cm.MaxTokens() != 262144 {
+		t.Errorf("SetMaxTokens(0) → MaxTokens = %d, want 262144 (default)", cm.MaxTokens())
 	}
 
 	// SetMaxTokens(-100) should also fall back to default
 	cm.SetMaxTokens(-100)
-	if cm.MaxTokens() != 131072 {
-		t.Errorf("SetMaxTokens(-100) → MaxTokens = %d, want 131072 (default)", cm.MaxTokens())
+	if cm.MaxTokens() != 262144 {
+		t.Errorf("SetMaxTokens(-100) → MaxTokens = %d, want 262144 (default)", cm.MaxTokens())
 	}
 }
 
