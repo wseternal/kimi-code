@@ -903,3 +903,72 @@ func TestRenderSessionPicker(t *testing.T) {
 		t.Error("render should contain 'Enter resume' hint")
 	}
 }
+
+// TestScrollWithEmptyInput_UpDown tests that Up/Down arrows scroll the
+// content viewport when the input is empty, instead of navigating input history.
+func TestScrollWithEmptyInput_UpDown(t *testing.T) {
+	// Build a model with enough messages to require scrolling
+	var msgs []chatMessage
+	for i := 0; i < 50; i++ {
+		msgs = append(msgs, chatMessage{role: "assistant", content: fmt.Sprintf("Line %d of output content", i)})
+	}
+
+	m := tuiModel{
+		messages:     msgs,
+		input:        "", // empty input
+		cursor:       0,
+		scrollOffset: 0,
+		width:        80,
+		height:       24,
+		inputHistory: &InputHistory{
+			entries: []string{"previous question 1", "previous question 2"},
+			index:   -1,
+		},
+	}
+
+	// Press Up arrow — should scroll viewport up, NOT navigate input history
+	got, _ := handleKeyHelper(m, tea.KeyMsg{Type: tea.KeyUp})
+	if got.scrollOffset == 0 {
+		t.Error("Up arrow with empty input should increase scrollOffset (scroll content up)")
+	}
+	if got.input != "" {
+		t.Errorf("Up arrow with empty input should not change input field, got: %q", got.input)
+	}
+
+	// Press Up again — scroll further
+	got2, _ := handleKeyHelper(got, tea.KeyMsg{Type: tea.KeyUp})
+	if got2.scrollOffset <= got.scrollOffset {
+		t.Error("Second Up arrow should increase scrollOffset further")
+	}
+
+	// Press Down arrow — should scroll viewport back down
+	got3, _ := handleKeyHelper(got2, tea.KeyMsg{Type: tea.KeyDown})
+	if got3.scrollOffset >= got2.scrollOffset {
+		t.Error("Down arrow should decrease scrollOffset (scroll content down)")
+	}
+}
+
+// TestInputHistoryWithNonEmptyInput tests that Up/Down arrows navigate
+// input history when the input field is non-empty.
+func TestInputHistoryWithNonEmptyInput(t *testing.T) {
+	m := tuiModel{
+		input:        "current text",
+		cursor:       12,
+		scrollOffset: 0,
+		width:        80,
+		height:       24,
+		inputHistory: &InputHistory{
+			entries: []string{"previous question"},
+			index:   -1,
+		},
+	}
+
+	// Press Up with non-empty input — should navigate history
+	got, _ := handleKeyHelper(m, tea.KeyMsg{Type: tea.KeyUp})
+	if got.input != "previous question" {
+		t.Errorf("Up arrow with non-empty input should navigate history, got: %q", got.input)
+	}
+	if got.scrollOffset != 0 {
+		t.Error("Up arrow with non-empty input should not change scrollOffset")
+	}
+}

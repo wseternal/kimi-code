@@ -1132,6 +1132,9 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if strings.ContainsRune(m.input, '\n') {
 			// Navigate between lines in multi-line input
 			m.moveCursorUp()
+		} else if m.input == "" {
+			// Empty input: scroll content viewport up
+			m.scrollOffset++
 		} else if m.inputHistory != nil {
 			// Navigate input history
 			if m.inputHistory.index == -1 {
@@ -1154,6 +1157,12 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if strings.ContainsRune(m.input, '\n') {
 			// Navigate between lines in multi-line input
 			m.moveCursorDown()
+		} else if m.input == "" {
+			// Empty input: scroll content viewport down
+			m.scrollOffset--
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
+			}
 		} else if m.inputHistory != nil && m.inputHistory.index >= 0 {
 			// Navigate input history (newer)
 			if next, ok := m.inputHistory.Next(); ok {
