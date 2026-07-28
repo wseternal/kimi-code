@@ -1067,8 +1067,12 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 
-	// ── Newline (Alt+Enter / Option+Enter) ──
+	// ── Submit (Alt+Enter / Option+Enter) ──
 	case msg.Type == tea.KeyEnter && msg.Alt:
+		return m.handleSubmit()
+
+	// ── Newline (Enter) ──
+	case msg.Type == tea.KeyEnter:
 		runes := []rune(m.input)
 		runes = append(runes[:m.cursor], append([]rune{'\n'}, runes[m.cursor:]...)...)
 		m.input = string(runes)
@@ -1077,9 +1081,9 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showSuggestions = false
 		return m, nil
 
-	// ── Submit ──
-	case msg.Type == tea.KeyEnter:
-		return m.handleSubmit()
+	// ── Open external editor (Ctrl+G) ──
+	case msg.Type == tea.KeyCtrlG:
+		return m, m.launchEditor()
 
 	// ── Readline: Ctrl+A (start of line) ──
 	case msg.Type == tea.KeyCtrlA:
