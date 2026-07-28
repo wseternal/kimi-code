@@ -282,7 +282,10 @@ type pickerEntry struct {
 
 func newTUIModel(app *App, sess *session.Session) tuiModel {
 	cwd, _ := os.Getwd()
-	modelName := app.Config.DefaultProvider
+	modelName := app.Config.DefaultModel
+	if modelName == "" {
+		modelName = app.Config.DefaultProvider
+	}
 	if modelName == "" {
 		modelName = "kimi"
 	}
@@ -3143,7 +3146,14 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	fmt.Println("╰─────────────────────────────────────────────╯")
 	fmt.Printf("  Directory: %s\n", cwd)
 	fmt.Printf("  Session:   %s\n", sess.ID)
-	fmt.Printf("  Model:     %s %s\n", a.Config.DefaultProvider, providerStatus)
+	modelName := a.Config.DefaultModel
+	if modelName == "" {
+		modelName = a.Config.DefaultProvider
+	}
+	if modelName == "" {
+		modelName = "kimi"
+	}
+	fmt.Printf("  Model:     %s %s\n", modelName, providerStatus)
 	fmt.Printf("  Version:   %s\n", version)
 	fmt.Println()
 

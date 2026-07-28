@@ -7,6 +7,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
+	"github.com/visdomtech/kimi-code/internal/agentcore/config"
+	"github.com/visdomtech/kimi-code/internal/agentcore/di"
+	"github.com/visdomtech/kimi-code/internal/agentcore/session"
 )
 
 // handleKey is a helper that calls handleKey and type-asserts the result back to tuiModel.
@@ -167,6 +170,54 @@ func TestHandleSubmit_SkillRoutesThroughLLM(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected 'Skill loaded: test-skill' system message")
+	}
+}
+
+// TestNewTUIModel_UsesDefaultModel verifies that the TUI model field is set
+// from DefaultModel in config, not DefaultProvider. This ensures the CLI
+// startup Model matches the default_model defined in ~/.kimi-code/config.toml.
+func TestNewTUIModel_UsesDefaultModel(t *testing.T) {
+	tests := []struct {
+		name            string
+		defaultModel    string
+		defaultProvider string
+		wantModel       string
+	}{
+		{
+			name:            "default_model set to a specific alias",
+			defaultModel:    "kimi-code/k3-256k",
+			defaultProvider: "managed:kimi-code",
+			wantModel:       "kimi-code/k3-256k",
+		},
+		{
+			name:            "default_model empty, falls back to defaultProvider",
+			defaultModel:    "",
+			defaultProvider: "kimi",
+			wantModel:       "kimi",
+		},
+		{
+			name:            "both empty, falls back to hardcoded default",
+			defaultModel:    "",
+			defaultProvider: "",
+			wantModel:       "kimi",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.DefaultModel = tt.defaultModel
+			cfg.DefaultProvider = tt.defaultProvider
+
+			app := &App{Config: cfg}
+			sess, _ := session.NewSession("test-session", "Test", di.NewAppScope("test"))
+
+			m := newTUIModel(app, sess)
+
+			if m.model != tt.wantModel {
+				t.Errorf("model = %q, want %q", m.model, tt.wantModel)
+			}
+		})
 	}
 }
 
