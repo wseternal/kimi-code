@@ -2622,16 +2622,18 @@ func getGitBranch(cwd string) string {
 
 // buildSystemPrompt creates a context-aware system prompt for the LLM.
 // It includes environment info, tool usage guidelines, and available skills.
+//
+// Cache-friendly layout: stable content (role, tool usage, guidelines, skills)
+// comes first so the API prefix cache hits across turns and sessions.
+// Dynamic env info (cwd, branch, OS) is appended at the tail so that changes
+// to those values don't invalidate the cacheable prefix.
 func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog) string {
 	osName := runtime.GOOS
 	arch := runtime.GOARCH
 
-	prompt := fmt.Sprintf(`You are a helpful AI coding assistant with access to tools for file operations, code search, and shell commands.
-
-## Environment
-- Working directory: %s
-- OS: %s/%s
-- Git branch: %s
+	// ── Stable prefix (identical across all sessions) ──
+	var sb strings.Builder
+	sb.WriteString(`You are a helpful AI coding assistant with access to tools for file operations, code search, and shell commands.
 
 ## Tool Usage
 - Use Read to examine files before editing
@@ -2646,9 +2648,9 @@ func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog) string {
 - Read existing code to understand context before editing
 - Use specific, targeted edits rather than rewriting entire files
 - Explain what you're doing and why
-- If a task requires multiple steps, plan them out first`, cwd, osName, arch, branch)
+- If a task requires multiple steps, plan them out first`)
 
-	// Append available skills section
+	// ── Skills (stable per session, appended after core) ──
 	if skillCat != nil {
 		var skillLines []string
 		for _, s := range skillCat.List() {
@@ -2662,11 +2664,15 @@ func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog) string {
 			skillLines = append(skillLines, line)
 		}
 		if len(skillLines) > 0 {
-			prompt += "\n\n## Available Skills\nThe following skills can be invoked by the user via slash commands:\n" + strings.Join(skillLines, "\n")
+			sb.WriteString("\n\n## Available Skills\nThe following skills can be invoked by the user via slash commands:\n")
+			sb.WriteString(strings.Join(skillLines, "\n"))
 		}
 	}
 
-	return prompt
+	// ── Dynamic env tail (changes per session; placed last to preserve cache prefix) ──
+	sb.WriteString(fmt.Sprintf("\n\n## Environment\n- Working directory: %s\n- OS: %s/%s\n- Git branch: %s", cwd, osName, arch, branch))
+
+	return sb.String()
 }
 
 // truncateOutput truncates tool output using a head/tail pattern.
