@@ -813,7 +813,7 @@ func TestSessionPickerKey_CtrlC(t *testing.T) {
 		width:            80,
 		height:           24,
 	}
-	result, cmd := m.handleSessionPickerKey(tea.KeyPressMsg{Code: '\x03'}) // ctrl+c
+	result, cmd := m.handleSessionPickerKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	got := result.(tuiModel)
 	if !got.quitting {
 		t.Error("Ctrl+C should set quitting = true")
@@ -1027,7 +1027,7 @@ func TestNewlineWithCtrlJ(t *testing.T) {
 		inputHistory: &InputHistory{index: -1},
 	}
 
-	got, _ := handleKeyHelper(m, tea.KeyPressMsg{Code: '\x0a'})
+	got, _ := handleKeyHelper(m, tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 	if got.input != "abc\n" {
 		t.Errorf("Ctrl+J should insert newline, got: %q", got.input)
 	}

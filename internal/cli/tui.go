@@ -191,8 +191,9 @@ type tuiModel struct {
 	turnCount int
 	yoloMode  bool
 	planMode  bool
-	quitting  bool
-	streaming bool
+	quitting      bool
+	ctrlCPending  bool // true after first Ctrl+C; second press quits
+	streaming     bool
 	sess      *session.Session
 	app       *App
 
@@ -1000,7 +1001,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampCursor() // guard against stale cursor after input clear
 			// Allow collapse navigation during streaming
 			switch {
-			case msg.Code == '\x03': // ctrl+c
+			case msg.Code == 'c' && msg.Mod&tea.ModCtrl != 0: // ctrl+c
 				m.quitting = true
 				return m, tea.Quit
 			case msg.Code == tea.KeyEscape:
@@ -1060,15 +1061,25 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// input is cleared by commands, model switch, etc.
 	m.clampCursor()
 
+	ctrl := msg.Mod&tea.ModCtrl != 0
 	switch {
-	// ── Quit (Ctrl+C / Ctrl+D) ──
-	case msg.Code == '\x03' || msg.Code == '\x04':
+	// ── Quit (Ctrl+C double-press / Ctrl+D) ──
+	case msg.Code == 'c' && ctrl:
+		if m.ctrlCPending {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		m.ctrlCPending = true
+		m.messages = append(m.messages, chatMessage{"system", "Press Ctrl+C again to exit."})
+		return m, nil
+	case msg.Code == 'd' && ctrl:
 		m.quitting = true
 		return m, tea.Quit
 
 	// ── Newline (Alt+Enter / Shift+Enter / Ctrl+J) ──
 	case msg.Code == tea.KeyEnter && (msg.Mod&tea.ModAlt != 0 || msg.Mod&tea.ModShift != 0),
-		msg.Code == '\x0a':
+		msg.Code == 'j' && ctrl:
+		m.ctrlCPending = false
 		runes := []rune(m.input)
 		runes = append(runes[:m.cursor], append([]rune{'\n'}, runes[m.cursor:]...)...)
 		m.input = string(runes)
@@ -1078,47 +1089,56 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// ── Submit ──
 	case msg.Code == tea.KeyEnter:
+		m.ctrlCPending = false
 		return m.handleSubmit()
 
 	// ── Open external editor (Ctrl+G) ──
-	case msg.Code == '\x07':
+	case msg.Code == 'g' && ctrl:
+		m.ctrlCPending = false
 		return m, m.launchEditor()
 
 	// ── Readline: Ctrl+A (start of line) ──
-	case msg.Code == '\x01':
+	case msg.Code == 'a' && ctrl:
+		m.ctrlCPending = false
 		m.cursor = 0
 		return m, nil
 
 	// ── Readline: Ctrl+E (end of line) ──
-	case msg.Code == '\x05':
+	case msg.Code == 'e' && ctrl:
+		m.ctrlCPending = false
 		m.cursor = utf8.RuneCountInString(m.input)
 		return m, nil
 
 	// ── Readline: Ctrl+K (kill to end) ──
-	case msg.Code == '\x0b':
+	case msg.Code == 'k' && ctrl:
+		m.ctrlCPending = false
 		runes := []rune(m.input)
 		m.input = string(runes[:m.cursor])
 		return m, nil
 
 	// ── Readline: Ctrl+U (kill to start) ──
-	case msg.Code == '\x15':
+	case msg.Code == 'u' && ctrl:
+		m.ctrlCPending = false
 		runes := []rune(m.input)
 		m.input = string(runes[m.cursor:])
 		m.cursor = 0
 		return m, nil
 
 	// ── Readline: Ctrl+W (delete word backward) ──
-	case msg.Code == '\x17':
+	case msg.Code == 'w' && ctrl:
+		m.ctrlCPending = false
 		m.deleteWordBackward()
 		return m, nil
 
 	// ── Readline: Ctrl+B / Alt+B (word back) ──
-	case msg.Code == '\x02' || (msg.Mod&tea.ModAlt != 0 && msg.Text == "b"):
+	case msg.Code == 'b' && ctrl, msg.Mod&tea.ModAlt != 0 && msg.Text == "b":
+		m.ctrlCPending = false
 		m.moveWordBackward()
 		return m, nil
 
 	// ── Readline: Ctrl+F / Alt+F (word forward) ──
-	case msg.Code == '\x06' || (msg.Mod&tea.ModAlt != 0 && msg.Text == "f"):
+	case msg.Code == 'f' && ctrl, msg.Mod&tea.ModAlt != 0 && msg.Text == "f":
+		m.ctrlCPending = false
 		m.moveWordForward()
 		return m, nil
 
@@ -2700,8 +2720,8 @@ func (m tuiModel) renderInput() string {
 		boxW = 20
 	}
 
-	// Render input with cursor
-	var inputWithCursor string
+	// Render input with cursor — handle multi-line correctly
+	// by placing cursor within the correct line, not across newlines.
 	runes := []rune(m.input)
 	cursorPos := m.cursor
 	if cursorPos > len(runes) {
@@ -2711,21 +2731,34 @@ func (m tuiModel) renderInput() string {
 		cursorPos = 0
 	}
 
-	before := string(runes[:cursorPos])
-	after := ""
-	if cursorPos < len(runes) {
-		after = string(runes[cursorPos:])
-	}
-
 	// Bar cursor: bright when visible, very dim when blinking off.
-	// Avoids block cursor (█) which adds 1 extra cell width causing visual spacing issues.
 	var cursorChar string
 	if m.cursorBlink || m.streaming {
 		cursorChar = mutedStyle.Render("▏")
 	} else {
 		cursorChar = primaryStyle.Render("▏")
 	}
-	inputWithCursor = textStyle.Render(before) + cursorChar + textStyle.Render(after)
+
+	// Split input into lines and insert cursor at the right position
+	// within the correct line, then style the whole thing at once.
+	lines := strings.Split(string(runes), "\n")
+	pos := 0
+	for i, line := range lines {
+		lineRunes := []rune(line)
+		lineLen := len(lineRunes)
+		if cursorPos >= pos && cursorPos <= pos+lineLen {
+			col := cursorPos - pos
+			before := string(lineRunes[:col])
+			after := ""
+			if col < lineLen {
+				after = string(lineRunes[col:])
+			}
+			lines[i] = before + cursorChar + after
+			break
+		}
+		pos += lineLen + 1 // +1 for the newline
+	}
+	inputWithCursor := textStyle.Render(strings.Join(lines, "\n"))
 
 	style := inputFocusedStyle
 	if m.showSuggestions {
@@ -3225,9 +3258,12 @@ func (m *tuiModel) openSessionPicker() {
 // handleSessionPickerKey handles keyboard input for the session picker.
 func (m tuiModel) handleSessionPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.Code {
-	case '\x03': // ctrl+c
-		m.quitting = true
-		return m, tea.Quit
+	case 'c':
+		if msg.Mod&tea.ModCtrl != 0 {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		return m, nil
 
 	case tea.KeyEscape:
 		m.showSessionPicker = false
@@ -3445,9 +3481,12 @@ func (m tuiModel) handlePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	filtered := m.filteredPickerModels()
 
 	switch msg.Code {
-	case '\x03': // ctrl+c
-		m.quitting = true
-		return m, tea.Quit
+	case 'c':
+		if msg.Mod&tea.ModCtrl != 0 {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		return m, nil
 
 	case tea.KeyEscape:
 		m.showModelPicker = false
