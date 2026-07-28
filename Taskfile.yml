@@ -24,6 +24,7 @@ tasks:
     cmds:
       - mkdir -p {{.BUILD_DIR}}
       - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}} ./cmd/kimi
+      - cp -af {{.BUILD_DIR}}/{{.BIN}} ~/bin/gkimi
 
   go:test:
     desc: Run Go tests with race detector
