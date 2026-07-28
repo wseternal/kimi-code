@@ -365,6 +365,8 @@ func (m *tuiModel) replayHistory() {
 		case "user":
 			m.messages = append(m.messages, chatMessage{role: "user", content: msg.Content})
 			m.turnCount++
+			// Add user message to conversation history
+			m.history = append(m.history, kosong.CreateUserMessage(msg.Content))
 		case "assistant":
 			td := turnData{
 				thinking: msg.Thinking,
@@ -372,21 +374,31 @@ func (m *tuiModel) replayHistory() {
 			}
 			for _, tc := range msg.ToolCalls {
 				td.toolGroups = append(td.toolGroups, toolGroup{
-					name:    tc.Name,
-					args:    tc.Arguments,
-					result:  tc.Result,
-					isError: tc.IsError,
+					name:      tc.Name,
+					args:      tc.Arguments,
+					result:    tc.Result,
+					isError:   tc.IsError,
 					collapsed: true,
 				})
 			}
 			m.completedTurns = append(m.completedTurns, td)
 			m.messages = append(m.messages, chatMessage{role: "assistant", content: msg.Content})
-			// Rebuild conversation history for multi-turn
-			m.history = append(m.history, kosong.CreateUserMessage(msg.Content))
-			m.history = append(m.history, kosong.Message{
+			// Add assistant response to conversation history
+			assistantMsg := kosong.Message{
 				Role:    kosong.RoleAssistant,
 				Content: []kosong.ContentPart{{Type: "text", Text: msg.Content}},
-			})
+			}
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, kosong.ToolCall{
+						Type:      "function",
+						ID:        tc.ID,
+						Name:      tc.Name,
+						Arguments: &tc.Arguments,
+					})
+				}
+			}
+			m.history = append(m.history, assistantMsg)
 			// Track token usage
 			m.contextMgr.AddTurnUsage(agentctx.TokenEstimate(msg.Content) * 2)
 		}
@@ -2309,11 +2321,13 @@ func (m tuiModel) renderInput() string {
 		after = string(runes[cursorPos:])
 	}
 
+	// Bar cursor: bright when visible, very dim when blinking off.
+	// Avoids block cursor (█) which adds 1 extra cell width causing visual spacing issues.
 	var cursorChar string
 	if m.cursorBlink || m.streaming {
-		cursorChar = dimStyle.Render("▏")
+		cursorChar = mutedStyle.Render("▏")
 	} else {
-		cursorChar = primaryStyle.Render("█")
+		cursorChar = primaryStyle.Render("▏")
 	}
 	inputWithCursor = textStyle.Render(before) + cursorChar + textStyle.Render(after)
 
