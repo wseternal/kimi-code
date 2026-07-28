@@ -129,6 +129,10 @@ func (a *App) run() error {
 				return ExportSession(a.SessionStore, args[i+1], "")
 			}
 			return fmt.Errorf("export requires a session ID")
+		case arg == "convert":
+			return a.parseConvert(args[i+1:])
+		case arg == "sessions":
+			return a.runSessions()
 		default:
 			if arg[0] != '-' {
 				promptArg = arg
@@ -168,6 +172,8 @@ func (a *App) printHelp() error {
 	fmt.Println("  kimi doctor                   Run diagnostics")
 	fmt.Println("  kimi login                    Set up API key")
 	fmt.Println("  kimi export <session-id>      Export session as markdown")
+	fmt.Println("  kimi sessions                 List all sessions")
+	fmt.Println("  kimi convert -s <id> -o <file> Convert session audit to DuckDB")
 	fmt.Println("  kimi version                  Show version")
 	fmt.Println("  kimi --trace [file]           Enable event tracing to JSONL file")
 	fmt.Println("  kimi help                     Show this help")
