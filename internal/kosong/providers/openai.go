@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/visdomtech/kimi-code/internal/kosong"
@@ -346,6 +347,14 @@ func (p *OpenAIProvider) Generate(
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		trace.Log("http", "error", map[string]any{"error": err.Error()})
+		// Fire raw response callback with network error for diagnostics
+		if opts != nil && opts.OnRawResponse != nil {
+			if f, ferr := os.CreateTemp("", "kimi-raw-resp-*.jsonl"); ferr == nil {
+				fmt.Fprintf(f, "network_error: %s\n", err.Error())
+				f.Close()
+				opts.OnRawResponse(f.Name())
+			}
+		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 
@@ -361,7 +370,13 @@ func (p *OpenAIProvider) Generate(
 		resp.Body.Close()
 		// Fire raw response callback with error body for diagnostics
 		if opts != nil && opts.OnRawResponse != nil {
-			opts.OnRawResponse([]string{string(body)})
+			if f, ferr := os.CreateTemp("", "kimi-raw-resp-*.jsonl"); ferr == nil {
+				fmt.Fprintf(f, "http_status: %d\n", resp.StatusCode)
+				f.Write(body)
+				f.Write([]byte("\n"))
+				f.Close()
+				opts.OnRawResponse(f.Name())
+			}
 		}
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
@@ -389,6 +404,9 @@ func (p *OpenAIProvider) Generate(
 }
 
 // consumeSSEStream reads SSE events from the response body and sends parts to the channel.
+// When raw response capture is enabled (OnRawResponse callback set), each SSE data line
+// is streamed directly to a temporary file on disk (zero-buffer auditing) instead of
+// accumulating in memory. The file path is passed to the callback when the stream ends.
 func (p *OpenAIProvider) consumeSSEStream(
 	ctx context.Context,
 	body io.ReadCloser,
@@ -404,16 +422,29 @@ func (p *OpenAIProvider) consumeSSEStream(
 	tracing := trace.Enabled()
 	var chunkCount int
 
-	// Accumulate raw SSE data lines for diagnostics (only when callback is set)
+	// Stream raw SSE data lines to a temp file for zero-buffer auditing.
+	// Only created when the OnRawResponse callback is set.
 	captureRaw := opts != nil && opts.OnRawResponse != nil
-	var rawLines []string
+	var rawFile *os.File
+	if captureRaw {
+		var err error
+		rawFile, err = os.CreateTemp("", "kimi-raw-resp-*.jsonl")
+		if err != nil {
+			captureRaw = false // fall back to no capture on file error
+		}
+	}
 
 	defer func() {
 		if tracing {
 			trace.Log("http", "stream_end", map[string]any{"chunks": chunkCount})
 		}
-		if captureRaw && opts.OnRawResponse != nil {
-			opts.OnRawResponse(rawLines)
+		if rawFile != nil {
+			rawFile.Close()
+			if opts.OnRawResponse != nil {
+				opts.OnRawResponse(rawFile.Name())
+			} else {
+				os.Remove(rawFile.Name()) // cleanup if callback gone
+			}
 		}
 	}()
 
@@ -439,9 +470,9 @@ func (p *OpenAIProvider) consumeSSEStream(
 			return
 		}
 
-		// Accumulate raw data line for verbatim audit
-		if captureRaw {
-			rawLines = append(rawLines, data)
+		// Stream raw data line to temp file for verbatim audit (zero-copy to disk)
+		if captureRaw && rawFile != nil {
+			rawFile.WriteString(data + "\n")
 		}
 
 		var chunk openAIResponseChunk

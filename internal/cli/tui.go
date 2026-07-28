@@ -880,11 +880,16 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 							Data:      map[string]any{"step": step, "body": string(body)},
 						})
 					},
-					OnRawResponse: func(lines []string) {
+					OnRawResponse: func(filePath string) {
+						defer os.Remove(filePath)
+						data, err := os.ReadFile(filePath)
+						if err != nil {
+							return
+						}
 						m.auditWriter.Record(audit.AuditEvent{
 							SessionID: m.sessionID,
 							Type:      audit.EvtLLMRawResponse,
-							Data:      map[string]any{"step": step, "sse_lines": lines},
+							Data:      map[string]any{"step": step, "raw": string(data)},
 						})
 					},
 				}
