@@ -869,6 +869,9 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 
 		maxSteps := 25
 		for step := 0; step < maxSteps; step++ {
+			// Reset finish reason per step via channel so the model's lastFinishReason
+			// doesn't carry over from a previous step if this step errors.
+			ch <- streamEvent{kind: "finish", finishReason: nil}
 			// Build GenerateOptions with raw payload capture for audit
 			var genOpts *kosong.GenerateOptions
 			if m.auditWriter != nil {
@@ -1305,9 +1308,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			// Track token usage: prefer real API usage, fall back to estimation
-			if m.turnUsage.GrandTotal() > 0 {
-				m.contextMgr.AddTurnUsage(m.turnUsage.InputTotal() + m.turnUsage.Output)
-				m.sessionUsage = kosong.AddUsage(m.sessionUsage, m.turnUsage)
+			savedTurnUsage := m.turnUsage
+			if savedTurnUsage.GrandTotal() > 0 {
+				m.contextMgr.AddTurnUsage(savedTurnUsage.InputTotal() + savedTurnUsage.Output)
+				m.sessionUsage = kosong.AddUsage(m.sessionUsage, savedTurnUsage)
 			} else {
 				turnTokens := agentctx.TokenEstimate(m.streamResponse) + agentctx.TokenEstimate(m.streamThinking)
 				m.contextMgr.AddTurnUsage(turnTokens)
@@ -1376,13 +1380,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					})
 				}
 				var usageRec *audit.UsageRecord
-				if m.turnUsage.GrandTotal() > 0 {
+				if savedTurnUsage.GrandTotal() > 0 {
 					usageRec = &audit.UsageRecord{
-						InputOther:         m.turnUsage.InputOther,
-						Output:             m.turnUsage.Output,
-						InputCacheRead:     m.turnUsage.InputCacheRead,
-						InputCacheCreation: m.turnUsage.InputCacheCreation,
-						ReasoningTokens:    m.turnUsage.ReasoningTokens,
+						InputOther:         savedTurnUsage.InputOther,
+						Output:             savedTurnUsage.Output,
+						InputCacheRead:     savedTurnUsage.InputCacheRead,
+						InputCacheCreation: savedTurnUsage.InputCacheCreation,
+						ReasoningTokens:    savedTurnUsage.ReasoningTokens,
 					}
 				}
 				var finishReason string

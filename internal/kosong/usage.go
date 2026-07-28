@@ -1,6 +1,5 @@
 package kosong
 
-// TokenUsage is a token usage breakdown for a single LLM generation.
 // TokenUsage records token consumption for a single LLM generation call.
 type TokenUsage struct {
 	InputOther         int `json:"inputOther"`

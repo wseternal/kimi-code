@@ -89,7 +89,6 @@ type SessionSummary struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// TurnRecord captures a completed turn for session reconstruction.
 // TurnRecord captures the complete data for a single completed turn.
 type TurnRecord struct {
 	Prompt       string           `json:"prompt"`
@@ -110,7 +109,6 @@ type ToolCallRecord struct {
 	Duration  time.Duration `json:"duration,omitempty"`
 }
 
-// UsageRecord captures token usage for a turn.
 // UsageRecord captures token usage for a single turn.
 type UsageRecord struct {
 	InputOther         int `json:"inputOther"`

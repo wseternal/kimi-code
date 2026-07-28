@@ -310,14 +310,18 @@ func TestSSEStreamWithToolCalls(t *testing.T) {
 		t.Fatalf("CollectParts failed: %v", err)
 	}
 
-	// Should have: function header + 2 tool_call_part deltas
-	if len(parts) < 2 {
-		t.Fatalf("expected at least 2 parts, got %d: %+v", len(parts), parts)
+	// Should have: function header + 2 tool_call_part deltas + finish
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 parts, got %d: %+v", len(parts), parts)
 	}
 
 	// First part: function header
 	if parts[0].Type != "function" || parts[0].Name != "read" || parts[0].ID != "call_1" {
 		t.Errorf("first part should be function header, got %+v", parts[0])
+	}
+	// Last part: finish with reason "tool_calls"
+	if parts[3].Type != "finish" || parts[3].FinishReason == nil || *parts[3].FinishReason != "tool_calls" {
+		t.Errorf("fourth part: expected finish with reason 'tool_calls', got %+v", parts[3])
 	}
 }
 

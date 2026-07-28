@@ -27,6 +27,19 @@ func Generate(ctx context.Context, stream *StreamedMessage) (*Message, error) {
 		default:
 		}
 
+		// Capture finish reason and usage metadata from stream parts
+		if part.Type == "finish" {
+			if part.FinishReason != nil {
+				rawFinish := *part.FinishReason
+				stream.RawFinishReason = &rawFinish
+			}
+			continue
+		}
+		if part.Type == "usage" && part.Usage != nil {
+			stream.Usage = part.Usage
+			continue
+		}
+
 		// Try to merge with pending part
 		if pending != nil {
 			if MergeInPlace(pending, &part) {

@@ -398,7 +398,7 @@ func (p *OpenAIProvider) Generate(
 		TraceID:  traceID,
 	}
 
-	go p.consumeSSEStream(ctx, resp.Body, partsCh, opts)
+	go p.consumeSSEStream(ctx, resp.Body, partsCh, opts, stream)
 
 	return stream, nil
 }
@@ -412,6 +412,7 @@ func (p *OpenAIProvider) consumeSSEStream(
 	body io.ReadCloser,
 	partsCh chan<- kosong.StreamedMessagePart,
 	opts *kosong.GenerateOptions,
+	stream *kosong.StreamedMessage,
 ) {
 	defer close(partsCh)
 	defer body.Close()
@@ -472,7 +473,9 @@ func (p *OpenAIProvider) consumeSSEStream(
 
 		// Stream raw data line to temp file for verbatim audit (zero-copy to disk)
 		if captureRaw && rawFile != nil {
-			rawFile.WriteString(data + "\n")
+			if _, err := rawFile.WriteString(data + "\n"); err != nil {
+				captureRaw = false // stop writing on first failure to avoid futile retries
+			}
 		}
 
 		var chunk openAIResponseChunk
@@ -503,8 +506,15 @@ func (p *OpenAIProvider) consumeSSEStream(
 
 		// Capture finish_reason from any choice in the chunk.
 		// In OpenAI streaming, finish_reason appears in the last chunk's choice.
+		// Only emit the first finish_reason to avoid multiple "finish" parts.
 		for _, choice := range chunk.Choices {
 			if choice.FinishReason != nil {
+				// Populate stream-level metadata for callers using stream.FinishReason.
+				if stream != nil {
+					stream.RawFinishReason = choice.FinishReason
+					reason := MapFinishReason(choice.FinishReason)
+					stream.FinishReason = &reason
+				}
 				select {
 				case partsCh <- kosong.StreamedMessagePart{
 					Type:         "finish",
@@ -513,6 +523,7 @@ func (p *OpenAIProvider) consumeSSEStream(
 				case <-ctx.Done():
 					return
 				}
+				break // only first finish_reason
 			}
 		}
 
