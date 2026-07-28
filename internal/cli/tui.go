@@ -1622,6 +1622,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 	case input == "/clear":
 		m.messages = nil
+		m.activeSkill = nil
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false
