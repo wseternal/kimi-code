@@ -7,6 +7,16 @@ import (
 	"strings"
 )
 
+// PerTurnOverhead is the estimated token cost of system prompt + tool
+// definitions included in every API request. Tuned empirically.
+const PerTurnOverhead = 1800
+
+// TurnEstimate returns a token estimate for a full API turn, including
+// the fixed overhead from system prompt and tool definitions.
+func TurnEstimate(text string) int {
+	return TokenEstimate(text) + PerTurnOverhead
+}
+
 // TokenEstimate estimates token count from text using the ~4 chars/token heuristic.
 func TokenEstimate(text string) int {
 	if text == "" {

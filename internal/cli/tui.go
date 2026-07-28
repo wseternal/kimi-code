@@ -213,6 +213,7 @@ type tuiModel struct {
 	streamToolGroups   []toolGroup
 	streamStep         int
 	responseCursor     int // scroll offset in response view
+	scrollOffset       int // viewport scroll offset in lines (0 = anchored to bottom)
 
 	// Side query mode (/btw): when true, history is truncated after streaming
 	btwMode       bool
@@ -419,7 +420,16 @@ func (m *tuiModel) replayHistory() {
 				m.history = append(m.history, kosong.CreateToolMessage(tc.ID, tc.Result))
 			}
 			// Track token usage
-			m.contextMgr.AddTurnUsage(agentctx.TokenEstimate(msg.Content) * 2)
+			m.contextMgr.AddTurnUsage(agentctx.TurnEstimate(msg.Content))
+		}
+	}
+	// Restore cumulative session usage from persisted metadata
+	if m.sess.Metadata != nil {
+		if v, ok := metaInt(m.sess.Metadata, "tokens_in"); ok {
+			m.sessionUsage.InputOther = v
+		}
+		if v, ok := metaInt(m.sess.Metadata, "tokens_out"); ok {
+			m.sessionUsage.Output = v
 		}
 	}
 	m.rebuildCollapsibles()
@@ -810,6 +820,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamStep = 0
 			m.streamCh = nil
 			m.cancelCh = nil
+			m.scrollOffset = 0 // auto-scroll to bottom on new content
 			m.rebuildCollapsibles()
 
 			// /btw mode: discard all messages added to history during streaming
@@ -1047,6 +1058,25 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.savedInput = ""
 				m.cursor = utf8.RuneCountInString(m.input)
 			}
+		}
+		return m, nil
+
+	// ── Scroll (PgUp / PgDown) ──
+	case msg.Type == tea.KeyPgUp:
+		visibleH := m.height - 4
+		if visibleH < 1 {
+			visibleH = 1
+		}
+		m.scrollOffset += visibleH / 2
+		return m, nil
+	case msg.Type == tea.KeyPgDown:
+		visibleH := m.height - 4
+		if visibleH < 1 {
+			visibleH = 1
+		}
+		m.scrollOffset -= visibleH / 2
+		if m.scrollOffset < 0 {
+			m.scrollOffset = 0
 		}
 		return m, nil
 
@@ -1422,8 +1452,13 @@ func formatSessionList(sessions []*session.SerializedSession) string {
 
 		// Truncate title for readability
 		title := s.Title
-		if title == "" {
-			title = "(untitled)"
+		if title == "" || title == "Interactive Session" {
+			// Fallback: use first_prompt from metadata if available
+			if fp, ok := s.Metadata["first_prompt"].(string); ok && fp != "" {
+				title = fp
+			} else if title == "" {
+				title = "(untitled)"
+			}
 		}
 		if runes := []rune(title); len(runes) > maxTitleLen {
 			title = string(runes[:maxTitleLen-3]) + "..."
@@ -1481,6 +1516,29 @@ func formatSessionList(sessions []*session.SerializedSession) string {
 	return sb.String()
 }
 
+// firstUserPrompt loads the first user message from a session's history.
+// Returns empty string if no user message is found or on error.
+func firstUserPrompt(store *session.SessionStore, sessionID string) string {
+	if store == nil {
+		return ""
+	}
+	ctx := context.Background()
+	if err := store.History().Load(ctx, sessionID); err != nil {
+		return ""
+	}
+	for _, msg := range store.History().Messages() {
+		if msg.Role == "user" && msg.Content != "" {
+			title := msg.Content
+			runes := []rune(title)
+			if len(runes) > 50 {
+				title = string(runes[:47]) + "..."
+			}
+			return title
+		}
+	}
+	return ""
+}
+
 // parseSkillCommand extracts the skill name and arguments from a /skill: invocation.
 // Input: "/skill:interview-me how to improve" → name="interview-me", args="how to improve"
 func parseSkillCommand(input string) (name, args string) {
@@ -1498,6 +1556,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	if input == "" {
 		return m, nil
 	}
+	m.scrollOffset = 0 // reset scroll to bottom on new input
 
 	// Cycle 5: Bash mode — !command runs shell command directly
 	if strings.HasPrefix(input, "!") && !strings.HasPrefix(input, "!!") {
@@ -1638,6 +1697,17 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			if err != nil || len(sessions) == 0 {
 				m.messages = append(m.messages, chatMessage{"system", "No saved sessions found."})
 			} else {
+				// Backfill titles from history for sessions with generic title
+				for _, s := range sessions {
+					if s.Title == "Interactive Session" || s.Title == "" {
+						if fp := firstUserPrompt(m.app.SessionStore, s.ID); fp != "" {
+							if s.Metadata == nil {
+								s.Metadata = make(map[string]any)
+							}
+							s.Metadata["first_prompt"] = fp
+						}
+					}
+				}
 				m.messages = append(m.messages, chatMessage{"system", formatSessionList(sessions)})
 			}
 		} else {
@@ -2153,13 +2223,18 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.turnCount++
 		// Auto-title session from first user prompt
-		if m.sess.Title == "Interactive Session" && m.turnCount == 1 {
+		if m.sess.Title == "Interactive Session" {
 			title := input
 			runes := []rune(title)
 			if len(runes) > 50 {
 				title = string(runes[:47]) + "..."
 			}
 			m.sess.SetTitle(title)
+			// Persist first prompt for session list display
+			if m.sess.Metadata == nil {
+				m.sess.Metadata = make(map[string]any)
+			}
+			m.sess.Metadata["first_prompt"] = title
 		}
 		m.input = ""
 		m.cursor = 0
@@ -2225,33 +2300,76 @@ func (m tuiModel) View() string {
 	}
 
 	// ── Autocomplete suggestions (above input) ──
-	suggestLines := 0
 	if m.showSuggestions {
 		s := m.renderSuggestions()
 		b.WriteString(s)
-		suggestLines = strings.Count(s, "\n")
 	}
 
 	// ── Input box ──
 	inputRendered := m.renderInput()
 	statusBarRendered := m.renderStatusBar()
 
-	// Calculate padding to push input+status to screen bottom
+	// Calculate visible viewport for content
 	contentStr := b.String()
-	contentLines := strings.Count(contentStr, "\n")
 	inputH := strings.Count(inputRendered, "\n") + 1
 	statusH := 1
-	bottomH := inputH + suggestLines + statusH + 1 // +1 for input\n separator
-	padLines := m.height - contentLines - bottomH
-	if padLines > 0 {
-		b.WriteString(strings.Repeat("\n", padLines))
+	bottomH := inputH + statusH + 1 // +1 for input\n separator
+	visibleH := m.height - bottomH
+	if visibleH < 1 {
+		visibleH = 1
 	}
 
-	b.WriteString(inputRendered)
-	b.WriteString("\n")
-	b.WriteString(statusBarRendered)
+	contentLines := strings.Split(strings.TrimRight(contentStr, "\n"), "\n")
+	totalLines := len(contentLines)
 
-	return b.String()
+	// Clamp scroll offset
+	maxScroll := totalLines - visibleH
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.scrollOffset > maxScroll {
+		m.scrollOffset = maxScroll
+	}
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
+
+	var result strings.Builder
+	if m.scrollOffset > 0 && totalLines > visibleH {
+		// Scrolled up: show a window of lines
+		end := totalLines - m.scrollOffset
+		start := end - visibleH
+		if start < 0 {
+			start = 0
+		}
+		if end > totalLines {
+			end = totalLines
+		}
+		for i := start; i < end; i++ {
+			result.WriteString(contentLines[i])
+			result.WriteString("\n")
+		}
+		// Scroll indicator
+		pct := 100
+		if maxScroll > 0 {
+			pct = (m.scrollOffset * 100) / maxScroll
+		}
+		result.WriteString(dimStyle.Render(fmt.Sprintf(" \u2191 scroll %d%% (PgUp/PgDn)", pct)))
+		result.WriteString("\n")
+	} else {
+		// At bottom: show all content + padding to push input to screen bottom
+		result.WriteString(contentStr)
+		padLines := visibleH - totalLines
+		if padLines > 0 {
+			result.WriteString(strings.Repeat("\n", padLines))
+		}
+	}
+
+	result.WriteString(inputRendered)
+	result.WriteString("\n")
+	result.WriteString(statusBarRendered)
+
+	return result.String()
 }
 
 func (m tuiModel) renderWelcome() string {
