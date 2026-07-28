@@ -463,8 +463,86 @@ func (m *tuiModel) runOAuthLogin() tea.Cmd {
 	}
 }
 
+// replayFromAudit reconstructs TUI state from the BadgerDB audit trail.
+// Returns true if successful, false if no audit data was found.
+func (m *tuiModel) replayFromAudit() bool {
+	data, err := m.app.AuditFacade.LoadSession(m.sessionID)
+	if err != nil || data == nil || len(data.Turns) == 0 {
+		return false
+	}
+
+	for _, tr := range data.Turns {
+		// User message
+		m.messages = append(m.messages, chatMessage{role: "user", content: tr.Prompt})
+		m.turnCount++
+		m.history = append(m.history, kosong.CreateUserMessage(tr.Prompt))
+
+		// Assistant turn data (for collapsibles)
+		td := turnData{
+			thinking: tr.Thinking,
+			text:     tr.Response,
+		}
+		for _, tc := range tr.Tools {
+			td.toolGroups = append(td.toolGroups, toolGroup{
+				name:      tc.Name,
+				args:      tc.Arguments,
+				result:    tc.Result,
+				isError:   tc.IsError,
+				collapsed: true,
+				duration:  tc.Duration,
+			})
+		}
+		m.completedTurns = append(m.completedTurns, td)
+		m.messages = append(m.messages, chatMessage{role: "assistant", content: tr.Response})
+
+		// LLM conversation history
+		assistantMsg := kosong.Message{
+			Role:    kosong.RoleAssistant,
+			Content: []kosong.ContentPart{{Type: "text", Text: tr.Response}},
+		}
+		for _, tc := range tr.Tools {
+			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, kosong.ToolCall{
+				Type:      "function",
+				ID:        tc.ID,
+				Name:      tc.Name,
+				Arguments: &tc.Arguments,
+			})
+		}
+		m.history = append(m.history, assistantMsg)
+		for _, tc := range tr.Tools {
+			m.history = append(m.history, kosong.CreateToolMessage(tc.ID, tc.Result))
+		}
+
+		// Accumulate usage
+		if tr.Usage != nil {
+			m.sessionUsage.InputOther += tr.Usage.InputOther
+			m.sessionUsage.Output += tr.Usage.Output
+			m.sessionUsage.InputCacheRead += tr.Usage.InputCacheRead
+			m.sessionUsage.InputCacheCreation += tr.Usage.InputCacheCreation
+		}
+	}
+
+	// Seed context manager with accumulated usage
+	totalTokens := m.sessionUsage.InputOther + m.sessionUsage.Output +
+		m.sessionUsage.InputCacheRead + m.sessionUsage.InputCacheCreation
+	if totalTokens > 0 {
+		m.contextMgr.Reset()
+		m.contextMgr.AddTurnUsage(totalTokens)
+	}
+
+	m.rebuildCollapsibles()
+	return true
+}
+
 // replayHistory loads and replays session history into the TUI display.
 func (m *tuiModel) replayHistory() {
+	// Try audit-based replay first (BadgerDB)
+	if m.app.AuditFacade != nil {
+		if m.replayFromAudit() {
+			return
+		}
+	}
+	// Fallback to FileStore-based replay
 	if m.app.SessionStore == nil {
 		return
 	}
@@ -3655,6 +3733,28 @@ func (m *tuiModel) openModelPicker() {
 
 // openSessionPicker populates the session list and shows the interactive picker.
 func (m *tuiModel) openSessionPicker() {
+	// Try audit-based listing first
+	if m.app.AuditFacade != nil {
+		summaries, err := m.app.AuditFacade.ListSessions()
+		if err == nil && len(summaries) > 0 {
+			var sessions []*session.SerializedSession
+			for _, s := range summaries {
+				sessions = append(sessions, &session.SerializedSession{
+					ID:        s.ID,
+					Title:     s.Title,
+					Status:    session.Status(s.Status),
+					CreatedAt: s.CreatedAt,
+					UpdatedAt: s.UpdatedAt,
+				})
+			}
+			m.sessionPickerList = sessions
+			m.sessionPickerSel = 0
+			m.showSessionPicker = true
+			return
+		}
+	}
+
+	// Fallback to FileStore
 	if m.app.SessionStore == nil {
 		return
 	}
