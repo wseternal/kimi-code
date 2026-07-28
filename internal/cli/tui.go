@@ -1348,14 +1348,15 @@ func (m *tuiModel) updateSuggestions() {
 	if strings.HasPrefix(m.input, "/") {
 		filter := strings.ToLower(m.input[1:])
 		m.suggestions = nil
-		// Built-in commands first
+		// Built-in commands always shown
 		for _, cmd := range slashCommands {
 			if strings.HasPrefix(cmd.name, filter) {
 				m.suggestions = append(m.suggestions, cmd)
 			}
 		}
-		// Then discovered skills (only user-activatable ones)
-		if m.skillCatalog != nil {
+		// Skills only shown when filter has at least 2 chars,
+		// so "/" alone doesn't flood with 40+ skill entries.
+		if len(filter) >= 2 && m.skillCatalog != nil {
 			for _, s := range m.skillCatalog.List() {
 				if !s.IsUserActivatable() {
 					continue
@@ -1382,6 +1383,76 @@ func truncateDesc(desc string, maxLen int) string {
 		return desc
 	}
 	return desc[:maxLen-3] + "..."
+}
+
+// formatSessionList renders a human-friendly session list for the /sessions command.
+// Each entry shows the session ID (so the user can copy it for `kimi -S <id>`),
+// a truncated title, and metadata (turns, tokens, relative time).
+func formatSessionList(sessions []*session.SerializedSession) string {
+	const maxDisplay = 20
+	const maxTitleLen = 50
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Found %d sessions:\n", len(sessions)))
+	for i, s := range sessions {
+		if i >= maxDisplay {
+			sb.WriteString(fmt.Sprintf("  ... and %d more\n", len(sessions)-maxDisplay))
+			break
+		}
+
+		// Truncate title for readability
+		title := s.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		if runes := []rune(title); len(runes) > maxTitleLen {
+			title = string(runes[:maxTitleLen-3]) + "..."
+		}
+
+		// Extract metadata
+		turns := 0
+		tokensIn := 0
+		tokensOut := 0
+		if tc, ok := s.Metadata["turns"].(float64); ok {
+			turns = int(tc)
+		}
+		if ti, ok := s.Metadata["tokens_in"].(float64); ok {
+			tokensIn = int(ti)
+		}
+		if to, ok := s.Metadata["tokens_out"].(float64); ok {
+			tokensOut = int(to)
+		}
+
+		// Relative time
+		ago := time.Since(s.UpdatedAt)
+		var relTime string
+		switch {
+		case ago < time.Minute:
+			relTime = "just now"
+		case ago < time.Hour:
+			relTime = fmt.Sprintf("%dm ago", int(ago.Minutes()))
+		case ago < 24*time.Hour:
+			relTime = fmt.Sprintf("%dh ago", int(ago.Hours()))
+		case ago < 7*24*time.Hour:
+			relTime = fmt.Sprintf("%dd ago", int(ago.Hours()/24))
+		default:
+			relTime = s.UpdatedAt.Format("Jan 02")
+		}
+
+		// Format: 1. "title" [id] — 5 turns, 1.2K in / 800 out — 2h ago
+		if turns > 0 {
+			sb.WriteString(fmt.Sprintf("  %d. \"%s\" [%s] \u2014 %d turns, %s in / %s out \u2014 %s\n",
+				i+1, title, s.ID, turns,
+				agentctx.FormatTokenCount(tokensIn),
+				agentctx.FormatTokenCount(tokensOut),
+				relTime))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %d. \"%s\" [%s] \u2014 %s\n",
+				i+1, title, s.ID, relTime))
+		}
+	}
+	sb.WriteString("\nUse: kimi -S <session-id> to resume")
+	return sb.String()
 }
 
 // parseSkillCommand extracts the skill name and arguments from a /skill: invocation.
@@ -1541,54 +1612,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			if err != nil || len(sessions) == 0 {
 				m.messages = append(m.messages, chatMessage{"system", "No saved sessions found."})
 			} else {
-				var sb strings.Builder
-				sb.WriteString(fmt.Sprintf("Found %d sessions:\n", len(sessions)))
-				for i, s := range sessions {
-					if i >= 20 {
-						sb.WriteString(fmt.Sprintf("  ... and %d more\n", len(sessions)-20))
-						break
-					}
-					// Extract metadata
-					turns := 0
-					tokensIn := 0
-					tokensOut := 0
-					if tc, ok := s.Metadata["turns"].(float64); ok {
-						turns = int(tc)
-					}
-					if ti, ok := s.Metadata["tokens_in"].(float64); ok {
-						tokensIn = int(ti)
-					}
-					if to, ok := s.Metadata["tokens_out"].(float64); ok {
-						tokensOut = int(to)
-					}
-					// Relative time
-					ago := time.Since(s.UpdatedAt)
-					var relTime string
-					switch {
-					case ago < time.Minute:
-						relTime = "just now"
-					case ago < time.Hour:
-						relTime = fmt.Sprintf("%dm ago", int(ago.Minutes()))
-					case ago < 24*time.Hour:
-						relTime = fmt.Sprintf("%dh ago", int(ago.Hours()))
-					case ago < 7*24*time.Hour:
-						relTime = fmt.Sprintf("%dd ago", int(ago.Hours()/24))
-					default:
-						relTime = s.UpdatedAt.Format("Jan 02")
-					}
-					// Format display line
-					if turns > 0 {
-						sb.WriteString(fmt.Sprintf("  %d. %q — %d turns, %s in / %s out — %s\n",
-							i+1, s.Title, turns,
-							agentctx.FormatTokenCount(tokensIn),
-							agentctx.FormatTokenCount(tokensOut),
-							relTime))
-					} else {
-						sb.WriteString(fmt.Sprintf("  %d. %q — %s\n", i+1, s.Title, relTime))
-					}
-				}
-				sb.WriteString("\nUse: kimi -S <session-id> to resume")
-				m.messages = append(m.messages, chatMessage{"system", sb.String()})
+				m.messages = append(m.messages, chatMessage{"system", formatSessionList(sessions)})
 			}
 		} else {
 			m.messages = append(m.messages, chatMessage{"system", "Session store not available."})
@@ -2308,6 +2332,12 @@ func (m tuiModel) renderMessages() string {
 
 func (m tuiModel) renderSuggestions() string {
 	var b strings.Builder
+	n := len(m.suggestions)
+	if n == 0 {
+		return ""
+	}
+
+	// Calculate max name width (for alignment) only within visible window
 	maxNameW := 0
 	for _, s := range m.suggestions {
 		if len(s.name) > maxNameW {
@@ -2315,7 +2345,25 @@ func (m tuiModel) renderSuggestions() string {
 		}
 	}
 
-	for i, s := range m.suggestions {
+	// Pagination: limit visible items to avoid flooding the screen
+	const maxVisible = 10
+	start := 0
+	end := n
+	if n > maxVisible {
+		end = maxVisible
+		// Scroll window to keep selected item visible
+		if m.selectedSuggest >= maxVisible {
+			start = m.selectedSuggest - maxVisible + 1
+			end = start + maxVisible
+			if end > n {
+				end = n
+				start = end - maxVisible
+			}
+		}
+	}
+
+	for i := start; i < end; i++ {
+		s := m.suggestions[i]
 		name := s.name
 		pad := strings.Repeat(" ", maxNameW-len(name)+2)
 		if i == m.selectedSuggest {
@@ -2326,6 +2374,12 @@ func (m tuiModel) renderSuggestions() string {
 				textStyle.Render(name), pad, dimStyle.Render(s.desc)))
 		}
 	}
+
+	// Pagination indicator: (selected+1/total)
+	if n > maxVisible {
+		b.WriteString(fmt.Sprintf("  (%d/%d)\n", m.selectedSuggest+1, n))
+	}
+
 	return b.String()
 }
 
