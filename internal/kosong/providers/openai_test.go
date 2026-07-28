@@ -256,14 +256,17 @@ func TestSSEStreamParsing(t *testing.T) {
 		t.Fatalf("CollectParts failed: %v", err)
 	}
 
-	if len(parts) != 2 {
-		t.Fatalf("expected 2 parts, got %d", len(parts))
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
 	}
 	if parts[0].Type != "text" || parts[0].Text != "Hello" {
 		t.Errorf("first part: expected text 'Hello', got %+v", parts[0])
 	}
 	if parts[1].Type != "text" || parts[1].Text != " world" {
 		t.Errorf("second part: expected text ' world', got %+v", parts[1])
+	}
+	if parts[2].Type != "finish" || parts[2].FinishReason == nil || *parts[2].FinishReason != "stop" {
+		t.Errorf("third part: expected finish with reason 'stop', got %+v", parts[2])
 	}
 
 	// Check trace ID
@@ -353,14 +356,17 @@ func TestSSEStreamWithReasoningContent(t *testing.T) {
 		t.Fatalf("CollectParts failed: %v", err)
 	}
 
-	if len(parts) != 2 {
-		t.Fatalf("expected 2 parts, got %d: %+v", len(parts), parts)
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d: %+v", len(parts), parts)
 	}
 	if parts[0].Type != "think" || parts[0].Think != "Let me think..." {
 		t.Errorf("first part should be think, got %+v", parts[0])
 	}
 	if parts[1].Type != "text" || parts[1].Text != "The answer is 42" {
 		t.Errorf("second part should be text, got %+v", parts[1])
+	}
+	if parts[2].Type != "finish" || parts[2].FinishReason == nil || *parts[2].FinishReason != "stop" {
+		t.Errorf("third part: expected finish with reason 'stop', got %+v", parts[2])
 	}
 }
 

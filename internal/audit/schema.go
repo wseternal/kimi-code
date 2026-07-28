@@ -84,12 +84,14 @@ type SessionSummary struct {
 }
 
 // TurnRecord captures a completed turn for session reconstruction.
+// TurnRecord captures the complete data for a single completed turn.
 type TurnRecord struct {
-	Prompt   string          `json:"prompt"`
-	Response string          `json:"response"`
-	Thinking string          `json:"thinking,omitempty"`
-	Tools    []ToolCallRecord `json:"tools,omitempty"`
-	Usage    *UsageRecord    `json:"usage,omitempty"`
+	Prompt       string           `json:"prompt"`
+	Response     string           `json:"response"`
+	Thinking     string           `json:"thinking,omitempty"`
+	Tools        []ToolCallRecord `json:"tools,omitempty"`
+	Usage        *UsageRecord     `json:"usage,omitempty"`
+	FinishReason string           `json:"finishReason,omitempty"`
 }
 
 // ToolCallRecord captures a tool invocation within a turn.
@@ -103,11 +105,13 @@ type ToolCallRecord struct {
 }
 
 // UsageRecord captures token usage for a turn.
+// UsageRecord captures token usage for a single turn.
 type UsageRecord struct {
-	InputOther       int `json:"inputOther"`
-	Output           int `json:"output"`
-	InputCacheRead   int `json:"inputCacheRead"`
+	InputOther         int `json:"inputOther"`
+	Output             int `json:"output"`
+	InputCacheRead     int `json:"inputCacheRead"`
 	InputCacheCreation int `json:"inputCacheCreation"`
+	ReasoningTokens    int `json:"reasoningTokens,omitempty"`
 }
 
 // Key builder functions — pure, no I/O.

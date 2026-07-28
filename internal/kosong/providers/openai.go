@@ -110,13 +110,18 @@ type openAIChoice struct {
 }
 
 type openAIUsage struct {
-	PromptTokens     int                `json:"prompt_tokens"`
-	CompletionTokens int                `json:"completion_tokens"`
-	PromptDetails    *openAIUsageDetail `json:"prompt_tokens_details,omitempty"`
+	PromptTokens        int                      `json:"prompt_tokens"`
+	CompletionTokens    int                      `json:"completion_tokens"`
+	PromptDetails       *openAIUsageDetail       `json:"prompt_tokens_details,omitempty"`
+	CompletionDetails   *openAICompletionDetail  `json:"completion_tokens_details,omitempty"`
 }
 
 type openAIUsageDetail struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+type openAICompletionDetail struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 type openAIErrorBody struct {
@@ -433,10 +438,28 @@ func (p *OpenAIProvider) consumeSSEStream(
 				usage.InputCacheRead = chunk.Usage.PromptDetails.CachedTokens
 				usage.InputOther -= usage.InputCacheRead
 			}
+			if chunk.Usage.CompletionDetails != nil {
+				usage.ReasoningTokens = chunk.Usage.CompletionDetails.ReasoningTokens
+			}
 			select {
 			case partsCh <- kosong.StreamedMessagePart{Type: "usage", Usage: usage}:
 			case <-ctx.Done():
 				return
+			}
+		}
+
+		// Capture finish_reason from any choice in the chunk.
+		// In OpenAI streaming, finish_reason appears in the last chunk's choice.
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != nil {
+				select {
+				case partsCh <- kosong.StreamedMessagePart{
+					Type:         "finish",
+					FinishReason: choice.FinishReason,
+				}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 

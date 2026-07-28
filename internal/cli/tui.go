@@ -269,8 +269,9 @@ type tuiModel struct {
 
 	// Cycle 6: Context management
 	contextMgr   *agentctx.ContextManager
-	turnUsage    kosong.TokenUsage // real API usage for current turn (live during streaming)
-	sessionUsage kosong.TokenUsage // cumulative session token usage
+	turnUsage      kosong.TokenUsage // real API usage for current turn (live during streaming)
+	sessionUsage   kosong.TokenUsage // cumulative session token usage
+	lastFinishReason *string         // raw finish_reason from last LLM step (for diagnostics)
 
 	// Cycle 8: Goal tracker
 	goalTracker *goal.Tracker
@@ -655,15 +656,16 @@ func (m *tuiModel) replayHistory() {
 // ── Streaming events for bubbletea ──
 
 type streamEvent struct {
-	kind       string // "think", "text", "tool_start", "tool_result", "step_done", "done", "error", "usage"
-	text       string
-	toolName   string
-	toolArgs   string
-	toolOut    string
-	toolErr    bool
-	toolDur    time.Duration
-	step       int
-	usage      *kosong.TokenUsage
+	kind         string // "think", "text", "tool_start", "tool_result", "step_done", "done", "error", "usage", "finish"
+	text         string
+	toolName     string
+	toolArgs     string
+	toolOut      string
+	toolErr      bool
+	toolDur      time.Duration
+	step         int
+	usage        *kosong.TokenUsage
+	finishReason *string // raw finish_reason from upstream API (on "finish" events)
 }
 
 // listenStream waits for the next streaming event from the channel.
@@ -880,6 +882,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 			var content []kosong.ContentPart
 			var toolCalls []kosong.ToolCall
 			var pending *kosong.StreamedMessagePart
+			var stepFinishReason *string // raw finish_reason from upstream API
 
 			const streamBatchInterval = 50 * time.Millisecond
 			var batchThink, batchText string
@@ -927,7 +930,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 					default:
 					}
 
-					// Batch text/think; send usage immediately (rare)
+					// Batch text/think; send usage and finish immediately (rare)
 					switch part.Type {
 					case "think":
 						batchThink += part.Think
@@ -936,6 +939,11 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 					case "usage":
 						batchFlush() // flush pending text before usage event
 						ch <- streamEvent{kind: "usage", usage: part.Usage}
+					case "finish":
+						batchFlush() // flush pending text before finish event
+						stepFinishReason = part.FinishReason
+						ch <- streamEvent{kind: "finish", finishReason: part.FinishReason}
+						continue // don't treat as content part
 					}
 
 					// Merge parts to build final message (same logic as kosong.Generate)
@@ -987,10 +995,14 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 
 			ch <- streamEvent{kind: "step_done", step: step}
 			if m.auditWriter != nil {
+				stepData := map[string]any{"step": step, "tool_calls": len(msg.ToolCalls)}
+				if stepFinishReason != nil {
+					stepData["finish_reason"] = *stepFinishReason
+				}
 				m.auditWriter.Record(audit.AuditEvent{
 					SessionID: m.sessionID,
 					Type:      audit.EvtLLMStepDone,
-					Data:      map[string]any{"step": step, "tool_calls": len(msg.ToolCalls)},
+					Data:      stepData,
 				})
 			}
 
@@ -1214,18 +1226,25 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.turnUsage = kosong.AddUsage(m.turnUsage, *msg.usage)
 				// Record audit: usage event
 				if m.auditWriter != nil {
+					usageData := map[string]any{
+						"input":          msg.usage.InputTotal(),
+						"output":         msg.usage.Output,
+						"cache_read":     msg.usage.InputCacheRead,
+						"cache_creation": msg.usage.InputCacheCreation,
+					}
+					if msg.usage.ReasoningTokens > 0 {
+						usageData["reasoning_tokens"] = msg.usage.ReasoningTokens
+					}
 					m.auditWriter.Record(audit.AuditEvent{
 						SessionID: m.sessionID,
 						Type:      audit.EvtLLMUsage,
-						Data: map[string]any{
-							"input":  msg.usage.InputTotal(),
-							"output": msg.usage.Output,
-							"cache_read":    msg.usage.InputCacheRead,
-							"cache_creation": msg.usage.InputCacheCreation,
-						},
+						Data:      usageData,
 					})
 				}
 			}
+			return m, listenStream(m.streamCh)
+		case "finish":
+			m.lastFinishReason = msg.finishReason
 			return m, listenStream(m.streamCh)
 		case "done":
 			m.streaming = false
@@ -1245,9 +1264,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Append assistant response to messages so it stays visible after streaming
 			if m.streamResponse == "" && m.streamThinking != "" {
-				// Model produced thinking but no visible response — likely hit
-				// an output token limit or the API stream ended prematurely.
-				m.messages = append(m.messages, chatMessage{"assistant", "⚠ The model produced extended reasoning but no visible response. It may have hit an output token limit. Try rephrasing your request or using a model with a larger output budget."})
+				// Model produced thinking but no visible response.
+				// Build a diagnostic message including the finish reason if available.
+				diag := "⚠ The model produced extended reasoning but no visible response."
+				if m.lastFinishReason != nil {
+					diag += fmt.Sprintf(" (finish_reason: %s)", *m.lastFinishReason)
+				}
+				if m.turnUsage.ReasoningTokens > 0 {
+					diag += fmt.Sprintf(" [reasoning tokens: %d/%d output]", m.turnUsage.ReasoningTokens, m.turnUsage.Output)
+				}
+				diag += " The thinking budget may have been exhausted. Try rephrasing or reducing thinking effort."
+				m.messages = append(m.messages, chatMessage{"assistant", diag})
 			} else {
 				m.messages = append(m.messages, chatMessage{"assistant", m.streamResponse})
 			}
@@ -1330,17 +1357,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Output:             m.turnUsage.Output,
 						InputCacheRead:     m.turnUsage.InputCacheRead,
 						InputCacheCreation: m.turnUsage.InputCacheCreation,
+						ReasoningTokens:    m.turnUsage.ReasoningTokens,
 					}
+				}
+				var finishReason string
+				if m.lastFinishReason != nil {
+					finishReason = *m.lastFinishReason
 				}
 				m.auditWriter.Record(audit.AuditEvent{
 					SessionID: m.sessionID,
 					Type:      audit.EvtTurnCompleted,
 					Data: audit.TurnRecord{
-						Prompt:   lastUserContent,
-						Response: m.streamResponse,
-						Thinking: m.streamThinking,
-						Tools:    toolRecs,
-						Usage:    usageRec,
+						Prompt:       lastUserContent,
+						Response:     m.streamResponse,
+						Thinking:     m.streamThinking,
+						Tools:        toolRecs,
+						Usage:        usageRec,
+						FinishReason: finishReason,
 					},
 				})
 				// Also persist session metadata to audit store
@@ -1364,6 +1397,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamStep = 0
 			m.streamCh = nil
 			m.cancelCh = nil
+			m.lastFinishReason = nil // reset for next turn
 			m.scrollOffset = 0 // auto-scroll to bottom on new content
 			m.rebuildCollapsibles()
 
