@@ -141,7 +141,9 @@ func initTheme() {
 		Padding(0, 1)
 
 	statusBarStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(t.textDim))
+		Foreground(lipgloss.Color(t.textDim)).
+		Background(lipgloss.Color(t.statusBarBg)).
+		Padding(0, 1)
 }
 
 // ── Slash commands ──
@@ -2490,6 +2492,11 @@ func (m tuiModel) renderStatusBar() string {
 	if w < 20 {
 		w = 20
 	}
+	// Account for horizontal padding (1 cell each side)
+	innerW := w - 2
+	if innerW < 1 {
+		innerW = 1
+	}
 
 	// Left side: model + effort + mode flags
 	var left []string
@@ -2513,15 +2520,38 @@ func (m tuiModel) renderStatusBar() string {
 	// Right side: context + turns + token breakdown
 	right := m.renderTokenStatus()
 
-	// Simple left-right split
+	// Simple left-right split; right side has priority, left gets truncated if needed
 	leftW := lipgloss.Width(leftStr)
 	rightW := lipgloss.Width(right)
-	gap := w - leftW - rightW - 2
-	if gap < 2 {
-		gap = 2
+	available := innerW - rightW
+
+	if available < 2 {
+		// Right side already fills the bar — show only right side
+		return statusBarStyle.Width(w).Render(right)
 	}
 
-	return statusBarStyle.Width(w).Render(leftStr + strings.Repeat(" ", gap) + right)
+	if leftW > available-2 {
+		// Left side doesn't fit — truncate with ellipsis
+		maxLeft := available - 2
+		if maxLeft > 3 {
+			runes := []rune(leftStr)
+			leftStr = string(runes[:maxLeft-1]) + "…"
+		} else if maxLeft > 0 {
+			runes := []rune(leftStr)
+			leftStr = string(runes[:maxLeft])
+		} else {
+			leftStr = ""
+		}
+	}
+
+	// Build final content with gap
+	content := leftStr
+	if leftStr != "" {
+		content += "  "
+	}
+	content += right
+
+	return statusBarStyle.Width(w).Render(content)
 }
 
 // renderTokenStatus returns the right side of the status bar with token breakdown.
