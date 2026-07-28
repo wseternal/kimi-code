@@ -22,6 +22,15 @@ func (a *App) parseConvert(args []string) error {
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "-h", "--help":
+			fmt.Println("Usage: kimi convert -s <session-id> -o <output.duckdb>")
+			fmt.Println()
+			fmt.Println("Export a session's BadgerDB audit trail to a DuckDB file.")
+			fmt.Println()
+			fmt.Println("Flags:")
+			fmt.Println("  -s, --session <id>    Session ID to export")
+			fmt.Println("  -o, --output <file>   Output DuckDB file path")
+			return nil
 		case "-s", "--session":
 			if i+1 < len(args) {
 				sessionID = args[i+1]
@@ -81,21 +90,32 @@ func (a *App) runConvert(sessionID, outputPath string) error {
 		return fmt.Errorf("read events: %w", err)
 	}
 
-	// Open DuckDB output file.
-	db, err := sql.Open("duckdb", outputPath)
+	// Write to a temp file and rename on success for atomic output.
+	tmpPath := outputPath + ".tmp"
+	defer os.Remove(tmpPath) // clean up temp file on any error path
+
+	db, err := sql.Open("duckdb", tmpPath)
 	if err != nil {
 		return fmt.Errorf("open duckdb: %w", err)
 	}
-	defer db.Close()
 
 	// Create sessions table and insert metadata.
 	if err := createSessionsTable(db, rec); err != nil {
+		db.Close()
 		return fmt.Errorf("create sessions table: %w", err)
 	}
 
 	// Create events table and insert all events.
 	if err := createEventsTable(db, sessionID, events); err != nil {
+		db.Close()
 		return fmt.Errorf("create events table: %w", err)
+	}
+
+	db.Close()
+
+	// Atomically replace any existing output with the temp file.
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		return fmt.Errorf("rename output file: %w", err)
 	}
 
 	fmt.Printf("Converted session %s (%d events) → %s\n", sessionID, len(events), outputPath)
@@ -120,8 +140,12 @@ func createSessionsTable(db *sql.DB, rec *audit.SessionRecord) error {
 
 	var metaJSON string
 	if rec.Metadata != nil {
-		b, _ := json.Marshal(rec.Metadata)
-		metaJSON = string(b)
+		b, err := json.Marshal(rec.Metadata)
+		if err != nil {
+			metaJSON = "{}"
+		} else {
+			metaJSON = string(b)
+		}
 	}
 
 	_, err = db.Exec(
@@ -154,10 +178,10 @@ func createEventsTable(db *sql.DB, sessionID string, events []audit.StoredEvent)
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback() // no-op after Commit()
 
 	stmt, err := tx.Prepare(`INSERT INTO events (session_id, type, ts, seq, data) VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	defer stmt.Close()
@@ -169,7 +193,6 @@ func createEventsTable(db *sql.DB, sessionID string, events []audit.StoredEvent)
 			dataStr = string(evt.Data)
 		}
 		if _, err := stmt.Exec(sessionID, evt.Type, ts, evt.Seq, dataStr); err != nil {
-			tx.Rollback()
 			return fmt.Errorf("insert event %s seq %d: %w", evt.Type, evt.Seq, err)
 		}
 	}
@@ -237,7 +260,7 @@ func (a *App) runSessions() error {
 	for _, s := range sessions {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 			s.ID,
-			truncate(s.Title, 40),
+			truncateTitle(s.Title, 40),
 			s.Status,
 			s.CreatedAt.Format("2006-01-02 15:04"),
 			s.UpdatedAt.Format("2006-01-02 15:04"),
@@ -247,13 +270,15 @@ func (a *App) runSessions() error {
 	return nil
 }
 
-// truncate shortens a string to maxLen, appending "…" if truncated.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+// truncateTitle shortens a string to maxLen runes, appending "…" if truncated.
+// Uses rune slicing to safely handle multi-byte UTF-8 characters.
+func truncateTitle(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	if maxLen <= 1 {
 		return "…"
 	}
-	return s[:maxLen-1] + "…"
+	return string(runes[:maxLen-1]) + "…"
 }
