@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -467,7 +468,7 @@ func (m *tuiModel) runOAuthLogin() tea.Cmd {
 // Returns true if successful, false if no audit data was found.
 func (m *tuiModel) replayFromAudit() bool {
 	data, err := m.app.AuditFacade.LoadSession(m.sessionID)
-	if err != nil || data == nil || len(data.Turns) == 0 {
+	if err != nil || data == nil {
 		return false
 	}
 
@@ -522,9 +523,16 @@ func (m *tuiModel) replayFromAudit() bool {
 		}
 	}
 
+	// Apply cache token correction (cache tokens are included in InputOther
+	// from the API but tracked separately; subtract to avoid double-counting).
+	m.sessionUsage.InputOther -= m.sessionUsage.InputCacheRead
+	m.sessionUsage.InputOther -= m.sessionUsage.InputCacheCreation
+	if m.sessionUsage.InputOther < 0 {
+		m.sessionUsage.InputOther = 0
+	}
+
 	// Seed context manager with accumulated usage
-	totalTokens := m.sessionUsage.InputOther + m.sessionUsage.Output +
-		m.sessionUsage.InputCacheRead + m.sessionUsage.InputCacheCreation
+	totalTokens := m.sessionUsage.InputTotal() + m.sessionUsage.Output
 	if totalTokens > 0 {
 		m.contextMgr.Reset()
 		m.contextMgr.AddTurnUsage(totalTokens)
@@ -1330,14 +1338,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					},
 				})
 				// Also persist session metadata to audit store
-				m.auditWriter.SaveSession(audit.SessionRecord{
+				if err := m.auditWriter.SaveSession(audit.SessionRecord{
 					ID:        m.sessionID,
 					Title:     m.sess.Title,
 					Status:    string(m.sess.Status),
 					CreatedAt: m.sess.CreatedAt,
 					UpdatedAt: time.Now(),
 					Metadata:  m.sess.Metadata,
-				})
+				}); err != nil {
+					slog.Debug("audit save session", "error", err)
+				}
 			}
 
 			// Clear streaming state
@@ -3733,28 +3743,8 @@ func (m *tuiModel) openModelPicker() {
 
 // openSessionPicker populates the session list and shows the interactive picker.
 func (m *tuiModel) openSessionPicker() {
-	// Try audit-based listing first
-	if m.app.AuditFacade != nil {
-		summaries, err := m.app.AuditFacade.ListSessions()
-		if err == nil && len(summaries) > 0 {
-			var sessions []*session.SerializedSession
-			for _, s := range summaries {
-				sessions = append(sessions, &session.SerializedSession{
-					ID:        s.ID,
-					Title:     s.Title,
-					Status:    session.Status(s.Status),
-					CreatedAt: s.CreatedAt,
-					UpdatedAt: s.UpdatedAt,
-				})
-			}
-			m.sessionPickerList = sessions
-			m.sessionPickerSel = 0
-			m.showSessionPicker = true
-			return
-		}
-	}
-
-	// Fallback to FileStore
+	// Use FileStore for session listing (audit store is per-session
+	// and cannot list across sessions due to per-DB isolation).
 	if m.app.SessionStore == nil {
 		return
 	}
@@ -3824,20 +3814,26 @@ func (m *tuiModel) resumeSession(id string) {
 		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Failed to resume session: %s", err)})
 		return
 	}
-	// Swap to the resumed session
-	m.sess = sess
-	m.sessionID = sess.ID
-	sess.SetStatus(session.StatusIdle)
-
-	// Audit: record session switch and switch BadgerDB
+	// Audit: record session switch BEFORE updating m.sessionID
+	// so the event goes to the old session's audit DB.
+	oldSessionID := m.sessionID
 	if m.auditWriter != nil {
-		m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserSessionSwitch, Data: map[string]any{"to": sess.ID, "reason": "resume"}})
+		m.auditWriter.Record(audit.AuditEvent{
+			SessionID: oldSessionID,
+			Type:      audit.EvtUserSessionSwitch,
+			Data:      map[string]any{"from": oldSessionID, "to": sess.ID, "reason": "resume"},
+		})
 	}
 	home, _ := os.UserHomeDir()
 	if home != "" {
 		m.app.switchAuditStore(sess.ID, home)
 		m.auditWriter = m.app.AuditWriter
 	}
+
+	// Swap to the resumed session
+	m.sess = sess
+	m.sessionID = sess.ID
+	sess.SetStatus(session.StatusIdle)
 
 	// Reset display state
 	m.messages = nil

@@ -147,9 +147,8 @@ func TestWriterRecordAndReaderEvents(t *testing.T) {
 		},
 	})
 
-	// Close writer to flush remaining events
+	// Close writer — blocks until goroutine flushes all events
 	w.Close()
-	time.Sleep(50 * time.Millisecond) // let goroutine finish
 
 	// Read events back
 	r := NewReader(db)
@@ -288,9 +287,8 @@ func TestFacadeLoadSession(t *testing.T) {
 		},
 	})
 
-	// Close writer to flush
+	// Close writer — blocks until goroutine flushes
 	w.Close()
-	time.Sleep(50 * time.Millisecond)
 
 	// Load via facade
 	r := NewReader(db)
@@ -346,7 +344,6 @@ func TestFacadeGetLatest(t *testing.T) {
 	})
 
 	w.Close()
-	time.Sleep(50 * time.Millisecond)
 
 	f := NewFacade(NewReader(db))
 	data, err := f.GetLatest()
@@ -381,7 +378,7 @@ func TestWriterCloseDrains(t *testing.T) {
 	db := openTestDB(t)
 	w := NewWriter(db)
 
-	// Record events then immediately close
+	// Record events then immediately close — Close blocks until drained
 	for i := 0; i < 10; i++ {
 		w.Record(AuditEvent{
 			SessionID: "drain-test",
@@ -390,8 +387,7 @@ func TestWriterCloseDrains(t *testing.T) {
 			Data:      map[string]any{"text": "chunk"},
 		})
 	}
-	w.Close()
-	time.Sleep(100 * time.Millisecond)
+	w.Close() // blocks until goroutine finishes flushing
 
 	r := NewReader(db)
 	events, err := r.ReadEvents("drain-test")
@@ -400,5 +396,48 @@ func TestWriterCloseDrains(t *testing.T) {
 	}
 	if len(events) != 10 {
 		t.Errorf("expected 10 events after drain, got %d", len(events))
+	}
+}
+
+func TestWriterCloseIdempotent(t *testing.T) {
+	db := openTestDB(t)
+	w := NewWriter(db)
+
+	// Double close should not panic
+	w.Close()
+	w.Close()
+}
+
+func TestReaderGetSessionNotFound(t *testing.T) {
+	db := openTestDB(t)
+	r := NewReader(db)
+
+	_, err := r.GetSession("nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent session")
+	}
+}
+
+func TestSaveSessionNoDuplicateIndex(t *testing.T) {
+	db := openTestDB(t)
+	w := NewWriter(db)
+
+	now := time.Now()
+	// Save the same session twice with different UpdatedAt
+	_ = w.SaveSession(SessionRecord{ID: "s1", Title: "First", UpdatedAt: now})
+	_ = w.SaveSession(SessionRecord{ID: "s1", Title: "Updated", UpdatedAt: now.Add(time.Second)})
+	w.Close()
+
+	r := NewReader(db)
+	sessions, err := r.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	// Should be exactly 1 session, not 2 (stale index key deleted)
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Title != "Updated" {
+		t.Errorf("title: got %q, want %q", sessions[0].Title, "Updated")
 	}
 }

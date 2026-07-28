@@ -162,10 +162,13 @@ func (ss *SessionStore) Fork(ctx context.Context, sourceID, newTitle string, mgr
 }
 
 // DeleteSession removes a session and its history from the store.
-// Order matters: history (messages) is deleted first so the session
-// directory still contains session.json when FileStore.Del cleans up
-// empty parent directories. Reversing the order could leave orphan files.
+// Also cleans up any unmanaged subdirectories (e.g., BadgerDB audit data)
+// within the session directory so FileStore.Del can remove the now-empty parent.
 func (ss *SessionStore) DeleteSession(ctx context.Context, id string) error {
+	// Clean up badger/ audit directory (not managed by FileStore keys)
+	if fs, ok := ss.store.(*persistence.FileStore); ok {
+		_ = fs.RemoveDir("sessions/" + id + "/badger")
+	}
 	if err := ss.history.Clear(ctx, id); err != nil {
 		return err
 	}

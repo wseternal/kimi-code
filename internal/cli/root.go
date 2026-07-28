@@ -245,14 +245,16 @@ func (a *App) runTUI(resumeID string, continueLast bool) error {
 	}
 	// Also persist to audit trail on exit
 	if a.AuditWriter != nil {
-		a.AuditWriter.SaveSession(audit.SessionRecord{
+		if err := a.AuditWriter.SaveSession(audit.SessionRecord{
 			ID:        sess.ID,
 			Title:     sess.Title,
 			Status:    string(sess.Status),
 			CreatedAt: sess.CreatedAt,
 			UpdatedAt: time.Now(),
 			Metadata:  sess.Metadata,
-		})
+		}); err != nil {
+			slog.Debug("audit save session on exit", "error", err)
+		}
 	}
 
 	return err
@@ -291,7 +293,7 @@ var _ = strings.TrimSpace
 // Data is stored at ~/.kimi-code/sessions/{sessionID}/badger/.
 func (a *App) openAuditStore(sessionID, home string) {
 	dir := filepath.Join(sessionsDir(home), sessionID, "badger")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		slog.Debug("create audit dir", "error", err)
 		return
 	}
