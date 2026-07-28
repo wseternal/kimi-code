@@ -4,9 +4,9 @@ A terminal-native AI coding agent, redesigned from the ground up in Go.
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.24+-00ADD8?logo=go)](https://go.dev)
-[![GitHub](https://img.shields.io/badge/github-MoonshotAI%2Fkimi-code-181717?logo=github)](https://github.com/MoonshotAI/kimi-code)
+[![GitHub](https://img.shields.io/badge/github-wseternal%2Fkimi-code-181717?logo=github)](https://github.com/wseternal/kimi-code)
 
-> This is the Go rewrite of [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code) — a single-binary, terminal-native AI coding agent. The original TypeScript implementation has been fully replaced by a self-contained Go codebase with zero Node.js dependencies.
+> This is the Go rewrite of [Kimi Code CLI](https://github.com/wseternal/kimi-code) — a single-binary, terminal-native AI coding agent. The original TypeScript implementation has been fully replaced by a self-contained Go codebase with zero Node.js dependencies.
 
 ## What is Kimi Code CLI
 
@@ -19,7 +19,7 @@ Kimi Code CLI is an AI coding agent that runs in your terminal. It reads and edi
 Requirements: Go ≥ 1.24, [Taskfile](https://taskfile.dev) (optional).
 
 ```sh
-git clone https://github.com/MoonshotAI/kimi-code.git
+git clone https://github.com/wseternal/kimi-code.git
 cd kimi-code
 go build -o build/kimi ./cmd/kimi
 ```
@@ -32,7 +32,7 @@ task go:build          # builds to build/kimi
 
 ### Pre-built binaries
 
-Pre-built binaries for macOS, Linux, and Windows are available on the [releases page](https://github.com/MoonshotAI/kimi-code/releases).
+Pre-built binaries for macOS, Linux, and Windows are available on the [releases page](https://github.com/wseternal/kimi-code/releases).
 
 ## Quick Start
 
@@ -107,10 +107,6 @@ internal/protocol/     Wire types, events, WebSocket
 internal/kapserver/    HTTP server, REST, WebSocket transport
 pkg/                   Public Go packages
 ```
-
-## Acknowledgements
-
-Our TUI is built on top of [`pi-tui`](https://github.com/earendil-works/pi-mono/tree/main/packages/tui). We thank the authors of `pi-tui` for their valuable work.
 
 ## License
 
