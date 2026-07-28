@@ -794,6 +794,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.streaming {
+			m.clampCursor() // guard against stale cursor after input clear
 			// Allow collapse navigation during streaming
 			switch msg.Type {
 			case tea.KeyCtrlC:
@@ -1081,6 +1082,9 @@ func (m *tuiModel) deleteWordBackward() {
 
 func (m *tuiModel) moveWordBackward() {
 	runes := []rune(m.input)
+	if m.cursor > len(runes) {
+		m.cursor = len(runes)
+	}
 	if m.cursor <= 0 {
 		return
 	}
@@ -1350,6 +1354,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		cmdStr := strings.TrimPrefix(input, "!")
 		m.messages = append(m.messages, chatMessage{"user", "$ " + cmdStr})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		// Execute shell command
 		cmd := exec.Command("sh", "-c", cmdStr)
@@ -1373,6 +1378,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"assistant", commandReg.renderHelp()})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1392,12 +1398,14 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error: %s", err)})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
 	case input == "/clear":
 		m.messages = nil
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1411,6 +1419,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.rebuildCollapsibles()
 		m.messages = append(m.messages, chatMessage{"system", "Session reset to clean state."})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1424,6 +1433,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", "YOLO mode disabled."})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1435,6 +1445,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", "Plan mode disabled."})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1442,6 +1453,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.openModelPicker()
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1453,6 +1465,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				"  2. manual  — ask before each tool action (default)\n" +
 				"Use /yolo to toggle, or set permission rules in config.toml."})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1463,6 +1476,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				"and ~/.kimi-code/tui.toml (UI preferences).\n" +
 				"Edit and restart to apply changes."})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1490,6 +1504,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", "Session store not available."})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1508,6 +1523,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", "Session store not available."})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1524,6 +1540,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1559,6 +1576,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed last %d turn(s) from display.", n)})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1576,6 +1594,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		m.messages = append(m.messages, chatMessage{"system", "Markdown export:\n" + sb.String()})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1587,6 +1606,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				"Or manually edit ~/.kimi-code/config.toml:\n" +
 				"  [providers.kimi]\n  type = \"kimi\"\n  api_key = \"YOUR_KEY\""})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1599,6 +1619,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", "Logged out. Provider API key removed."})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1617,6 +1638,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		m.messages = append(m.messages, chatMessage{"system", info})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1624,6 +1646,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Context usage: %s\nTurns: %d", m.contextMgr.UsageDisplay(), m.turnCount)})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1631,6 +1654,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"system", "kimi-code " + m.version})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1638,6 +1662,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"system", "Feedback: https://github.com/visdomtech/kimi-code/issues"})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1645,6 +1670,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"system", "No MCP servers connected."})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1652,6 +1678,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"system", "No plugins loaded."})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1669,6 +1696,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", sb.String()})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1689,6 +1717,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1705,6 +1734,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", sb.String()})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1718,12 +1748,14 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Reload failed: %s", err)})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
 	case input == "/editor":
 		// Open external editor for composing a prompt
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, m.launchEditor()
 
@@ -1741,6 +1773,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1752,6 +1785,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Theme %s — restart to apply.", args)})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1777,6 +1811,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1793,6 +1828,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal set: %s", text)})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1800,6 +1836,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"system", "Swarm mode: parallel sub-agent execution.\nUsage: Set a goal with /goal, then enable swarm mode.\n(Currently a placeholder — full implementation pending.)"})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1826,6 +1863,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", "No provider configured."})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1834,6 +1872,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		results := RunDoctor(m.app.Config)
 		m.messages = append(m.messages, chatMessage{"system", FormatDoctorResults(results)})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1853,6 +1892,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", "Last response copied to clipboard. (requires clipboard tool)"})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1865,6 +1905,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Web search: %s\n(Web search requires provider integration.)", args)})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1877,6 +1918,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Added directory: %s", args)})
 		}
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1912,6 +1954,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"system",
 			fmt.Sprintf("Unknown skill: %s. Type / to see available skills.", skillName)})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1953,6 +1996,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Unknown command: %s. Type /help for available commands.", input)})
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 		return m, nil
 
@@ -1966,6 +2010,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.turnCount++
 		m.input = ""
+		m.cursor = 0
 		m.showSuggestions = false
 
 		// Set up cancel channel for mid-turn interaction
