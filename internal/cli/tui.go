@@ -141,9 +141,7 @@ func initTheme() {
 		Padding(0, 1)
 
 	statusBarStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color(t.statusBarBg)).
-		Foreground(lipgloss.Color(t.textDim)).
-		Padding(0, 1)
+		Foreground(lipgloss.Color(t.textDim))
 }
 
 // ── Slash commands ──
@@ -728,6 +726,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.completedTurns = append(m.completedTurns, td)
 
+			// Append assistant response to messages so it stays visible after streaming
+			m.messages = append(m.messages, chatMessage{"assistant", m.streamResponse})
+
 			// Track token usage: prefer real API usage, fall back to estimation
 			if m.turnUsage.GrandTotal() > 0 {
 				m.contextMgr.AddTurnUsage(m.turnUsage.InputTotal() + m.turnUsage.Output)
@@ -753,6 +754,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages[len(m.messages)-1].content, // last user message
 					m.streamResponse, m.streamThinking, toolCalls)
 				m.sess.SetStatus(session.StatusIdle)
+				// Persist session summary metadata for /sessions listing
+				if m.sess.Metadata == nil {
+					m.sess.Metadata = make(map[string]any)
+				}
+				m.sess.Metadata["turns"] = m.turnCount
+				m.sess.Metadata["tokens_in"] = m.sessionUsage.InputTotal()
+				m.sess.Metadata["tokens_out"] = m.sessionUsage.Output
 				_ = m.app.SessionStore.Save(context.Background(), m.sess)
 			}
 
@@ -1491,11 +1499,48 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				var sb strings.Builder
 				sb.WriteString(fmt.Sprintf("Found %d sessions:\n", len(sessions)))
 				for i, s := range sessions {
-					if i >= 10 {
-						sb.WriteString(fmt.Sprintf("  ... and %d more\n", len(sessions)-10))
+					if i >= 20 {
+						sb.WriteString(fmt.Sprintf("  ... and %d more\n", len(sessions)-20))
 						break
 					}
-					sb.WriteString(fmt.Sprintf("  %s  %s (%s)\n", s.ID, s.Title, s.UpdatedAt.Format("Jan 02 15:04")))
+					// Extract metadata
+					turns := 0
+					tokensIn := 0
+					tokensOut := 0
+					if tc, ok := s.Metadata["turns"].(float64); ok {
+						turns = int(tc)
+					}
+					if ti, ok := s.Metadata["tokens_in"].(float64); ok {
+						tokensIn = int(ti)
+					}
+					if to, ok := s.Metadata["tokens_out"].(float64); ok {
+						tokensOut = int(to)
+					}
+					// Relative time
+					ago := time.Since(s.UpdatedAt)
+					var relTime string
+					switch {
+					case ago < time.Minute:
+						relTime = "just now"
+					case ago < time.Hour:
+						relTime = fmt.Sprintf("%dm ago", int(ago.Minutes()))
+					case ago < 24*time.Hour:
+						relTime = fmt.Sprintf("%dh ago", int(ago.Hours()))
+					case ago < 7*24*time.Hour:
+						relTime = fmt.Sprintf("%dd ago", int(ago.Hours()/24))
+					default:
+						relTime = s.UpdatedAt.Format("Jan 02")
+					}
+					// Format display line
+					if turns > 0 {
+						sb.WriteString(fmt.Sprintf("  %d. %q — %d turns, %s in / %s out — %s\n",
+							i+1, s.Title, turns,
+							agentctx.FormatTokenCount(tokensIn),
+							agentctx.FormatTokenCount(tokensOut),
+							relTime))
+					} else {
+						sb.WriteString(fmt.Sprintf("  %d. %q — %s\n", i+1, s.Title, relTime))
+					}
 				}
 				sb.WriteString("\nUse: kimi -S <session-id> to resume")
 				m.messages = append(m.messages, chatMessage{"system", sb.String()})
@@ -2009,6 +2054,15 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.turnCount++
+		// Auto-title session from first user prompt
+		if m.sess.Title == "Interactive Session" && m.turnCount == 1 {
+			title := input
+			runes := []rune(title)
+			if len(runes) > 50 {
+				title = string(runes[:47]) + "..."
+			}
+			m.sess.SetTitle(title)
+		}
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false
@@ -2437,8 +2491,14 @@ func (m tuiModel) renderStatusBar() string {
 		w = 20
 	}
 
-	// Left side: modes + model + thinking
+	// Left side: model + effort + mode flags
 	var left []string
+	left = append(left, strongStyle.Render(m.model))
+	effort := "high"
+	if m.pickerEffort != "" {
+		effort = m.pickerEffort
+	}
+	left = append(left, dimStyle.Render(effort))
 	if m.yoloMode {
 		left = append(left, warningStyle.Render("yolo"))
 	}
@@ -2448,64 +2508,50 @@ func (m tuiModel) renderStatusBar() string {
 	if m.goalTracker.IsActive() {
 		left = append(left, successStyle.Render("goal"))
 	}
-	left = append(left, strongStyle.Render(m.model))
-	effort := "high"
-	if m.pickerEffort != "" {
-		effort = m.pickerEffort
-	}
-	left = append(left, dimStyle.Render(fmt.Sprintf("thinking: %s", effort)))
 	leftStr := strings.Join(left, " ")
 
-	// Middle: cwd + branch
-	middle := dimStyle.Render(filepath.Base(m.cwd)) + " " + mutedStyle.Render(m.branch)
-
-		// Right side: context usage + live token breakdown
+	// Right side: context + turns + token breakdown
 	right := m.renderTokenStatus()
 
-	// Calculate padding
+	// Simple left-right split
 	leftW := lipgloss.Width(leftStr)
-	middleW := lipgloss.Width(middle)
 	rightW := lipgloss.Width(right)
-	total := leftW + middleW + rightW
-	gap := w - total
-	if gap < 4 {
-		gap = 4
+	gap := w - leftW - rightW - 2
+	if gap < 2 {
+		gap = 2
 	}
 
-	// Distribute gap
-	gap1 := gap / 2
-	gap2 := gap - gap1
-
-	bar := leftStr + strings.Repeat(" ", gap1) + middle + strings.Repeat(" ", gap2) + right
-
-	return statusBarStyle.Width(w - 2).Render(bar)
+	return statusBarStyle.Width(w).Render(leftStr + strings.Repeat(" ", gap) + right)
 }
 
 // renderTokenStatus returns the right side of the status bar with token breakdown.
 func (m tuiModel) renderTokenStatus() string {
 	ctxStr := m.contextMgr.UsageDisplay()
+	dot := mutedStyle.Render(" · ")
 
 	// During streaming, show live current-turn usage
 	if m.streaming && m.turnUsage.GrandTotal() > 0 {
 		u := m.turnUsage
 		parts := []string{"ctx: " + ctxStr}
+		parts = append(parts, fmt.Sprintf("in: %s", agentctx.FormatTokenCount(u.InputTotal())))
+		parts = append(parts, fmt.Sprintf("out: %s", agentctx.FormatTokenCount(u.Output)))
 		if u.InputCacheRead > 0 {
 			parts = append(parts, fmt.Sprintf("cache: %s", agentctx.FormatTokenCount(u.InputCacheRead)))
 		}
-		parts = append(parts, fmt.Sprintf("in: %s", agentctx.FormatTokenCount(u.InputTotal())))
-		parts = append(parts, fmt.Sprintf("out: %s", agentctx.FormatTokenCount(u.Output)))
-		return dimStyle.Render(strings.Join(parts, " | "))
+		return dimStyle.Render(strings.Join(parts, dot))
 	}
 
 	// Idle: show cumulative session usage
 	if m.sessionUsage.GrandTotal() > 0 {
 		u := m.sessionUsage
 		parts := []string{"ctx: " + ctxStr}
-		parts = append(parts, fmt.Sprintf("session in: %s out: %s", agentctx.FormatTokenCount(u.InputTotal()), agentctx.FormatTokenCount(u.Output)))
+		parts = append(parts, fmt.Sprintf("turns: %d", m.turnCount))
+		parts = append(parts, fmt.Sprintf("in: %s", agentctx.FormatTokenCount(u.InputTotal())))
+		parts = append(parts, fmt.Sprintf("out: %s", agentctx.FormatTokenCount(u.Output)))
 		if u.InputCacheRead > 0 {
 			parts = append(parts, fmt.Sprintf("cache: %s", agentctx.FormatTokenCount(u.InputCacheRead)))
 		}
-		return dimStyle.Render(strings.Join(parts, " | "))
+		return dimStyle.Render(strings.Join(parts, dot))
 	}
 
 	// Fallback: just context usage
