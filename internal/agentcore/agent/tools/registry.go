@@ -34,9 +34,20 @@ type Tool interface {
 	Execute(ctx context.Context, input json.RawMessage, exec ExecContext) (*Result, error)
 }
 
+// ToolHook intercepts tool dispatch for a named tool.
+// Mirrors the permission.Policy pattern.
+type ToolHook interface {
+	// Name identifies this hook for logging/debugging.
+	Name() string
+	// Wrap returns a replacement Tool that delegates to original,
+	// or nil to pass through unchanged.
+	Wrap(toolName string, original Tool) Tool
+}
+
 // Registry manages available tools.
 type Registry struct {
 	tools map[string]Tool
+	hooks map[string][]ToolHook
 }
 
 // NewRegistry creates a new tool registry.
@@ -49,10 +60,30 @@ func (r *Registry) Register(tool Tool) {
 	r.tools[tool.Definition().Name] = tool
 }
 
-// Get returns a tool by name.
+// Get returns a tool by name. If hooks are registered for this tool,
+// they are applied in registration order (fast path: no hooks = return original).
 func (r *Registry) Get(name string) (Tool, bool) {
 	t, ok := r.tools[name]
-	return t, ok
+	if !ok {
+		return nil, false
+	}
+	if hooks := r.hooks[name]; len(hooks) > 0 {
+		for _, h := range hooks {
+			if wrapped := h.Wrap(name, t); wrapped != nil {
+				t = wrapped
+			}
+		}
+	}
+	return t, true
+}
+
+// RegisterHook registers a hook for a named tool. Hooks are applied in
+// registration order when Get is called for that tool.
+func (r *Registry) RegisterHook(toolName string, hook ToolHook) {
+	if r.hooks == nil {
+		r.hooks = make(map[string][]ToolHook)
+	}
+	r.hooks[toolName] = append(r.hooks[toolName], hook)
 }
 
 // List returns all registered tools.
