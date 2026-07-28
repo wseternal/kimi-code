@@ -30,10 +30,71 @@ type TurnJob struct {
 	ID        string
 	SessionID string
 	Prompt    string
-	Status    TurnStatus
 	CreatedAt time.Time
 	ctx       context.Context
 	cancel    context.CancelFunc
+
+	// status is accessed atomically; use Status()/SetStatus().
+	status atomic.Int32
+	// done is closed when the turn reaches a terminal state.
+	done chan struct{}
+}
+
+// TurnStatus returns the current turn status (thread-safe).
+func (t *TurnJob) TurnStatus() TurnStatus {
+	return turnStatusFromInt(t.status.Load())
+}
+
+// SetStatus sets the turn status (thread-safe) and closes done on terminal states.
+func (t *TurnJob) SetStatus(s TurnStatus) {
+	t.status.Store(turnStatusToInt(s))
+	switch s {
+	case TurnCompleted, TurnFailed, TurnAborted:
+		select {
+		case <-t.done:
+		default:
+			close(t.done)
+		}
+	}
+}
+
+// Done returns a channel that is closed when the turn finishes.
+func (t *TurnJob) Done() <-chan struct{} {
+	return t.done
+}
+
+func turnStatusToInt(s TurnStatus) int32 {
+	switch s {
+	case TurnPending:
+		return 0
+	case TurnRunning:
+		return 1
+	case TurnCompleted:
+		return 2
+	case TurnFailed:
+		return 3
+	case TurnAborted:
+		return 4
+	default:
+		return -1
+	}
+}
+
+func turnStatusFromInt(v int32) TurnStatus {
+	switch v {
+	case 0:
+		return TurnPending
+	case 1:
+		return TurnRunning
+	case 2:
+		return TurnCompleted
+	case 3:
+		return TurnFailed
+	case 4:
+		return TurnAborted
+	default:
+		return TurnPending
+	}
 }
 
 // StepRequest represents a single LLM step within a turn.
@@ -76,6 +137,12 @@ type Service struct {
 	mu          sync.RWMutex
 	activeTurn  *TurnJob
 	running     bool
+
+	// Per-session conversation history, keyed by sessionID.
+	// Follows the goose pattern: the full conversation is sent to the LLM
+	// on every turn, accumulating messages across turns.
+	sessions   map[string][]kosong.Message
+	sessionsMu sync.Mutex
 }
 
 // Config holds loop service configuration.
@@ -104,6 +171,7 @@ func NewService(
 		turnQueue:    make(chan *TurnJob, 100),
 		maxTurns:     cfg.MaxTurns,
 		maxSteps:     cfg.MaxStepsPerTurn,
+		sessions:     make(map[string][]kosong.Message),
 	}
 }
 
@@ -141,11 +209,12 @@ func (s *Service) SubmitTurn(ctx context.Context, sessionID, prompt string) (*Tu
 		ID:        fmt.Sprintf("turn_%d", time.Now().UnixNano()),
 		SessionID: sessionID,
 		Prompt:    prompt,
-		Status:    TurnPending,
 		CreatedAt: time.Now(),
 		ctx:       turnCtx,
 		cancel:    cancel,
+		done:      make(chan struct{}),
 	}
+	turn.SetStatus(TurnPending)
 
 	select {
 	case s.turnQueue <- turn:
@@ -193,7 +262,7 @@ func (s *Service) processLoop(ctx context.Context) {
 }
 
 func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
-	turn.Status = TurnRunning
+	turn.SetStatus(TurnRunning)
 
 	s.eventBus.Publish(Event{
 		Type:      "turn.started",
@@ -203,16 +272,27 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 		Data:      map[string]any{"prompt": turn.Prompt},
 	})
 
-	// Build initial messages
-	messages := []kosong.Message{
-		kosong.CreateUserMessage(turn.Prompt),
-	}
+	// Load per-session conversation history and append the new user message.
+	// Following the goose pattern: the LLM receives the full conversation
+	// on every turn, so it can reference previous messages.
+	s.sessionsMu.Lock()
+	prevHistory := s.sessions[turn.SessionID]
+	s.sessionsMu.Unlock()
+
+	userMsg := kosong.CreateUserMessage(turn.Prompt)
+	messages := make([]kosong.Message, 0, len(prevHistory)+1)
+	messages = append(messages, prevHistory...)
+	messages = append(messages, userMsg)
+
+	// Track the index where this turn's messages start, so we can
+	// persist only the new messages after the turn completes.
+	turnStartIdx := len(prevHistory)
 
 	// Execute steps
 	for step := 0; step < s.maxSteps; step++ {
 		select {
 		case <-turn.ctx.Done():
-			turn.Status = TurnAborted
+			turn.SetStatus(TurnAborted)
 			s.eventBus.Publish(Event{
 				Type:      "turn.aborted",
 				TurnID:    turn.ID,
@@ -227,7 +307,7 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 
 		result, err := s.executeStep(turn, step, messages)
 		if err != nil {
-			turn.Status = TurnFailed
+			turn.SetStatus(TurnFailed)
 			s.eventBus.Publish(Event{
 				Type:      "turn.failed",
 				TurnID:    turn.ID,
@@ -269,7 +349,14 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 		}
 	}
 
-	turn.Status = TurnCompleted
+	// Persist this turn's new messages into the session history.
+	// Only messages generated during this turn (from turnStartIdx onward)
+	// are appended, avoiding duplicates from previous turns.
+	s.sessionsMu.Lock()
+	s.sessions[turn.SessionID] = append(s.sessions[turn.SessionID], messages[turnStartIdx:]...)
+	s.sessionsMu.Unlock()
+
+	turn.SetStatus(TurnCompleted)
 	s.eventBus.Publish(Event{
 		Type:      "turn.completed",
 		TurnID:    turn.ID,
