@@ -103,6 +103,7 @@ type Service struct {
 	stepSeq     atomic.Int64
 	maxTurns    int
 	maxSteps    int
+	workDir     string
 
 	mu          sync.RWMutex
 	activeTurn  *TurnJob
@@ -119,6 +120,7 @@ type Service struct {
 type Config struct {
 	MaxTurns        int
 	MaxStepsPerTurn int
+	WorkDir         string // project working directory for tool execution
 }
 
 // NewService creates a new loop service.
@@ -141,6 +143,7 @@ func NewService(
 		turnQueue:    make(chan *TurnJob, 100),
 		maxTurns:     cfg.MaxTurns,
 		maxSteps:     cfg.MaxStepsPerTurn,
+		workDir:      cfg.WorkDir,
 		sessions:     make(map[string][]kosong.Message),
 	}
 }
@@ -300,7 +303,7 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 
 		// Execute tool calls
 		for _, tc := range result.ToolCalls {
-			toolResult, err := s.executeToolCall(turn.ctx, tc)
+			toolResult, err := s.executeToolCall(turn, tc)
 			if err != nil {
 				toolResult = &tools.Result{Output: err.Error(), IsError: true}
 			}
@@ -396,7 +399,7 @@ func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message
 	return result, nil
 }
 
-func (s *Service) executeToolCall(ctx context.Context, tc kosong.ToolCall) (*tools.Result, error) {
+func (s *Service) executeToolCall(turn *TurnJob, tc kosong.ToolCall) (*tools.Result, error) {
 	tool, ok := s.toolRegistry.Get(tc.Name)
 	if !ok {
 		return nil, fmt.Errorf("tool %q not found", tc.Name)
@@ -409,5 +412,8 @@ func (s *Service) executeToolCall(ctx context.Context, tc kosong.ToolCall) (*too
 		input = json.RawMessage("{}")
 	}
 
-	return tool.Execute(ctx, input, tools.ExecContext{})
+	return tool.Execute(turn.ctx, input, tools.ExecContext{
+		SessionID: turn.SessionID,
+		WorkDir:   s.workDir,
+	})
 }
