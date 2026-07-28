@@ -1379,10 +1379,30 @@ func (m *tuiModel) updateSuggestions() {
 
 // truncateDesc shortens a skill description for the suggestion dropdown.
 func truncateDesc(desc string, maxLen int) string {
-	if len(desc) <= maxLen {
+	if maxLen < 4 {
 		return desc
 	}
-	return desc[:maxLen-3] + "..."
+	if runes := []rune(desc); len(runes) <= maxLen {
+		return desc
+	} else {
+		return string(runes[:maxLen-3]) + "..."
+	}
+}
+
+// metaInt extracts an integer from a map[string]any value that may be
+// stored as float64 (JSON), int, or int64. Returns (value, true) on
+// success, (0, false) when the key is missing or has an unexpected type.
+func metaInt(m map[string]any, key string) (int, bool) {
+	switch v := m[key].(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	default:
+		return 0, false
+	}
 }
 
 // formatSessionList renders a human-friendly session list for the /sessions command.
@@ -1409,34 +1429,40 @@ func formatSessionList(sessions []*session.SerializedSession) string {
 			title = string(runes[:maxTitleLen-3]) + "..."
 		}
 
-		// Extract metadata
-		turns := 0
-		tokensIn := 0
-		tokensOut := 0
-		if tc, ok := s.Metadata["turns"].(float64); ok {
-			turns = int(tc)
+		// Extract metadata (handles float64 from JSON, int/int64 from Go)
+		var turns, tokensIn, tokensOut int
+		if v, ok := metaInt(s.Metadata, "turns"); ok {
+			turns = v
 		}
-		if ti, ok := s.Metadata["tokens_in"].(float64); ok {
-			tokensIn = int(ti)
+		if v, ok := metaInt(s.Metadata, "tokens_in"); ok {
+			tokensIn = v
 		}
-		if to, ok := s.Metadata["tokens_out"].(float64); ok {
-			tokensOut = int(to)
+		if v, ok := metaInt(s.Metadata, "tokens_out"); ok {
+			tokensOut = v
 		}
 
+		// Sanitize title: strip newlines/tabs that would break display layout
+		title = strings.ReplaceAll(title, "\n", " ")
+		title = strings.ReplaceAll(title, "\t", " ")
+
 		// Relative time
-		ago := time.Since(s.UpdatedAt)
 		var relTime string
-		switch {
-		case ago < time.Minute:
-			relTime = "just now"
-		case ago < time.Hour:
-			relTime = fmt.Sprintf("%dm ago", int(ago.Minutes()))
-		case ago < 24*time.Hour:
-			relTime = fmt.Sprintf("%dh ago", int(ago.Hours()))
-		case ago < 7*24*time.Hour:
-			relTime = fmt.Sprintf("%dd ago", int(ago.Hours()/24))
-		default:
-			relTime = s.UpdatedAt.Format("Jan 02")
+		if s.UpdatedAt.IsZero() {
+			relTime = "unknown"
+		} else {
+			ago := time.Since(s.UpdatedAt)
+			switch {
+			case ago < time.Minute:
+				relTime = "just now"
+			case ago < time.Hour:
+				relTime = fmt.Sprintf("%dm ago", int(ago.Minutes()))
+			case ago < 24*time.Hour:
+				relTime = fmt.Sprintf("%dh ago", int(ago.Hours()))
+			case ago < 7*24*time.Hour:
+				relTime = fmt.Sprintf("%dd ago", int(ago.Hours()/24))
+			default:
+				relTime = s.UpdatedAt.Format("Jan 02")
+			}
 		}
 
 		// Format: 1. "title" [id] — 5 turns, 1.2K in / 800 out — 2h ago
@@ -2337,7 +2363,16 @@ func (m tuiModel) renderSuggestions() string {
 		return ""
 	}
 
-	// Calculate max name width (for alignment) only within visible window
+	// Clamp selection to valid range (defensive: list may shrink between events)
+	sel := m.selectedSuggest
+	if sel < 0 {
+		sel = 0
+	}
+	if sel >= n {
+		sel = n - 1
+	}
+
+	// Calculate max name width (for alignment) across all suggestions
 	maxNameW := 0
 	for _, s := range m.suggestions {
 		if len(s.name) > maxNameW {
@@ -2352,8 +2387,8 @@ func (m tuiModel) renderSuggestions() string {
 	if n > maxVisible {
 		end = maxVisible
 		// Scroll window to keep selected item visible
-		if m.selectedSuggest >= maxVisible {
-			start = m.selectedSuggest - maxVisible + 1
+		if sel >= maxVisible {
+			start = sel - maxVisible + 1
 			end = start + maxVisible
 			if end > n {
 				end = n
@@ -2366,7 +2401,7 @@ func (m tuiModel) renderSuggestions() string {
 		s := m.suggestions[i]
 		name := s.name
 		pad := strings.Repeat(" ", maxNameW-len(name)+2)
-		if i == m.selectedSuggest {
+		if i == sel {
 			b.WriteString(fmt.Sprintf("  → %s%s%s\n",
 				strongStyle.Render(name), pad, primaryStyle.Render(s.desc)))
 		} else {
@@ -2377,7 +2412,7 @@ func (m tuiModel) renderSuggestions() string {
 
 	// Pagination indicator: (selected+1/total)
 	if n > maxVisible {
-		b.WriteString(fmt.Sprintf("  (%d/%d)\n", m.selectedSuggest+1, n))
+		b.WriteString(fmt.Sprintf("  (%d/%d)\n", sel+1, n))
 	}
 
 	return b.String()

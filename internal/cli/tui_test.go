@@ -476,3 +476,196 @@ func TestRenderSuggestions_NoPaginationForFewItems(t *testing.T) {
 		t.Errorf("unexpected pagination indicator in output: %q", out)
 	}
 }
+
+// TestFormatSessionList_NilMetadata verifies no panic when Metadata is nil.
+func TestFormatSessionList_NilMetadata(t *testing.T) {
+	sessions := []*session.SerializedSession{
+		{
+			ID:        "sess_nil_meta",
+			Title:     "Session with no metadata",
+			UpdatedAt: time.Now().Add(-30 * time.Minute),
+		},
+	}
+
+	result := formatSessionList(sessions)
+
+	if !strings.Contains(result, "sess_nil_meta") {
+		t.Error("expected session ID in output")
+	}
+	if !strings.Contains(result, "Session with no metadata") {
+		t.Error("expected title in output")
+	}
+}
+
+// TestFormatSessionList_ZeroUpdatedAt verifies that zero-value UpdatedAt
+// displays "unknown" rather than a misleading date like "Jan 01".
+func TestFormatSessionList_ZeroUpdatedAt(t *testing.T) {
+	sessions := []*session.SerializedSession{
+		{
+			ID:        "sess_zero_time",
+			Title:     "Old session",
+			UpdatedAt: time.Time{},
+		},
+	}
+
+	result := formatSessionList(sessions)
+
+	if !strings.Contains(result, "unknown") {
+		t.Errorf("expected 'unknown' for zero UpdatedAt, got: %s", result)
+	}
+	if strings.Contains(result, "Jan 01") {
+		t.Error("should not show misleading 'Jan 01' for zero UpdatedAt")
+	}
+}
+
+// TestFormatSessionList_SanitizesTitleNewlines verifies that newlines and
+// tabs in titles are replaced with spaces to prevent broken display.
+func TestFormatSessionList_SanitizesTitleNewlines(t *testing.T) {
+	sessions := []*session.SerializedSession{
+		{
+			ID:        "sess_dirty",
+			Title:     "Fix the\nlogin\tbug",
+			UpdatedAt: time.Now(),
+		},
+	}
+
+	result := formatSessionList(sessions)
+
+	if strings.Contains(result, "\nlogin") {
+		t.Error("newlines in title should be replaced with spaces")
+	}
+	if strings.Contains(result, "\tbug") {
+		t.Error("tabs in title should be replaced with spaces")
+	}
+}
+
+// TestFormatSessionList_MaxDisplayCap verifies that only 20 sessions are
+// displayed and the remainder is indicated with "... and N more".
+func TestFormatSessionList_MaxDisplayCap(t *testing.T) {
+	var sessions []*session.SerializedSession
+	for i := 0; i < 25; i++ {
+		sessions = append(sessions, &session.SerializedSession{
+			ID:        fmt.Sprintf("sess_%d", i),
+			Title:     fmt.Sprintf("Session %d", i),
+			UpdatedAt: time.Now(),
+		})
+	}
+
+	result := formatSessionList(sessions)
+
+	if !strings.Contains(result, "... and 5 more") {
+		t.Error("expected '... and 5 more' for 25 sessions")
+	}
+	// The 21st session should NOT appear
+	if strings.Contains(result, "sess_20") {
+		t.Error("session 21 (sess_20) should not be displayed")
+	}
+}
+
+// TestFormatSessionList_MetaIntTypes verifies that metadata stored as
+// int or int64 (not just float64) is correctly extracted.
+func TestFormatSessionList_MetaIntTypes(t *testing.T) {
+	sessions := []*session.SerializedSession{
+		{
+			ID:    "sess_int_meta",
+			Title: "Int metadata",
+			Metadata: map[string]any{
+				"turns":      5,        // Go int
+				"tokens_in":  int64(1200), // int64
+				"tokens_out": float64(800), // JSON float64
+			},
+			UpdatedAt: time.Now(),
+		},
+	}
+
+	result := formatSessionList(sessions)
+
+	if !strings.Contains(result, "5 turns") {
+		t.Errorf("expected '5 turns' for int metadata, got: %s", result)
+	}
+	if !strings.Contains(result, "1.2K in") {
+		t.Errorf("expected '1.2K in' for int64 tokens_in, got: %s", result)
+	}
+	if !strings.Contains(result, "800 out") {
+		t.Errorf("expected '800 out' for float64 tokens_out, got: %s", result)
+	}
+}
+
+// TestRenderSuggestions_ExactlyTenItems verifies no pagination for exactly 10 items.
+func TestRenderSuggestions_ExactlyTenItems(t *testing.T) {
+	var suggestions []slashCommand
+	for i := 0; i < 10; i++ {
+		suggestions = append(suggestions, slashCommand{
+			name: fmt.Sprintf("cmd%d", i),
+			desc: fmt.Sprintf("Desc %d", i),
+		})
+	}
+
+	m := tuiModel{
+		suggestions:    suggestions,
+		selectedSuggest: 0,
+	}
+
+	out := m.renderSuggestions()
+
+	if strings.Contains(out, "(") {
+		t.Errorf("10 items should not show pagination, got: %s", out)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 10 {
+		t.Errorf("expected 10 lines, got %d", len(lines))
+	}
+}
+
+// TestRenderSuggestions_OutOfBoundsSelection verifies clamping when
+// selectedSuggest exceeds the list length.
+func TestRenderSuggestions_OutOfBoundsSelection(t *testing.T) {
+	suggestions := []slashCommand{
+		{name: "a", desc: "A"},
+		{name: "b", desc: "B"},
+	}
+
+	m := tuiModel{
+		suggestions:    suggestions,
+		selectedSuggest: 99, // way out of bounds
+	}
+
+	out := m.renderSuggestions()
+
+	// Should not panic and should show last item as selected (with arrow)
+	found := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "b") && strings.Contains(line, "\u2192") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected 'b' to be the selected item (with \u2192 indicator)")
+	}
+}
+
+// TestTruncateDesc_MultiByteUTF8 verifies that truncateDesc handles
+// multi-byte UTF-8 characters without producing invalid output.
+func TestTruncateDesc_MultiByteUTF8(t *testing.T) {
+	// Each emoji is 4 bytes but 1 rune
+	desc := strings.Repeat("\U0001F600", 20) // 20 emoji, 80 bytes, 20 runes
+
+	result := truncateDesc(desc, 10)
+
+	// Should truncate by runes, not bytes
+	runes := []rune(result)
+	if len(runes) > 10 {
+		t.Errorf("expected max 10 runes, got %d", len(runes))
+	}
+
+	// Result should be valid UTF-8 (no partial byte sequences)
+	if strings.HasSuffix(result, "...") {
+		trimmed := result[:len(result)-3]
+		for _, r := range trimmed {
+			if r == '\uFFFD' {
+				t.Error("found replacement character — invalid UTF-8 truncation")
+			}
+		}
+	}
+}
