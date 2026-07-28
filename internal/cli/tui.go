@@ -382,7 +382,7 @@ func (m *tuiModel) recreateProvider() {
 	}
 	// Sync the context manager's max tokens with the current model config
 	// so the status bar reflects the correct context window size.
-	if _, mc := m.app.Config.ResolveModel(); mc != nil && mc.MaxContextSize > 0 {
+	if _, mc := m.app.Config.ResolveModel(); mc != nil {
 		m.contextMgr.SetMaxTokens(mc.MaxContextSize)
 	}
 }

@@ -150,6 +150,12 @@ func TestSetMaxTokens(t *testing.T) {
 	if cm.MaxTokens() != 131072 {
 		t.Errorf("SetMaxTokens(0) → MaxTokens = %d, want 131072 (default)", cm.MaxTokens())
 	}
+
+	// SetMaxTokens(-100) should also fall back to default
+	cm.SetMaxTokens(-100)
+	if cm.MaxTokens() != 131072 {
+		t.Errorf("SetMaxTokens(-100) → MaxTokens = %d, want 131072 (default)", cm.MaxTokens())
+	}
 }
 
 func TestFormatTokenCount(t *testing.T) {
