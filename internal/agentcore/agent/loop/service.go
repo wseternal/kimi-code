@@ -34,20 +34,24 @@ type TurnJob struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	// status is accessed atomically; use Status()/SetStatus().
-	status atomic.Int32
-	// done is closed when the turn reaches a terminal state.
-	done chan struct{}
+	// mu protects status; done is closed on terminal states.
+	mu     sync.Mutex
+	status TurnStatus
+	done   chan struct{}
 }
 
 // TurnStatus returns the current turn status (thread-safe).
 func (t *TurnJob) TurnStatus() TurnStatus {
-	return turnStatusFromInt(t.status.Load())
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.status
 }
 
 // SetStatus sets the turn status (thread-safe) and closes done on terminal states.
 func (t *TurnJob) SetStatus(s TurnStatus) {
-	t.status.Store(turnStatusToInt(s))
+	t.mu.Lock()
+	t.status = s
+	t.mu.Unlock()
 	switch s {
 	case TurnCompleted, TurnFailed, TurnAborted:
 		select {
@@ -61,40 +65,6 @@ func (t *TurnJob) SetStatus(s TurnStatus) {
 // Done returns a channel that is closed when the turn finishes.
 func (t *TurnJob) Done() <-chan struct{} {
 	return t.done
-}
-
-func turnStatusToInt(s TurnStatus) int32 {
-	switch s {
-	case TurnPending:
-		return 0
-	case TurnRunning:
-		return 1
-	case TurnCompleted:
-		return 2
-	case TurnFailed:
-		return 3
-	case TurnAborted:
-		return 4
-	default:
-		return -1
-	}
-}
-
-func turnStatusFromInt(v int32) TurnStatus {
-	switch v {
-	case 0:
-		return TurnPending
-	case 1:
-		return TurnRunning
-	case 2:
-		return TurnCompleted
-	case 3:
-		return TurnFailed
-	case 4:
-		return TurnAborted
-	default:
-		return TurnPending
-	}
 }
 
 // StepRequest represents a single LLM step within a turn.
