@@ -305,6 +305,13 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	bgMgr := background.NewManager()
 	tools.RegisterBackgroundTools(toolReg, bgMgr)
 
+	// Register GoGraph tools and hooks when available (opt-out via experimental.gograph=false)
+	if app.Config.Experimental["gograph"] != false && tools.IsGoGraphAvailable() {
+		runner := tools.NewGoGraphRunner()
+		tools.RegisterGoGraphTools(toolReg, runner)
+		toolReg.RegisterHook("Grep", tools.NewGoGraphHook(runner))
+	}
+
 	permChain := permission.DefaultChain()
 
 	// Initialize input history
@@ -3130,6 +3137,13 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	tools.RegisterDefaultTools(toolReg)
 	bgMgr := background.NewManager()
 	tools.RegisterBackgroundTools(toolReg, bgMgr)
+
+	// Register GoGraph tools and hooks when available (opt-out via experimental.gograph=false)
+	if a.Config.Experimental["gograph"] != false && tools.IsGoGraphAvailable() {
+		runner := tools.NewGoGraphRunner()
+		tools.RegisterGoGraphTools(toolReg, runner)
+		toolReg.RegisterHook("Grep", tools.NewGoGraphHook(runner))
+	}
 
 	permChain := permission.DefaultChain()
 
