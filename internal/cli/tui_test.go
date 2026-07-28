@@ -717,6 +717,8 @@ func TestToolVerb(t *testing.T) {
 		{"search_replace", "Edit"},
 		{"unknown_tool", "Unknown_tool"},
 		{"", "Tool"},
+		// Multi-byte UTF-8 tool name should not panic or produce garbled output
+		{"α_tool", "Α_tool"},
 	}
 	for _, tt := range tests {
 		got := toolVerb(tt.name)
@@ -728,19 +730,23 @@ func TestToolVerb(t *testing.T) {
 
 func TestDiffStats(t *testing.T) {
 	tests := []struct {
-		name   string
-		result string
-		want   string
+		name     string
+		toolName string
+		result   string
+		want     string
 	}{
-		{"empty", "", ""},
-		{"no diff lines", "hello world\nfoo bar", ""},
-		{"added lines", "+line1\n+line2\n-line3\nplain", "+2/-1"},
-		{"only removed", "-line1\n-line2\nplain", "+0/-2"},
+		{"empty", "edit_file", "", ""},
+		{"no diff lines", "edit_file", "hello world\nfoo bar", ""},
+		{"added lines", "edit_file", "+line1\n+line2\n-line3\nplain", "+2/-1"},
+		{"only removed", "edit_file", "-line1\n-line2\nplain", "+0/-2"},
+		// Non-diff tool should return empty even if result has +/- lines
+		{"bash false positive", "bash", "+1 for yes\n-1 for no", ""},
+		{"read_file false positive", "read_file", "+x means positive\n-y means negative", ""},
 	}
 	for _, tt := range tests {
-		got := diffStats(tt.result)
+		got := diffStats(tt.toolName, tt.result)
 		if got != tt.want {
-			t.Errorf("diffStats(%q) = %q, want %q", tt.name, got, tt.want)
+			t.Errorf("diffStats(%q, %q) = %q, want %q", tt.toolName, tt.result, got, tt.want)
 		}
 	}
 }
@@ -780,6 +786,54 @@ func TestSessionPickerKey_Escape(t *testing.T) {
 	if got.showSessionPicker {
 		t.Error("Esc should close the session picker")
 	}
+}
+
+func TestToolArgSummary_Deterministic(t *testing.T) {
+	// Non-priority keys should appear in sorted order for deterministic output
+	args := `{"zebra": "z", "alpha": "a", "file_path": "/f"}`
+	summary := toolArgSummary(args)
+	// file_path first, then alpha before zebra
+	alphaIdx := strings.Index(summary, "alpha=a")
+	zebraIdx := strings.Index(summary, "zebra=z")
+	if alphaIdx < 0 || zebraIdx < 0 {
+		t.Fatalf("summary missing keys: %q", summary)
+	}
+	if alphaIdx >= zebraIdx {
+		t.Errorf("non-priority keys should be sorted: alpha before zebra, got: %q", summary)
+	}
+}
+
+func TestSessionPickerKey_CtrlC(t *testing.T) {
+	m := tuiModel{
+		showSessionPicker: true,
+		sessionPickerList: []*session.SerializedSession{
+			{ID: "s1", Title: "Session 1"},
+		},
+		sessionPickerSel: 0,
+		width:            80,
+		height:           24,
+	}
+	result, cmd := m.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	got := result.(tuiModel)
+	if !got.quitting {
+		t.Error("Ctrl+C should set quitting = true")
+	}
+	if cmd == nil {
+		t.Error("Ctrl+C should return a quit command")
+	}
+}
+
+func TestSessionPickerKey_Enter(t *testing.T) {
+	// Enter with empty list should not panic
+	m := tuiModel{
+		showSessionPicker: true,
+		sessionPickerList: []*session.SerializedSession{},
+		sessionPickerSel:  0,
+		width:             80,
+		height:            24,
+	}
+	_, _ = m.handleSessionPickerKey(tea.KeyMsg{Type: tea.KeyEnter})
+	// No panic means the guard works
 }
 
 func TestSessionPickerKey_Navigation(t *testing.T) {

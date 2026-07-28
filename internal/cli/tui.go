@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -518,10 +519,15 @@ func toolArgSummary(args string) string {
 			seen[k] = true
 		}
 	}
-	for k, v := range m {
-		if seen[k] {
-			continue
+	var extraKeys []string
+	for k := range m {
+		if !seen[k] {
+			extraKeys = append(extraKeys, k)
 		}
+	}
+	sort.Strings(extraKeys)
+	for _, k := range extraKeys {
+		v := m[k]
 		s := fmt.Sprintf("%v", v)
 		if len(s) > 30 {
 			s = s[:27] + "..."
@@ -562,18 +568,34 @@ func toolVerb(name string) string {
 	if name == "" {
 		return "Tool"
 	}
-	return strings.ToUpper(name[:1]) + name[1:]
+	r := []rune(name)
+	return strings.ToUpper(string(r[:1])) + string(r[1:])
+}
+
+// diff-producing tool names whose results contain unified diff output.
+var diffToolNames = map[string]bool{
+	"search_replace": true,
+	"edit_file":      true,
+	"write_file":     true,
 }
 
 // diffStats extracts a "+N/-M" badge from tool result text by counting
 // lines starting with '+' or '-' in the first 500 characters.
-func diffStats(result string) string {
+// Only returns stats for tools known to produce diff output.
+func diffStats(toolName, result string) string {
 	if result == "" {
+		return ""
+	}
+	if !diffToolNames[strings.ToLower(toolName)] {
 		return ""
 	}
 	scan := result
 	if len(scan) > 500 {
 		scan = scan[:500]
+		// Back up to last valid rune boundary to avoid splitting multi-byte chars.
+		for len(scan) > 0 && !utf8.ValidString(scan) {
+			scan = scan[:len(scan)-1]
+		}
 	}
 	var added, removed int
 	for _, line := range strings.Split(scan, "\n") {
@@ -2771,7 +2793,7 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 		summary := toolArgSummary(tg.args)
 		nameStyled := warningStyle.Render(fmt.Sprintf("[%s]", tg.name))
 		verb := primaryStyle.Render(toolVerb(tg.name))
-		diff := diffStats(tg.result)
+		diff := diffStats(tg.name, tg.result)
 		diffLabel := ""
 		if diff != "" {
 			diffLabel = " " + dimStyle.Render(diff)
@@ -3099,6 +3121,7 @@ func (m *tuiModel) openSessionPicker() {
 					s.Metadata = make(map[string]any)
 				}
 				s.Metadata["first_prompt"] = fp
+				s.Title = fp
 			}
 		}
 	}
@@ -3167,6 +3190,14 @@ func (m *tuiModel) resumeSession(id string) {
 	m.focusIndex = -1
 	m.input = ""
 	m.cursor = 0
+	m.cancelCh = nil
+
+	// Reset usage and context state (mirrors /new and /init)
+	m.contextMgr.Reset()
+	m.goalTracker.Clear()
+	m.activeSkill = nil
+	m.sessionUsage = kosong.TokenUsage{}
+	m.turnUsage = kosong.TokenUsage{}
 
 	// Replay history into the clean state
 	m.replayHistory()
@@ -3199,17 +3230,18 @@ func (m tuiModel) renderSessionPicker() string {
 		}
 	}
 
-	// Clamp selection
-	if m.sessionPickerSel >= len(sessions) {
-		m.sessionPickerSel = len(sessions) - 1
+	// Clamp selection to local variable (value receiver cannot mutate m)
+	sel := m.sessionPickerSel
+	if sel >= len(sessions) {
+		sel = len(sessions) - 1
 	}
-	if m.sessionPickerSel < 0 {
-		m.sessionPickerSel = 0
+	if sel < 0 {
+		sel = 0
 	}
 
 	start := 0
-	if m.sessionPickerSel >= maxVisible {
-		start = m.sessionPickerSel - maxVisible + 1
+	if sel >= maxVisible {
+		start = sel - maxVisible + 1
 	}
 	end := start + maxVisible
 	if end > len(sessions) {
@@ -3262,7 +3294,7 @@ func (m tuiModel) renderSessionPicker() string {
 			metaStr = dimStyle.Render(meta+" \xc2\xb7 ") + metaStr
 		}
 
-		if i == m.sessionPickerSel {
+		if i == sel {
 			arrow := primaryStyle.Render("\xe2\x9d\xaf")
 			name := primaryStyle.Copy().Bold(true).Render(displayTitle)
 			b.WriteString(fmt.Sprintf("  %s %s  %s\n", arrow, name, metaStr))
