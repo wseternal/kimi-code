@@ -12,6 +12,7 @@ const (
 	ClientID          = "17e5f671-d194-4dfb-9706-5516cb48c098"
 	ProviderName      = "kimi-code"
 	ManagedProvider   = "managed:kimi-code"
+	ModelKeyPrefix    = "kimi-code" // TS: KIMI_CODE_PLATFORM_ID — model keys are "kimi-code/k3", not "managed:kimi-code/k3"
 	OAuthKey          = "oauth/kimi-code"
 	KimiCodePlatform  = "kimi_code_cli"
 	DefaultBaseURL    = "https://api.kimi.com/coding/v1"

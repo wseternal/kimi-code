@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -575,5 +576,162 @@ max_context_size = 1048576
 	// OAuth-only should count as configured
 	if prov.APIKey == "" && prov.OAuth == nil {
 		t.Error("provider with OAuth should be considered configured")
+	}
+}
+
+func TestSaveToFile_PreservesUnknownSections(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	input := `default_model = "kimi-code/k3"
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
+[models."kimi-code/k3"]
+provider = "managed:kimi-code"
+model = "k3"
+max_context_size = 1048576
+support_efforts = ["low", "high", "max"]
+default_effort = "high"
+
+[thinking]
+enabled = true
+effort = "high"
+
+[services.moonshot_search]
+base_url = "https://api.kimi.com/coding/v1/search"
+
+[services.moonshot_fetch]
+base_url = "https://api.kimi.com/coding/v1/fetch"
+`
+	cfg, err := parseConfigString(input, "test.toml")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := cfg.SaveToFile(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Reload and verify
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	text := string(data)
+
+	// [services] sections must be preserved
+	if !strings.Contains(text, "moonshot_search") {
+		t.Error("services.moonshot_search lost during save")
+	}
+	if !strings.Contains(text, "moonshot_fetch") {
+		t.Error("services.moonshot_fetch lost during save")
+	}
+
+	// support_efforts and default_effort must survive round-trip
+	if !strings.Contains(text, "support_efforts") {
+		t.Error("support_efforts lost during save")
+	}
+	if !strings.Contains(text, "default_effort") {
+		t.Error("default_effort lost during save")
+	}
+
+	// Zero-value noise must NOT be present
+	if strings.Contains(text, "yolo = false") {
+		t.Error("yolo = false should be omitted")
+	}
+	if strings.Contains(text, "plan_mode = false") {
+		t.Error("plan_mode = false should be omitted")
+	}
+	if strings.Contains(text, "max_input_size = 0") {
+		t.Error("max_input_size = 0 should be omitted")
+	}
+	if strings.Contains(text, "default_provider =") && !strings.Contains(input, "default_provider") {
+		t.Error("default_provider should not appear when empty")
+	}
+}
+
+func TestSaveToFile_OmitsZeroValues(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := DefaultConfig()
+	cfg.DefaultModel = "test-model"
+	cfg.Providers["test"] = ProviderConfig{
+		Type:   "openai",
+		APIKey: "sk-test",
+	}
+	cfg.Models["test-model"] = ModelConfig{
+		Provider:       "test",
+		Model:          "test-model",
+		MaxContextSize: 8192,
+	}
+
+	if err := cfg.SaveToFile(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	text := string(data)
+
+	// These zero-value fields must not appear
+	for _, bad := range []string{"yolo = false", "plan_mode = false", "telemetry = false", "max_input_size = 0", "max_output_size = 0"} {
+		if strings.Contains(text, bad) {
+			t.Errorf("zero-value field should be omitted: %s", bad)
+		}
+	}
+
+	// Empty sections must not appear
+	for _, bad := range []string{"[permission]", "[experimental]"} {
+		if strings.Contains(text, bad) {
+			t.Errorf("empty section should be omitted: %s", bad)
+		}
+	}
+}
+
+func TestRoundTrip_SupportEfforts(t *testing.T) {
+	input := `[models.k3]
+provider = "kimi"
+model = "k3"
+max_context_size = 1048576
+support_efforts = ["low", "high", "max"]
+default_effort = "high"
+`
+	cfg, err := parseConfigString(input, "test.toml")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	m := cfg.Models["k3"]
+	if len(m.SupportEfforts) != 3 {
+		t.Errorf("expected 3 support_efforts, got %d", len(m.SupportEfforts))
+	}
+	if m.DefaultEffort != "high" {
+		t.Errorf("expected default_effort=high, got %s", m.DefaultEffort)
+	}
+
+	// Save and reload
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := cfg.SaveToFile(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	cfg2, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	m2 := cfg2.Models["k3"]
+	if len(m2.SupportEfforts) != 3 {
+		t.Errorf("after reload: expected 3 support_efforts, got %d", len(m2.SupportEfforts))
+	}
+	if m2.DefaultEffort != "high" {
+		t.Errorf("after reload: expected default_effort=high, got %s", m2.DefaultEffort)
 	}
 }

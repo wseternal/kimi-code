@@ -23,6 +23,8 @@ type ModelInfo struct {
 	SupportsToolUse      bool
 	DisplayName          string
 	Protocol             string // "kimi" or "anthropic"
+	SupportEfforts       []string
+	DefaultEffort        string
 }
 
 // modelsHTTPClient is a dedicated HTTP client for model fetching.
@@ -105,6 +107,24 @@ func FetchManagedModels(ctx context.Context, accessToken, baseURL string, header
 			}
 		}
 
+		// Parse think_efforts: { support: bool, valid_efforts: [...], default_effort: "..." }
+		var supportEfforts []string
+		var defaultEffort string
+		if te, ok := item["think_efforts"].(map[string]interface{}); ok {
+			if support, _ := te["support"].(bool); support {
+				if efforts, ok := te["valid_efforts"].([]interface{}); ok {
+					for _, e := range efforts {
+						if s, ok := e.(string); ok && s != "" {
+							supportEfforts = append(supportEfforts, s)
+						}
+					}
+				}
+				if def, ok := te["default_effort"].(string); ok && def != "" {
+					defaultEffort = def
+				}
+			}
+		}
+
 		models = append(models, ModelInfo{
 			ID:                   id,
 			ContextLength:        ctxLen,
@@ -115,6 +135,8 @@ func FetchManagedModels(ctx context.Context, accessToken, baseURL string, header
 			SupportsToolUse:      supportsToolUse,
 			DisplayName:          displayName,
 			Protocol:             protocol,
+			SupportEfforts:       supportEfforts,
+			DefaultEffort:        defaultEffort,
 		})
 	}
 
@@ -188,10 +210,10 @@ func ProvisionConfig(cfg *config.Config, models []ModelInfo, baseURL, oauthHost 
 		OAuth:    oauthRef,
 	}
 
-	// Remove stale managed models
+	// Remove stale managed models (check both old and new key prefix formats)
 	upstreamKeys := make(map[string]bool)
 	for _, m := range models {
-		key := ManagedProvider + "/" + m.ID
+		key := ModelKeyPrefix + "/" + m.ID
 		upstreamKeys[key] = true
 	}
 	for key, mc := range cfg.Models {
@@ -200,24 +222,31 @@ func ProvisionConfig(cfg *config.Config, models []ModelInfo, baseURL, oauthHost 
 		}
 	}
 
-	// Add/update managed models
+	// Add/update managed models using TS-compatible key prefix (kimi-code/X, not managed:kimi-code/X)
 	for _, m := range models {
-		key := ManagedProvider + "/" + m.ID
+		key := ModelKeyPrefix + "/" + m.ID
 		caps := modelCapabilities(m)
-		cfg.Models[key] = config.ModelConfig{
+		mc := config.ModelConfig{
 			Provider:       ManagedProvider,
 			Model:          m.ID,
 			MaxContextSize: m.ContextLength,
 			DisplayName:    m.DisplayName,
 			Capabilities:   caps,
 		}
+		if len(m.SupportEfforts) > 0 {
+			mc.SupportEfforts = m.SupportEfforts
+		}
+		if m.DefaultEffort != "" {
+			mc.DefaultEffort = m.DefaultEffort
+		}
+		cfg.Models[key] = mc
 	}
 
 	// Select default model: first model, prefer thinking-capable
-	selectedKey := ManagedProvider + "/" + models[0].ID
+	selectedKey := ModelKeyPrefix + "/" + models[0].ID
 	thinkingEnabled := false
 	for _, m := range models {
-		key := ManagedProvider + "/" + m.ID
+		key := ModelKeyPrefix + "/" + m.ID
 		caps := modelCapabilities(m)
 		for _, c := range caps {
 			if c == "thinking" || c == "always_thinking" {
@@ -244,8 +273,10 @@ func ProvisionConfig(cfg *config.Config, models []ModelInfo, baseURL, oauthHost 
 }
 
 // isManagedModel checks if a model key belongs to the managed provider.
+// Accepts both new format (kimi-code/X) and old format (managed:kimi-code/X).
 func isManagedModel(modelKey string) bool {
-	return strings.HasPrefix(modelKey, ManagedProvider+"/")
+	return strings.HasPrefix(modelKey, ModelKeyPrefix+"/") ||
+		strings.HasPrefix(modelKey, ManagedProvider+"/")
 }
 
 // ClearManagedConfig removes the managed:kimi-code provider and its models.
