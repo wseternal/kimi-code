@@ -1,0 +1,88 @@
+# Go build output
+build/kimi
+coverage.out
+coverage.html
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+
+# Agent scratch / throwaway files
+.tmp/
+HANDOVER*.md
+HANDOFF*.md
+handoff.md
+handover.md
+*-designs.html
+*-design.html
+*-mockup.html
+*-demo.html
+*-demos.html
+
+# Local config
+.kimi-code/local.toml
+.kimi-sandbox/
+.kimi-stash-dir
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Misc
+.local/
+.worktrees/
+.claude
+.conductor
+/plan/
+reports/
+.superpowers/
+node_modules/
+dist/
+dist-web/
+dist-single/
+dist-native/
+.tmp-api-extractor/
+.contract-types-tmp/
+.local/
+coverage/
+*.tsbuildinfo
+.vitest-results/
+.vite/
+.DS_Store
+.playwright-mcp/
+.claude
+.conductor
+.kimi-stash-dir
+plugins/cdn/
+.worktrees/
+.kimi-code/local.toml
+.kimi-sandbox/
+.vscode/
+!apps/vscode/.vscode/
+!apps/vscode/.vscode/*.json
+apps/vscode/artifacts/
+
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+docs/superpowers/
+reports/
+.superpowers/
+/plan/
+
+# Agent scratch / throwaway files - do not commit
+.tmp/
+HANDOVER*.md
+HANDOFF*.md
+handoff.md
+handover.md
+*-designs.html
+*-design.html
+*-mockup.html
+*-demo.html
+*-demos.html
+build/kimi

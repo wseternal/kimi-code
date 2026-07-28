@@ -1,0 +1,31 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - gosimple
+    - ineffassign
+    - typecheck
+    - gofmt
+    - goimports
+    - misspell
+    - revive
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        disabled: true
+  misspell:
+    locale: US
+
+issues:
+  exclude-rules:
+    # Allow unused parameters in interfaces (common for stub implementations)
+    - linters: [unused, revive]
+      text: "unused-parameter"
