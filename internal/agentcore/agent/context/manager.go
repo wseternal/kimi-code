@@ -85,10 +85,18 @@ func (cm *ContextManager) UsagePercent() float64 {
 }
 
 // UsageDisplay returns a formatted string like "12.3K / 128K tokens (9.6%)".
-func (cm *ContextManager) UsageDisplay() string {
+// If currentTurn > 0, those tokens are included in the used count (for live
+// streaming display where the current turn hasn't been committed yet).
+func (cm *ContextManager) UsageDisplay(currentTurn ...int) string {
 	used := cm.currentUsage
+	for _, t := range currentTurn {
+		used += t
+	}
 	max := cm.maxTokens
-	pct := cm.UsagePercent()
+	pct := float64(0)
+	if max > 0 {
+		pct = float64(used) / float64(max) * 100
+	}
 
 	usedStr := FormatTokenCount(used)
 	maxStr := FormatTokenCount(max)

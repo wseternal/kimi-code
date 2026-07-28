@@ -416,6 +416,7 @@ func (m *tuiModel) replayHistory() {
 					result:    tc.Result,
 					isError:   tc.IsError,
 					collapsed: true,
+					duration:  tc.Duration,
 				})
 			}
 			m.completedTurns = append(m.completedTurns, td)
@@ -460,14 +461,15 @@ func (m *tuiModel) replayHistory() {
 // ── Streaming events for bubbletea ──
 
 type streamEvent struct {
-	kind     string // "think", "text", "tool_start", "tool_result", "step_done", "done", "error", "usage"
-	text     string
-	toolName string
-	toolArgs string
-	toolOut  string
-	toolErr  bool
-	step     int
-	usage    *kosong.TokenUsage
+	kind       string // "think", "text", "tool_start", "tool_result", "step_done", "done", "error", "usage"
+	text       string
+	toolName   string
+	toolArgs   string
+	toolOut    string
+	toolErr    bool
+	toolDur    time.Duration
+	step       int
+	usage      *kosong.TokenUsage
 }
 
 // listenStream waits for the next streaming event from the channel.
@@ -488,6 +490,7 @@ type toolGroup struct {
 	result    string
 	isError   bool
 	collapsed bool
+	duration  time.Duration // wall-clock execution time for this tool
 }
 
 // collapsible is a focusable UI section that can be expanded/collapsed.
@@ -774,12 +777,14 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 					continue
 				}
 
+				toolStart := time.Now()
 				result, err := tool.Execute(ctx, input, tools.ExecContext{WorkDir: m.cwd})
+				toolDur := time.Since(toolStart)
 				if err != nil {
 					result = &tools.Result{Output: err.Error(), IsError: true}
 				}
 
-				ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: truncateOutput(result.Output), toolErr: result.IsError}
+				ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: truncateOutput(result.Output), toolErr: result.IsError, toolDur: toolDur}
 				m.history = append(m.history, kosong.CreateToolMessage(tc.ID, result.Output))
 			}
 		}
@@ -843,7 +848,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, listenStream(m.streamCh)
 		case "tool_start":
 			m.streamToolGroups = append(m.streamToolGroups, toolGroup{
-				name: msg.toolName, args: msg.toolArgs, collapsed: true,
+				name: msg.toolName, args: msg.toolArgs, collapsed: true, duration: msg.toolDur,
 			})
 			m.rebuildCollapsibles()
 			return m, listenStream(m.streamCh)
@@ -852,6 +857,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				last := &m.streamToolGroups[len(m.streamToolGroups)-1]
 				last.result = msg.toolOut
 				last.isError = msg.toolErr
+				if msg.toolDur > 0 {
+					last.duration = msg.toolDur
+				}
 			}
 			return m, listenStream(m.streamCh)
 		case "step_done":
@@ -913,6 +921,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Arguments: tg.args,
 						Result:    tg.result,
 						IsError:   tg.isError,
+						Duration:  tg.duration,
 					})
 				}
 				// Find the last user message to use as the prompt for persistence.
@@ -1063,6 +1072,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		runes := []rune(m.input)
 		runes = append(runes[:m.cursor], append([]rune{'\n'}, runes[m.cursor:]...)...)
 		m.input = string(runes)
+		// Place cursor at the start of the new line (right after the inserted \n).
 		m.cursor++
 		m.showSuggestions = false
 		return m, nil
@@ -2830,6 +2840,8 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 		if diff != "" {
 			diffLabel = " " + dimStyle.Render(diff)
 		}
+		// Meta label: duration + estimated tokens for this tool call
+		metaLabel := formatToolMeta(tg)
 
 		if !expanded {
 			// Collapsed: single line
@@ -2841,7 +2853,7 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 			if tg.result == "" && !tg.isError {
 				line += dimStyle.Render(" ⋯") // running
 			}
-			line += diffLabel
+			line += diffLabel + metaLabel
 			b.WriteString(line)
 		} else {
 			// Expanded: header + args + result
@@ -2849,7 +2861,7 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 			if i > startIdx {
 				prefix = "  "
 			}
-			b.WriteString(fmt.Sprintf("%s▾ %s %s%s%s\n", prefix, verb, nameStyled, dimStyle.Render(" "+summary), diffLabel))
+			b.WriteString(fmt.Sprintf("%s▾ %s %s%s%s%s\n", prefix, verb, nameStyled, dimStyle.Render(" "+summary), diffLabel, metaLabel))
 			if tg.args != "" && tg.args != "{}" {
 				b.WriteString(dimStyle.Render(indentText(tg.args, "      ")) + "\n")
 			}
@@ -2879,6 +2891,33 @@ func indentText(text, prefix string) string {
 		lines[i] = prefix + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// formatToolMeta returns a dim label showing execution duration and estimated
+// tokens for a tool call, e.g. " · 1.2s, 456 tokens". Returns "" when there
+// is no useful metadata to display.
+func formatToolMeta(tg toolGroup) string {
+	if tg.duration == 0 && tg.result == "" && tg.args == "" {
+		return ""
+	}
+	var parts []string
+	if tg.duration > 0 {
+		secs := tg.duration.Seconds()
+		if secs >= 1 {
+			parts = append(parts, fmt.Sprintf("%.1fs", secs))
+		} else {
+			parts = append(parts, fmt.Sprintf("%.0fms", float64(tg.duration.Milliseconds())))
+		}
+	}
+	// Estimate tokens for this tool call (args + result).
+	estTokens := agentctx.TokenEstimate(tg.args) + agentctx.TokenEstimate(tg.result)
+	if estTokens > 0 {
+		parts = append(parts, fmt.Sprintf("%s tokens", agentctx.FormatTokenCount(estTokens)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return dimStyle.Render(" · " + strings.Join(parts, ", "))
 }
 
 func (m tuiModel) renderStatusBar() string {
@@ -2950,8 +2989,15 @@ func (m tuiModel) renderStatusBar() string {
 
 // renderTokenStatus returns the right side of the status bar with token breakdown.
 func (m tuiModel) renderTokenStatus() string {
-	ctxStr := m.contextMgr.UsageDisplay()
 	dot := mutedStyle.Render(" · ")
+
+	// During streaming, include current turn tokens in context display (live)
+	var ctxStr string
+	if m.streaming && m.turnUsage.GrandTotal() > 0 {
+		ctxStr = m.contextMgr.UsageDisplay(m.turnUsage.InputTotal() + m.turnUsage.Output)
+	} else {
+		ctxStr = m.contextMgr.UsageDisplay()
+	}
 
 	// During streaming, show live current-turn usage
 	if m.streaming && m.turnUsage.GrandTotal() > 0 {

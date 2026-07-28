@@ -23,11 +23,12 @@ type Message struct {
 
 // ToolCall records a tool invocation within a message.
 type ToolCall struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments,omitempty"`
-	Result    string `json:"result,omitempty"`
-	IsError   bool   `json:"isError,omitempty"`
+	ID        string        `json:"id"`
+	Name      string        `json:"name"`
+	Arguments string        `json:"arguments,omitempty"`
+	Result    string        `json:"result,omitempty"`
+	IsError   bool          `json:"isError,omitempty"`
+	Duration  time.Duration `json:"duration,omitempty"`
 }
 
 // Turn groups a user prompt with the assistant's response.
