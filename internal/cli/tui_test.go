@@ -972,3 +972,66 @@ func TestInputHistoryWithNonEmptyInput(t *testing.T) {
 		t.Error("Up arrow with non-empty input should not change scrollOffset")
 	}
 }
+
+// TestNewlineWithShiftEnter tests that Shift+Enter inserts a newline
+// into the input field rather than submitting.
+func TestNewlineWithShiftEnter(t *testing.T) {
+	m := tuiModel{
+		input:        "hello world",
+		cursor:       5, // cursor after "hello"
+		scrollOffset: 0,
+		width:        80,
+		height:       24,
+		inputHistory: &InputHistory{index: -1},
+	}
+
+	// Shift+Enter should insert a newline at cursor position
+	got, _ := handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	if got.input != "hello\n world" {
+		t.Errorf("Shift+Enter should insert newline, got: %q", got.input)
+	}
+	if got.cursor != 6 {
+		t.Errorf("cursor should advance to 6, got: %d", got.cursor)
+	}
+}
+
+// TestNewlineWithAltEnter tests that Alt+Enter inserts a newline.
+func TestNewlineWithAltEnter(t *testing.T) {
+	m := tuiModel{
+		input:        "foo bar",
+		cursor:       3, // after "foo"
+		scrollOffset: 0,
+		width:        80,
+		height:       24,
+		inputHistory: &InputHistory{index: -1},
+	}
+
+	got, _ := handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+	if got.input != "foo\n bar" {
+		t.Errorf("Alt+Enter should insert newline, got: %q", got.input)
+	}
+	if got.cursor != 4 {
+		t.Errorf("cursor should advance to 4, got: %d", got.cursor)
+	}
+}
+
+// TestNewlineWithCtrlJ tests that Ctrl+J inserts a newline (safety net
+// for terminals that don't report ModShift).
+func TestNewlineWithCtrlJ(t *testing.T) {
+	m := tuiModel{
+		input:        "abc",
+		cursor:       3,
+		scrollOffset: 0,
+		width:        80,
+		height:       24,
+		inputHistory: &InputHistory{index: -1},
+	}
+
+	got, _ := handleKeyHelper(m, tea.KeyPressMsg{Code: '\x0a'})
+	if got.input != "abc\n" {
+		t.Errorf("Ctrl+J should insert newline, got: %q", got.input)
+	}
+	if got.cursor != 4 {
+		t.Errorf("cursor should advance to 4, got: %d", got.cursor)
+	}
+}

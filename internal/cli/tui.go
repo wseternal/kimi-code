@@ -1066,8 +1066,9 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 
-	// ── Newline (Alt+Enter / Shift+Enter) ──
-	case msg.Code == tea.KeyEnter && (msg.Mod&tea.ModAlt != 0 || msg.Mod&tea.ModShift != 0):
+	// ── Newline (Alt+Enter / Shift+Enter / Ctrl+J) ──
+	case msg.Code == tea.KeyEnter && (msg.Mod&tea.ModAlt != 0 || msg.Mod&tea.ModShift != 0),
+		msg.Code == '\x0a':
 		runes := []rune(m.input)
 		runes = append(runes[:m.cursor], append([]rune{'\n'}, runes[m.cursor:]...)...)
 		m.input = string(runes)
@@ -2411,13 +2412,19 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 func (m tuiModel) View() tea.View {
 	if m.quitting {
-		return tea.NewView("Goodbye!\n")
+		v := tea.NewView("Goodbye!\n")
+		v.AltScreen = true
+		return v
 	}
 	if m.showSessionPicker {
-		return tea.NewView(m.renderSessionPicker())
+		v := tea.NewView(m.renderSessionPicker())
+		v.AltScreen = true
+		return v
 	}
 	if m.showModelPicker {
-		return tea.NewView(m.renderModelPicker())
+		v := tea.NewView(m.renderModelPicker())
+		v.AltScreen = true
+		return v
 	}
 	if m.width == 0 {
 		m.width = 80
