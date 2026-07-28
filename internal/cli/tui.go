@@ -214,6 +214,10 @@ type tuiModel struct {
 	streamStep         int
 	responseCursor     int // scroll offset in response view
 
+	// Side query mode (/btw): when true, history is truncated after streaming
+	btwMode       bool
+	btwHistoryLen int
+
 	// Collapsible sections
 	collapsibles   []collapsible
 	focusIndex     int // -1 = none
@@ -406,6 +410,11 @@ func (m *tuiModel) replayHistory() {
 				}
 			}
 			m.history = append(m.history, assistantMsg)
+			// Add tool result messages so the LLM has complete
+			// tool call / result pairs when resuming a session.
+			for _, tc := range msg.ToolCalls {
+				m.history = append(m.history, kosong.CreateToolMessage(tc.ID, tc.Result))
+			}
 			// Track token usage
 			m.contextMgr.AddTurnUsage(agentctx.TokenEstimate(msg.Content) * 2)
 		}
@@ -720,6 +729,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, listenStream(m.streamCh)
 		case "error":
 			m.streaming = false
+			// /btw: reset side-query state so next prompt isn't affected
+			if m.btwMode {
+				m.history = m.history[:m.btwHistoryLen]
+				m.btwMode = false
+			}
 			// Remove the "Thinking..." placeholder
 			if len(m.messages) > 0 && m.messages[len(m.messages)-1].role == "system" && m.messages[len(m.messages)-1].content == "Thinking..." {
 				m.messages = m.messages[:len(m.messages)-1]
@@ -760,8 +774,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.turnUsage = kosong.TokenUsage{} // reset for next turn
 
-			// Cycle 1: Persist session history
-			if m.app.SessionStore != nil {
+			// Cycle 1: Persist session history (skip for /btw side queries)
+			if !m.btwMode && m.app.SessionStore != nil {
 				var toolCalls []session.ToolCall
 				for _, tg := range m.streamToolGroups {
 					toolCalls = append(toolCalls, session.ToolCall{
@@ -794,6 +808,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamCh = nil
 			m.cancelCh = nil
 			m.rebuildCollapsibles()
+
+			// /btw mode: discard all messages added to history during streaming
+			// so the side query doesn't affect the main conversation context.
+			if m.btwMode {
+				m.history = m.history[:m.btwHistoryLen]
+				m.btwMode = false
+			}
 
 			// Drain queued messages (Cycle 5: mid-turn interaction)
 			if len(m.queuedMessages) > 0 {
@@ -1910,11 +1931,14 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		args := strings.TrimSpace(strings.TrimPrefix(input, "/btw"))
 		m.messages = append(m.messages, chatMessage{"user", input})
 		if args == "" {
-			m.messages = append(m.messages, chatMessage{"system", "Usage: /btw <prompt> — side query without affecting main context."})
+			m.messages = append(m.messages, chatMessage{"system", "Usage: /btw <prompt> \u2014 side query without affecting main context."})
 		} else {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Side query: %s\n(BTW mode: query sent without adding to main conversation history.)", args)})
-			// Route to LLM without adding to history
+			// Route to LLM without adding to history — save current
+			// history length so we can truncate after streaming completes.
 			if m.provider != nil {
+				m.btwMode = true
+				m.btwHistoryLen = len(m.history)
 				m.streaming = true
 				m.streamThinking = ""
 				m.streamResponse = ""

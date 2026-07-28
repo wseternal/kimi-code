@@ -104,8 +104,13 @@ func (r *GoGraphRunner) Run(ctx context.Context, workDir string, args ...string)
 		return "", fmt.Errorf("gograph binary not found on $PATH")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
+	// Only apply the default timeout if the caller hasn't set one.
+	// This lets EnsureGraph pass a longer deadline for slow builds.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.timeout)
+		defer cancel()
+	}
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	if workDir != "" {
@@ -121,7 +126,7 @@ func (r *GoGraphRunner) Run(ctx context.Context, workDir string, args ...string)
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return out, fmt.Errorf("gograph timed out after %s", r.timeout)
+			return out, fmt.Errorf("gograph timed out")
 		}
 		// Exit code 1 often means "no results" for query commands — not an error.
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {

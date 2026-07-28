@@ -261,6 +261,16 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 	// persist only the new messages after the turn completes.
 	turnStartIdx := len(prevHistory)
 
+	// Ensure partial progress is persisted regardless of exit path
+	// (abort, context cancel, step error, or normal completion).
+	defer func() {
+		if len(messages) > turnStartIdx {
+			s.sessionsMu.Lock()
+			s.sessions[turn.SessionID] = append(s.sessions[turn.SessionID], messages[turnStartIdx:]...)
+			s.sessionsMu.Unlock()
+		}
+	}()
+
 	// Execute steps
 	for step := 0; step < s.maxSteps; step++ {
 		select {
@@ -321,13 +331,6 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 			messages = append(messages, toolMsg)
 		}
 	}
-
-	// Persist this turn's new messages into the session history.
-	// Only messages generated during this turn (from turnStartIdx onward)
-	// are appended, avoiding duplicates from previous turns.
-	s.sessionsMu.Lock()
-	s.sessions[turn.SessionID] = append(s.sessions[turn.SessionID], messages[turnStartIdx:]...)
-	s.sessionsMu.Unlock()
 
 	turn.SetStatus(TurnCompleted)
 	s.eventBus.Publish(Event{
