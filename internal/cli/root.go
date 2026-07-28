@@ -15,6 +15,7 @@ import (
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/agentcore/di"
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
+	"github.com/visdomtech/kimi-code/internal/audit"
 	"github.com/visdomtech/kimi-code/internal/trace"
 	"github.com/visdomtech/kimi-code/internal/kapserver"
 	"github.com/visdomtech/kimi-code/internal/persistence"
@@ -27,6 +28,11 @@ type App struct {
 	SessionManager *session.Manager
 	SessionStore   *session.SessionStore
 	ConfigPath     string
+
+	// Audit trail (BadgerDB-backed)
+	AuditStore   *audit.Store
+	AuditWriter  *audit.Writer
+	AuditFacade  *audit.Facade
 }
 
 // Execute runs the root command.
@@ -211,6 +217,13 @@ func (a *App) runTUI(resumeID string, continueLast bool) error {
 		return a.runSimpleTUI(sess)
 	}
 
+	// Open audit store for the session
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		a.openAuditStore(sess.ID, home)
+	}
+	defer a.closeAuditStore()
+
 	model := newTUIModel(a, sess)
 
 	// Replay history if resuming
@@ -228,6 +241,19 @@ func (a *App) runTUI(resumeID string, continueLast bool) error {
 		// Purge empty sessions (including current if user never sent messages)
 		if err := a.SessionStore.PurgeEmptySessions(context.Background()); err != nil {
 			slog.Debug("purge empty sessions", "error", err)
+		}
+	}
+	// Also persist to audit trail on exit
+	if a.AuditWriter != nil {
+		if err := a.AuditWriter.SaveSession(audit.SessionRecord{
+			ID:        sess.ID,
+			Title:     sess.Title,
+			Status:    string(sess.Status),
+			CreatedAt: sess.CreatedAt,
+			UpdatedAt: time.Now(),
+			Metadata:  sess.Metadata,
+		}); err != nil {
+			slog.Debug("audit save session on exit", "error", err)
 		}
 	}
 
@@ -262,3 +288,43 @@ func resolveSessionsDir() string {
 
 // unused but available for future subcommand routing
 var _ = strings.TrimSpace
+
+// openAuditStore opens a per-session BadgerDB for the audit trail.
+// Data is stored at ~/.kimi-code/sessions/{sessionID}/badger/.
+func (a *App) openAuditStore(sessionID, home string) {
+	dir := filepath.Join(sessionsDir(home), sessionID, "badger")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		slog.Debug("create audit dir", "error", err)
+		return
+	}
+	store, err := audit.Open(dir)
+	if err != nil {
+		slog.Debug("open audit store", "error", err)
+		return
+	}
+	a.AuditStore = store
+	w := audit.NewWriter(store.DB())
+	a.AuditWriter = w
+	reader := audit.NewReader(store.DB())
+	a.AuditFacade = audit.NewFacade(reader)
+}
+
+// closeAuditStore closes the audit writer and BadgerDB store.
+func (a *App) closeAuditStore() {
+	if a.AuditWriter != nil {
+		a.AuditWriter.Close()
+		a.AuditWriter = nil
+	}
+	if a.AuditStore != nil {
+		a.AuditStore.Close()
+		a.AuditStore = nil
+	}
+	a.AuditFacade = nil
+}
+
+// switchAuditStore closes the current audit store and opens a new one
+// for a different session (e.g. after /new or session resume).
+func (a *App) switchAuditStore(sessionID, home string) {
+	a.closeAuditStore()
+	a.openAuditStore(sessionID, home)
+}

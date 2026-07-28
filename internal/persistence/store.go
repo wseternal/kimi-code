@@ -115,6 +115,16 @@ func (s *FileStore) Del(_ context.Context, key string) error {
 	return nil
 }
 
+// RemoveDir removes all files and subdirectories under the given key prefix.
+// This is useful for cleaning up content not managed by the key-value layer
+// (e.g., BadgerDB directories within a session directory).
+func (s *FileStore) RemoveDir(prefix string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dir := s.keyToPath(prefix)
+	return os.RemoveAll(dir) // RemoveAll is a no-op if dir doesn't exist
+}
+
 func (s *FileStore) Has(_ context.Context, key string) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
