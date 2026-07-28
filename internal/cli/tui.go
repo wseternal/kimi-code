@@ -1244,7 +1244,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.completedTurns = append(m.completedTurns, td)
 
 			// Append assistant response to messages so it stays visible after streaming
-			m.messages = append(m.messages, chatMessage{"assistant", m.streamResponse})
+			if m.streamResponse == "" && m.streamThinking != "" {
+				// Model produced thinking but no visible response — likely hit
+				// an output token limit or the API stream ended prematurely.
+				m.messages = append(m.messages, chatMessage{"assistant", "⚠ The model produced extended reasoning but no visible response. It may have hit an output token limit. Try rephrasing your request or using a model with a larger output budget."})
+			} else {
+				m.messages = append(m.messages, chatMessage{"assistant", m.streamResponse})
+			}
 
 			// Track token usage: prefer real API usage, fall back to estimation
 			if m.turnUsage.GrandTotal() > 0 {
