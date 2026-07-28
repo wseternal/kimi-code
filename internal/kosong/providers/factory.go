@@ -2,9 +2,12 @@ package providers
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/kosong"
+	"github.com/visdomtech/kimi-code/internal/oauth"
 )
 
 // Well-known base URLs by provider type.
@@ -16,6 +19,10 @@ var wellKnownBaseURLs = map[string]string{
 	"openai_responses": "https://api.openai.com/v1",
 	"vertexai":         "https://aiplatform.googleapis.com/v1",
 }
+
+// ClientVersion is the version string sent in OAuth device headers.
+// Set by the CLI package at startup.
+var ClientVersion = "unknown"
 
 // defaultModels by provider type.
 var defaultModels = map[string]string{
@@ -69,12 +76,60 @@ func NewFromConfig(cfg *config.Config) (kosong.ChatProvider, error) {
 
 	headers := prov.CustomHeaders
 
-	return NewOpenAIProvider(OpenAIProviderConfig{
+	inner := NewOpenAIProvider(OpenAIProviderConfig{
 		Name:           name,
 		APIKey:         prov.APIKey,
 		BaseURL:        baseURL,
 		Model:          model,
 		DefaultHeaders: headers,
+	})
+
+	// Wrap with OAuth if configured
+	if prov.OAuth != nil {
+		manager, err := createOAuthManager(prov.OAuth)
+		if err != nil {
+			return nil, fmt.Errorf("create OAuth manager for %q: %w", name, err)
+		}
+		return NewOAuthProvider(inner, manager), nil
+	}
+
+	return inner, nil
+}
+
+// createOAuthManager creates an OAuth manager from an OAuthRef config.
+func createOAuthManager(ref *config.OAuthRef) (*oauth.Manager, error) {
+	storage, err := oauth.NewDefaultTokenStorage()
+	if err != nil {
+		return nil, err
+	}
+
+	// Determine storage name from key (e.g., "oauth/kimi-code" -> "kimi-code")
+	storageName := oauth.ProviderName
+	if ref.Key != "" {
+		// Use the last path component as the storage name
+		storageName = filepath.Base(ref.Key)
+	}
+
+	oauthHost := oauth.GetOAuthHost()
+	if ref.OAuthHost != "" {
+		oauthHost = ref.OAuthHost
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	configDir := filepath.Join(homeDir, ".kimi-code")
+
+	return oauth.NewManager(oauth.ManagerOptions{
+		Config: oauth.FlowConfig{
+			Name:      storageName,
+			OAuthHost: oauthHost,
+			ClientID:  oauth.ClientID,
+		},
+		Storage:   storage,
+		Headers:   oauth.CreateDeviceHeaders(ClientVersion, configDir),
+		ConfigDir: configDir,
 	}), nil
 }
 

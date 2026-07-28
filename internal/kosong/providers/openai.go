@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/visdomtech/kimi-code/internal/kosong"
+	"github.com/visdomtech/kimi-code/internal/trace"
 )
 
 // ── OpenAI wire types ──
@@ -324,9 +325,25 @@ func (p *OpenAIProvider) Generate(
 		opts.OnRequestSent()
 	}
 
+	// Trace the HTTP request
+	if trace.Enabled() {
+		trace.Log("http", "request", map[string]any{
+			"url":   url,
+			"model": p.model,
+		})
+	}
+
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
+		trace.Log("http", "error", map[string]any{"error": err.Error()})
 		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	if trace.Enabled() {
+		trace.Log("http", "response", map[string]any{
+			"status":     resp.StatusCode,
+			"model":      p.model,
+		})
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -370,6 +387,14 @@ func (p *OpenAIProvider) consumeSSEStream(
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
+	tracing := trace.Enabled()
+	var chunkCount int
+	defer func() {
+		if tracing {
+			trace.Log("http", "stream_end", map[string]any{"chunks": chunkCount})
+		}
+	}()
+
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
@@ -396,6 +421,7 @@ func (p *OpenAIProvider) consumeSSEStream(
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue // skip malformed chunks
 		}
+		chunkCount++
 
 		// Capture usage from chunk (usually in final chunk)
 		if chunk.Usage != nil {

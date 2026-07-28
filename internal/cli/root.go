@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
@@ -13,6 +14,7 @@ import (
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/agentcore/di"
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
+	"github.com/visdomtech/kimi-code/internal/trace"
 	"github.com/visdomtech/kimi-code/internal/kapserver"
 	"github.com/visdomtech/kimi-code/internal/persistence"
 )
@@ -72,6 +74,7 @@ func (a *App) run() error {
 	var resumeID string
 	var continueLast bool
 	var promptArg string
+	var tracePath string
 
 	i := 0
 	for i < len(args) {
@@ -93,6 +96,15 @@ func (a *App) run() error {
 				i += 2
 			} else {
 				return fmt.Errorf("--prompt requires an argument")
+			}
+		case arg == "--trace":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				tracePath = args[i+1]
+				i += 2
+			} else {
+				// Default trace path
+				tracePath = filepath.Join(home, ".kimi-code", fmt.Sprintf("trace_%d.jsonl", time.Now().Unix()))
+				i++
 			}
 		case arg == "server":
 			return a.runServer()
@@ -120,6 +132,15 @@ func (a *App) run() error {
 		}
 	}
 
+	// Enable tracing if requested
+	if tracePath != "" {
+		if err := trace.Enable(tracePath); err != nil {
+			return fmt.Errorf("failed to enable trace: %w", err)
+		}
+		defer trace.Disable()
+		fmt.Fprintf(os.Stderr, "Trace enabled: %s\n", tracePath)
+	}
+
 	// Determine mode
 	if promptArg != "" {
 		return a.runHeadless(promptArg)
@@ -141,6 +162,7 @@ func (a *App) printHelp() error {
 	fmt.Println("  kimi login                    Set up API key")
 	fmt.Println("  kimi export <session-id>      Export session as markdown")
 	fmt.Println("  kimi version                  Show version")
+	fmt.Println("  kimi --trace [file]           Enable event tracing to JSONL file")
 	fmt.Println("  kimi help                     Show this help")
 	return nil
 }

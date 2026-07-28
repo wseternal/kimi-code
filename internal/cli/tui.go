@@ -28,6 +28,8 @@ import (
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
 	"github.com/visdomtech/kimi-code/internal/kosong"
 	"github.com/visdomtech/kimi-code/internal/kosong/providers"
+	"github.com/visdomtech/kimi-code/internal/oauth"
+	"github.com/visdomtech/kimi-code/internal/trace"
 )
 
 // ── Theme (auto-detects light/dark terminal background) ──
@@ -104,12 +106,19 @@ var (
 )
 
 func init() {
+	// Cache terminal background detection ONCE before any rendering.
+	// Calling HasDarkBackground during the event loop blocks for seconds
+	// because the terminal is busy with screen updates.
+	initDarkBgCache()
 	initTheme()
+	// Set the client version for OAuth device headers
+	providers.ClientVersion = Version
+	oauth.ClientVersion = Version
 }
 
 func initTheme() {
 	t := darkTheme
-	if !lipgloss.HasDarkBackground(os.Stdin, os.Stdout) {
+	if !cachedDarkBg {
 		t = lightTheme
 	}
 
@@ -280,6 +289,9 @@ type tuiModel struct {
 
 	// Bash mode output
 	bashOutput string
+
+	// OAuth login cancellation
+	oauthCancel context.CancelFunc
 }
 
 // pickerEntry is a single model entry in the model picker.
@@ -385,6 +397,63 @@ func (m *tuiModel) recreateProvider() {
 	// so the status bar reflects the correct context window size.
 	if _, mc := m.app.Config.ResolveModel(); mc != nil {
 		m.contextMgr.SetMaxTokens(mc.MaxContextSize)
+	}
+}
+
+// runOAuthLogin runs the OAuth device code flow asynchronously via tea.Cmd.
+// It does NOT mutate m.app.Config directly (that would be a data race).
+// Instead, it returns the fetched models via oauthLoginMsg for the Update handler to apply.
+func (m *tuiModel) runOAuthLogin() tea.Cmd {
+	return func() tea.Msg {
+		manager, err := oauth.NewDefaultManager()
+		if err != nil {
+			return oauthLoginMsg{messages: []chatMessage{{"system", fmt.Sprintf("OAuth init failed: %s", err)}}}
+		}
+
+		// Use a cancellable context so the user can abort the login flow.
+		ctx, cancel := context.WithCancel(context.Background())
+		// Store cancel func on the model so it can be called from Update on Ctrl+C.
+		// Note: writing to m from a tea.Cmd goroutine is safe here because
+		// oauthCancel is only read when the user presses Ctrl+C (Update handler),
+		// and the tea.Cmd has already returned by then.
+		m.oauthCancel = cancel
+		defer func() {
+			cancel()
+			m.oauthCancel = nil
+		}()
+		var msgs []chatMessage
+
+		token, err := manager.Login(ctx, oauth.LoginOptions{
+			OnDeviceCode: func(auth *oauth.DeviceAuthorization) error {
+				url := auth.VerificationURIComplete
+				if url == "" {
+					url = auth.VerificationURI
+				}
+				msg := fmt.Sprintf("Visit: %s\nEnter code: %s", url, auth.UserCode)
+				if auth.ExpiresIn > 0 {
+					msg += fmt.Sprintf("\nExpires in %ds", auth.ExpiresIn)
+				}
+				msgs = append(msgs, chatMessage{"system", msg})
+				oauth.OpenURL(url)
+				return nil
+			},
+		})
+		if err != nil {
+			msgs = append(msgs, chatMessage{"system", fmt.Sprintf("Login failed: %s", err)})
+			return oauthLoginMsg{messages: msgs}
+		}
+
+		// Fetch models (read-only operation, safe from goroutine)
+		baseURL := oauth.ResolveBaseURL()
+		models, err := oauth.FetchManagedModels(ctx, token.AccessToken, baseURL, nil)
+		if err != nil {
+			msgs = append(msgs, chatMessage{"system", fmt.Sprintf("Fetch models failed: %s", err)})
+			return oauthLoginMsg{messages: msgs}
+		}
+
+		// Return models for the Update handler to apply config changes on the main thread
+		msgs = append(msgs, chatMessage{"system", fmt.Sprintf("✓ Logged in to Kimi Code (OAuth) with %d models", len(models))})
+		return oauthLoginMsg{messages: msgs, success: true, models: models, baseURL: baseURL}
 	}
 }
 
@@ -671,49 +740,82 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 				return
 			}
 
-			// Consume stream incrementally, sending events for each part
+			// Consume stream incrementally, batching text/think events for UI smoothness.
+			// Sending one streamEvent per SSE token floods Bubble Tea's event loop
+			// (Update+View per token), starving keypress handling. Instead, accumulate
+			// text/think deltas and flush on a ~50ms timer (~20fps render rate).
 			var content []kosong.ContentPart
 			var toolCalls []kosong.ToolCall
 			var pending *kosong.StreamedMessagePart
 
-			for part := range stream.Parts {
-				select {
-				case <-ctx.Done():
-					ch <- streamEvent{kind: "error", text: ctx.Err().Error()}
-					return
-				default:
+			const streamBatchInterval = 50 * time.Millisecond
+			var batchThink, batchText string
+			batchFlush := func() {
+				if batchThink != "" {
+					ch <- streamEvent{kind: "think", text: batchThink}
+					batchThink = ""
 				}
-
-				// Send streaming events for incremental UI updates
-				switch part.Type {
-				case "think":
-					ch <- streamEvent{kind: "think", text: part.Think}
-				case "text":
-					ch <- streamEvent{kind: "text", text: part.Text}
-				case "usage":
-					ch <- streamEvent{kind: "usage", usage: part.Usage}
+				if batchText != "" {
+					ch <- streamEvent{kind: "text", text: batchText}
+					batchText = ""
 				}
-
-				// Merge parts to build final message (same logic as kosong.Generate)
-				if pending != nil {
-					if kosong.MergeInPlace(pending, &part) {
-						continue
-					}
-					// Flush pending
-					switch pending.Type {
-					case "text":
-						content = append(content, kosong.ContentPart{Type: "text", Text: pending.Text})
-					case "think":
-						content = append(content, kosong.ContentPart{Type: "think", Think: pending.Think, Encrypted: pending.Encrypted})
-					case "function":
-						toolCalls = append(toolCalls, kosong.ToolCall{
-							Type: "function", ID: pending.ID, Name: pending.Name,
-							Arguments: pending.Arguments, Extras: pending.Extras,
-						})
-					}
-				}
-				pending = &part
 			}
+
+			ticker := time.NewTicker(streamBatchInterval)
+
+			for {
+				select {
+				case part, ok := <-stream.Parts:
+					if !ok {
+						// Stream closed, flush any remaining batched content
+						batchFlush()
+						goto streamDone
+					}
+					select {
+					case <-ctx.Done():
+						ticker.Stop()
+						batchFlush()
+						ch <- streamEvent{kind: "error", text: ctx.Err().Error()}
+						return
+					default:
+					}
+
+					// Batch text/think; send usage immediately (rare)
+					switch part.Type {
+					case "think":
+						batchThink += part.Think
+					case "text":
+						batchText += part.Text
+					case "usage":
+						batchFlush() // flush pending text before usage event
+						ch <- streamEvent{kind: "usage", usage: part.Usage}
+					}
+
+					// Merge parts to build final message (same logic as kosong.Generate)
+					if pending != nil {
+						if kosong.MergeInPlace(pending, &part) {
+							continue
+						}
+						switch pending.Type {
+						case "text":
+							content = append(content, kosong.ContentPart{Type: "text", Text: pending.Text})
+						case "think":
+							content = append(content, kosong.ContentPart{Type: "think", Think: pending.Think, Encrypted: pending.Encrypted})
+						case "function":
+							toolCalls = append(toolCalls, kosong.ToolCall{
+								Type: "function", ID: pending.ID, Name: pending.Name,
+								Arguments: pending.Arguments, Extras: pending.Extras,
+							})
+						}
+					}
+					pending = &part
+
+				case <-ticker.C:
+					batchFlush()
+				}
+			}
+		streamDone:
+			ticker.Stop()
 
 			// Flush final pending part
 			if pending != nil {
@@ -808,6 +910,14 @@ func (m tuiModel) Init() tea.Cmd {
 // cursorTickMsg is sent periodically to toggle cursor visibility.
 type cursorTickMsg struct{}
 
+// oauthLoginMsg carries the result of an async OAuth login flow.
+type oauthLoginMsg struct {
+	messages []chatMessage
+	success  bool
+	models   []oauth.ModelInfo    // fetched models for config provisioning
+	baseURL  string               // resolved base URL
+}
+
 func (m tuiModel) tickCursor() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(_ time.Time) tea.Msg {
 		return cursorTickMsg{}
@@ -817,6 +927,21 @@ func (m tuiModel) tickCursor() tea.Cmd {
 // ── Update ──
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Trace all incoming messages for event loop diagnosis
+	if trace.Enabled() {
+		switch v := msg.(type) {
+		case tea.KeyPressMsg:
+			trace.Log("input", "keypress", map[string]any{"code": string(rune(v.Code)), "mod": int(v.Mod)})
+		case streamEvent:
+			trace.Log("stream", "event", map[string]any{"kind": v.kind, "textLen": len(v.text)})
+		case tea.WindowSizeMsg:
+			trace.Log("tui", "resize", map[string]any{"w": v.Width, "h": v.Height})
+		case cursorTickMsg:
+			// skip - too noisy
+		default:
+			trace.Logf("tui", "msg", "%T", msg)
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -836,6 +961,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input = msg.content
 			m.cursor = utf8.RuneCountInString(m.input)
 			m.messages = append(m.messages, chatMessage{"system", "Editor content loaded. Press Enter to submit."})
+		}
+		return m, nil
+
+	case oauthLoginMsg:
+		m.messages = append(m.messages, msg.messages...)
+		if msg.success && len(msg.models) > 0 {
+			// Apply config mutations on the main thread to avoid data race
+			oauthHost := oauth.GetOAuthHost()
+			if err := oauth.ProvisionConfig(m.app.Config, msg.models, msg.baseURL, oauthHost); err != nil {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Config provision failed: %s", err)})
+			} else if err := m.app.Config.SaveToFile(m.app.ConfigPath); err != nil {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Save config failed: %s", err)})
+			} else {
+				m.recreateProvider()
+			}
 		}
 		return m, nil
 
@@ -1065,6 +1205,12 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	// ── Quit (Ctrl+C double-press / Ctrl+D) ──
 	case msg.Code == 'c' && ctrl:
+		// If OAuth login is in progress, cancel it first
+		if m.oauthCancel != nil {
+			m.oauthCancel()
+			m.messages = append(m.messages, chatMessage{"system", "OAuth login cancelled."})
+			return m, nil
+		}
 		if m.ctrlCPending {
 			m.quitting = true
 			return m, tea.Quit
@@ -1972,10 +2118,19 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	// Cycle 3: Auth commands
 	case input == "/login":
 		m.messages = append(m.messages, chatMessage{"user", input})
-		m.messages = append(m.messages, chatMessage{"system",
-			"To set up an API key, run: kimi login\n" +
-				"Or manually edit ~/.kimi-code/config.toml:\n" +
-				"  [providers.kimi]\n  type = \"kimi\"\n  api_key = \"YOUR_KEY\""})
+		// Check if already logged in with OAuth
+		if _, ok := m.app.Config.Providers["managed:kimi-code"]; ok {
+			m.messages = append(m.messages, chatMessage{"system",
+				"Already logged in to Kimi Code (OAuth).\n" +
+					"To re-authenticate, run /logout first, then /login again."})
+		} else {
+			m.messages = append(m.messages, chatMessage{"system", "Starting OAuth login..."})
+			cmd := m.runOAuthLogin()
+			m.input = ""
+			m.cursor = 0
+			m.showSuggestions = false
+			return m, cmd
+		}
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false
@@ -1987,7 +2142,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Logout failed: %s", err)})
 		} else {
 			m.recreateProvider()
-			m.messages = append(m.messages, chatMessage{"system", "Logged out. Provider API key removed."})
+			m.messages = append(m.messages, chatMessage{"system", "Logged out. Authentication removed."})
 		}
 		m.input = ""
 		m.cursor = 0
@@ -1999,7 +2154,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, chatMessage{"user", input})
 		provName := m.app.Config.ResolveProviderName()
 		status := "not configured"
-		if hasAnyAPIKey(m.app.Config) {
+		if hasAnyAuth(m.app.Config) {
 			status = "configured"
 		}
 		info := fmt.Sprintf("Session:   %s\nModel:     %s\nProvider:  %s (%s)\nTurns:     %d\nContext:   %s\nYOLO:      %v\nPlan:      %v",
@@ -2431,6 +2586,16 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 // ── View ──
 
 func (m tuiModel) View() tea.View {
+	if trace.Enabled() {
+		t0 := time.Now()
+		defer func() {
+			trace.Log("render", "view", map[string]any{
+				"duration_ms": time.Since(t0).Milliseconds(),
+				"streaming":   m.streaming,
+				"messages":    len(m.messages),
+			})
+		}()
+	}
 	if m.quitting {
 		v := tea.NewView("Goodbye!\n")
 		v.AltScreen = true
@@ -2482,17 +2647,20 @@ func (m tuiModel) View() tea.View {
 	inputRendered := m.renderInput()
 	statusBarRendered := m.renderStatusBar()
 
-	// Calculate visible viewport for content
-	contentStr := b.String()
+	// Calculate visible viewport for content.
+	// Trim trailing newlines from content to ensure exact line counting.
+	// renderMessages() and renderStreaming() append "\n\n" which creates
+	// phantom blank lines that push the output taller than m.height.
+	contentStr := strings.TrimRight(b.String(), "\n")
 	inputH := strings.Count(inputRendered, "\n") + 1
 	statusH := 1
-	bottomH := inputH + statusH + 1 // +1 for input\n separator
+	bottomH := inputH + statusH + 1 // +1 for content→input separator
 	visibleH := m.height - bottomH
 	if visibleH < 1 {
 		visibleH = 1
 	}
 
-	contentLines := strings.Split(strings.TrimRight(contentStr, "\n"), "\n")
+	contentLines := strings.Split(contentStr, "\n")
 	totalLines := len(contentLines)
 
 	// Clamp scroll offset
@@ -2529,12 +2697,22 @@ func (m tuiModel) View() tea.View {
 		}
 		result.WriteString(dimStyle.Render(fmt.Sprintf(" \u2191 scroll %d%% (PgUp/PgDn)", pct)))
 		result.WriteString("\n")
+	} else if totalLines > visibleH {
+		// At bottom with overflow: show last visibleH lines (auto-scroll)
+		start := totalLines - visibleH
+		for i := start; i < totalLines; i++ {
+			result.WriteString(contentLines[i])
+			result.WriteString("\n")
+		}
 	} else {
-		// At bottom: show all content + padding to push input to screen bottom
-		result.WriteString(contentStr)
+		// At bottom with room: show all content + padding
+		for i := 0; i < totalLines; i++ {
+			result.WriteString(contentLines[i])
+			result.WriteString("\n")
+		}
 		padLines := visibleH - totalLines
-		if padLines > 0 {
-			result.WriteString(strings.Repeat("\n", padLines))
+		for j := 0; j < padLines; j++ {
+			result.WriteString("\n")
 		}
 	}
 

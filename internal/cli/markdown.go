@@ -8,6 +8,22 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// cachedDarkBg caches the result of HasDarkBackground so we never
+// query the terminal during rendering. Querying the terminal during
+// streaming causes multi-second blocking delays because the terminal
+// is busy processing rapid screen updates and cannot respond to
+// OSC/CSI queries promptly.
+var cachedDarkBg bool
+var cachedDarkBgOnce sync.Once
+
+// initDarkBgCache detects and caches the terminal background mode.
+// Call this once during startup (before the TUI event loop begins).
+func initDarkBgCache() {
+	cachedDarkBgOnce.Do(func() {
+		cachedDarkBg = lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
+	})
+}
+
 // markdownRenderer is a cached glamour renderer for a given theme.
 // Creating glamour renderers is expensive, so we cache one per
 // dark/light mode and word-wrap width.
@@ -27,7 +43,11 @@ func renderMarkdown(content string, width int) string {
 	if width <= 0 {
 		width = 80
 	}
-	dark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
+	// Use the cached value — NEVER query the terminal during rendering.
+	// HasDarkBackground sends an OSC 11 escape sequence and waits for
+	// the terminal response, which blocks for seconds during streaming
+	// when the terminal is busy with rapid screen updates.
+	dark := cachedDarkBg
 
 	r := mdRenderer.get(dark, width)
 	if r == nil {

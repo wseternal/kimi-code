@@ -62,7 +62,7 @@ func checkConfig(cfg *config.Config) DoctorResult {
 func checkAPIKeys(cfg *config.Config) DoctorResult {
 	var configured []string
 	for name, prov := range cfg.Providers {
-		if prov.APIKey != "" {
+		if prov.APIKey != "" || prov.OAuth != nil {
 			configured = append(configured, name)
 		}
 	}
