@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/plan"
 )
@@ -48,11 +49,15 @@ func (t *UpdatePlanTool) Execute(_ context.Context, input json.RawMessage, _ Exe
 		return nil, fmt.Errorf("parse update_plan input: %w", err)
 	}
 
-	// Normalize status values
+	// Normalize status values (case-insensitive, with synonyms)
 	for i := range req.Tasks {
-		switch req.Tasks[i].Status {
-		case "pending", "active", "done":
-			// valid
+		switch strings.ToLower(string(req.Tasks[i].Status)) {
+		case "pending":
+			req.Tasks[i].Status = plan.StatusPending
+		case "active", "in_progress", "in-progress":
+			req.Tasks[i].Status = plan.StatusActive
+		case "done", "complete", "completed":
+			req.Tasks[i].Status = plan.StatusDone
 		default:
 			req.Tasks[i].Status = plan.StatusPending
 		}

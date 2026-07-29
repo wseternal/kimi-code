@@ -732,6 +732,19 @@ type drawerSkillEntry struct {
 	at   time.Time
 }
 
+// truncateRune truncates by rune count (not bytes) to avoid corrupting
+// multi-byte UTF-8 characters. Appends "..." when truncation occurs.
+func truncateRune(s string, maxRunes int) string {
+	if maxRunes < 4 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes-3]) + "..."
+}
+
 // toolArgSummary extracts a short one-line summary from JSON tool arguments.
 func toolArgSummary(args string) string {
 	if args == "" || args == "{}" || args == "null" {
@@ -740,11 +753,8 @@ func toolArgSummary(args string) string {
 	// Try to parse as JSON and extract key fields
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(args), &m); err != nil {
-		// Not valid JSON, truncate raw
-		if len(args) > 40 {
-			return args[:37] + "..."
-		}
-		return args
+		// Not valid JSON, truncate raw (by runes, not bytes)
+		return truncateRune(args, 40)
 	}
 	// Prioritize key fields for display: file paths and commands first.
 	var parts []string
@@ -753,9 +763,7 @@ func toolArgSummary(args string) string {
 	for _, k := range priorityKeys {
 		if v, ok := m[k]; ok {
 			s := fmt.Sprintf("%v", v)
-			if len(s) > 40 {
-				s = s[:37] + "..."
-			}
+			s = truncateRune(s, 40)
 			parts = append(parts, s)
 			seen[k] = true
 		}
@@ -770,15 +778,11 @@ func toolArgSummary(args string) string {
 	for _, k := range extraKeys {
 		v := m[k]
 		s := fmt.Sprintf("%v", v)
-		if len(s) > 30 {
-			s = s[:27] + "..."
-		}
+		s = truncateRune(s, 30)
 		parts = append(parts, fmt.Sprintf("%s=%s", k, s))
 	}
 	result := strings.Join(parts, ", ")
-	if len(result) > 60 {
-		result = result[:57] + "..."
-	}
+	result = truncateRune(result, 60)
 	return result
 }
 
@@ -1245,10 +1249,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamToolGroups = append(m.streamToolGroups, toolGroup{
 				name: msg.toolName, args: msg.toolArgs, collapsed: true, duration: msg.toolDur,
 			})
-			// Track for drawer
+			// Track for drawer (capped to avoid unbounded memory growth)
 			m.drawerToolLog = append(m.drawerToolLog, drawerToolEntry{
 				name: msg.toolName, args: msg.toolArgs, at: time.Now(),
 			})
+			if len(m.drawerToolLog) > 500 {
+				m.drawerToolLog = m.drawerToolLog[len(m.drawerToolLog)-500:]
+			}
 			m.rebuildCollapsibles()
 			return m, listenStream(m.streamCh)
 		case "tool_result":
@@ -2293,8 +2300,11 @@ func parseSkillCommand(input string) (name, args string) {
 // executeSkill activates a skill and starts streaming its prompt.
 func (m tuiModel) executeSkill(s *skill.Skill, skillArgs, displayInput string) (tea.Model, tea.Cmd) {
 	m.activeSkill = &activeSkillInfo{name: s.Name, args: skillArgs}
-	// Track for drawer
+	// Track for drawer (capped to avoid unbounded memory growth)
 	m.drawerSkills = append(m.drawerSkills, drawerSkillEntry{name: s.Name, at: time.Now()})
+	if len(m.drawerSkills) > 500 {
+		m.drawerSkills = m.drawerSkills[len(m.drawerSkills)-500:]
+	}
 	m.messages = append(m.messages, chatMessage{"user", displayInput})
 	m.messages = append(m.messages, chatMessage{"system",
 		fmt.Sprintf("Skill loaded: %s", s.Name)})
@@ -2388,6 +2398,9 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.contextMgr.Reset()
 			m.goalTracker.Clear()
 			m.activeSkill = nil
+			m.drawerToolLog = nil
+			m.drawerSkills = nil
+			m.planTracker.Clear()
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("New session created: %s", newSess.ID)})
 		} else {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error: %s", err)})
@@ -2413,6 +2426,9 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.contextMgr.Reset()
 		m.goalTracker.Clear()
 		m.activeSkill = nil
+		m.drawerToolLog = nil
+		m.drawerSkills = nil
+		m.planTracker.Clear()
 		m.rebuildCollapsibles()
 		m.messages = append(m.messages, chatMessage{"system", "Session reset to clean state."})
 		m.input = ""
@@ -3166,29 +3182,31 @@ func (m tuiModel) View() tea.View {
 		}
 	}
 
-	// Get content lines for split-pane composition
-	contentLinesSlice := strings.Split(strings.TrimRight(result.String(), "\n"), "\n")
-
 	// ── Drawer split-pane composition ──
-	if m.showDrawer {
+	if m.showDrawer && m.width >= 42 {
+		contentLinesSlice := strings.Split(strings.TrimRight(result.String(), "\n"), "\n")
+
 		drawerW := m.width * m.drawerWidthPct / 100
 		if drawerW < 20 {
 			drawerW = 20
 		}
 		chatW := m.width - drawerW - 1 // -1 for separator
 		if chatW < 20 {
+			drawerW = m.width - 21
 			chatW = 20
-			drawerW = m.width - chatW - 1
 		}
 
 		drawerStr := m.renderDrawer(drawerW)
 		drawerLines := strings.Split(strings.TrimRight(drawerStr, "\n"), "\n")
 
-		// Zip content and drawer lines
+		// Zip content and drawer lines; ensure at least visibleH lines for viewport padding
 		var splitResult strings.Builder
 		maxLines := len(contentLinesSlice)
 		if len(drawerLines) > maxLines {
 			maxLines = len(drawerLines)
+		}
+		if maxLines < visibleH {
+			maxLines = visibleH
 		}
 
 		for i := 0; i < maxLines; i++ {
@@ -3224,8 +3242,6 @@ func (m tuiModel) View() tea.View {
 
 		result.Reset()
 		result.WriteString(splitResult.String())
-	} else {
-		result.WriteString("\n")
 	}
 
 	result.WriteString(inputRendered)
@@ -3695,10 +3711,7 @@ func (m tuiModel) renderDrawer(width int) string {
 			default:
 				icon = dimStyle.Render("●")
 			}
-			title := task.Title
-			if len(title) > width-8 {
-				title = title[:width-11] + "..."
-			}
+			title := truncateToWidth(task.Title, width-8)
 			b.WriteString(fmt.Sprintf("  %s %s\n", icon, textStyle.Render(title)))
 		}
 		pending, active, done := m.planTracker.Counts()
@@ -3727,10 +3740,7 @@ func (m tuiModel) renderDrawer(width int) string {
 			if entry.isError {
 				icon = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("✗")
 			}
-			args := entry.args
-			if len(args) > 20 {
-				args = args[:17] + "..."
-			}
+			args := truncateToWidth(entry.args, 20)
 			line := fmt.Sprintf("  %s %s", icon, textStyle.Render(entry.name))
 			if args != "" {
 				line += " " + dimStyle.Render(args)
@@ -3966,7 +3976,8 @@ func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog, active *acti
 - Read existing code to understand context before editing
 - Use specific, targeted edits rather than rewriting entire files
 - Explain what you're doing and why
-- If a task requires multiple steps, plan them out first`)
+- If a task requires multiple steps, plan them out first
+- Use the update_plan tool to track your plan task list. Call it whenever you start, complete, or add tasks during your work.`)
 
 	// ── Skills (stable per session, appended after core) ──
 	if skillCat != nil {
@@ -4187,6 +4198,9 @@ func (m *tuiModel) resumeSession(id string) {
 	m.contextMgr.Reset()
 	m.goalTracker.Clear()
 	m.activeSkill = nil
+	m.drawerToolLog = nil
+	m.drawerSkills = nil
+	m.planTracker.Clear()
 	m.sessionUsage = kosong.TokenUsage{}
 	m.turnUsage = kosong.TokenUsage{}
 
