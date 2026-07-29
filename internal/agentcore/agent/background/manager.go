@@ -127,8 +127,12 @@ func (m *Manager) StartProcess(ctx context.Context, command, workDir string, env
 	task.info.PID = cmd.Process.Pid
 	m.mu.Unlock()
 
+	// readerDone closes when the pipe reader goroutine has drained all output.
+	readerDone := make(chan struct{})
+
 	// Capture output in background
 	go func() {
+		defer close(readerDone)
 		buf := make([]byte, 4096)
 		for {
 			n, readErr := outputPipe.Read(buf)
@@ -148,6 +152,10 @@ func (m *Manager) StartProcess(ctx context.Context, command, workDir string, env
 	go func() {
 		defer close(task.done)
 		waitErr := cmd.Wait()
+
+		// Wait for pipe reader to finish draining before updating state,
+		// so that GetOutput always sees complete output after Wait returns.
+		<-readerDone
 
 		m.mu.Lock()
 		defer m.mu.Unlock()
