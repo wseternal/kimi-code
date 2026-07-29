@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/plan"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/agentcore/di"
@@ -1278,5 +1279,135 @@ func TestReplayHistory_RestoresContextUsage(t *testing.T) {
 	display := m.contextMgr.UsageDisplay()
 	if !strings.Contains(display, "203.1K") {
 		t.Errorf("UsageDisplay() = %q, want to contain '203.1K'", display)
+	}
+}
+
+// TestRenderDrawer_ContainsAllSections verifies that renderDrawer outputs
+// the three expected sections: Progress, Tools, and Skills.
+func TestRenderDrawer_ContainsAllSections(t *testing.T) {
+	tracker := plan.NewTracker()
+	tracker.SetTasks([]plan.Task{
+		{Title: "Implement feature", Status: plan.StatusActive},
+		{Title: "Write tests", Status: plan.StatusPending},
+		{Title: "Deploy", Status: plan.StatusDone},
+	})
+
+	m := tuiModel{
+		planTracker: tracker,
+		drawerToolLog: []drawerToolEntry{
+			{name: "read_file", args: `/src/foo.go`, at: time.Now(), duration: 200 * time.Millisecond},
+			{name: "bash", args: `go test ./...`, at: time.Now(), duration: 1 * time.Second},
+		},
+		drawerSkills: []drawerSkillEntry{
+			{name: "dev-cycle", at: time.Now()},
+		},
+	}
+
+	out := m.renderDrawer(40)
+
+	for _, section := range []string{"Progress", "Tools", "Skills"} {
+		if !strings.Contains(out, section) {
+			t.Errorf("renderDrawer output missing section %q", section)
+		}
+	}
+
+	// Verify task content
+	if !strings.Contains(out, "Implement feature") {
+		t.Error("renderDrawer missing task 'Implement feature'")
+	}
+
+	// Verify tool content
+	if !strings.Contains(out, "read_file") {
+		t.Error("renderDrawer missing tool 'read_file'")
+	}
+
+	// Verify skill content
+	if !strings.Contains(out, "dev-cycle") {
+		t.Error("renderDrawer missing skill 'dev-cycle'")
+	}
+}
+
+// TestRenderDrawer_EmptyState verifies renderDrawer handles empty data gracefully.
+func TestRenderDrawer_EmptyState(t *testing.T) {
+	tracker := plan.NewTracker()
+	m := tuiModel{
+		planTracker: tracker,
+	}
+
+	out := m.renderDrawer(30)
+
+	if !strings.Contains(out, "No tasks") {
+		t.Error("expected 'No tasks' for empty tracker")
+	}
+	if !strings.Contains(out, "No tool calls") {
+		t.Error("expected 'No tool calls' for empty tool log")
+	}
+	if !strings.Contains(out, "No skills used") {
+		t.Error("expected 'No skills used' for empty skills")
+	}
+}
+
+// TestCtrlTToggle_Drawer verifies that Ctrl+T toggles the showDrawer flag.
+func TestCtrlTToggle_Drawer(t *testing.T) {
+	m := tuiModel{
+		showDrawer: false,
+	}
+
+	// First Ctrl+T should open the drawer
+	got, _ := handleKeyHelper(m, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	if !got.showDrawer {
+		t.Error("Ctrl+T should toggle showDrawer to true")
+	}
+
+	// Second Ctrl+T should close the drawer
+	got2, _ := handleKeyHelper(got, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	if got2.showDrawer {
+		t.Error("Ctrl+T should toggle showDrawer back to false")
+	}
+}
+
+// TestTruncateRune_MultiByteUTF8 verifies that truncateRune handles
+// multi-byte characters without producing invalid UTF-8.
+func TestTruncateRune_MultiByteUTF8(t *testing.T) {
+	// Chinese characters: each is 3 bytes but 1 rune
+	input := "\u4f60\u597d\u4e16\u754c\u8fd9\u662f\u4e00\u4e2a\u6d4b\u8bd5" // 10 Chinese chars
+	result := truncateRune(input, 7)
+
+	runes := []rune(result)
+	if len(runes) > 7 {
+		t.Errorf("expected max 7 runes, got %d", len(runes))
+	}
+
+	// Verify no replacement characters (invalid UTF-8)
+	for _, r := range result {
+		if r == '\uFFFD' {
+			t.Error("found replacement character — invalid UTF-8 truncation")
+		}
+	}
+}
+
+// TestToolArgSummary_MultiByteUTF8 verifies toolArgSummary doesn't corrupt
+// multi-byte UTF-8 in argument values.
+func TestToolArgSummary_MultiByteUTF8(t *testing.T) {
+	// JSON with long Chinese value
+	args := `{"file_path": "/src/\u4f60\u597d\u4e16\u754c\u8fd9\u662f\u4e00\u4e2a\u5f88\u957f\u7684\u6587\u4ef6\u8def\u5f84\u540d\u79f0\u6d4b\u8bd5\u7528\u4f8b\u6570\u636e.go"}`
+	result := toolArgSummary(args)
+
+	// Verify no replacement characters
+	for _, r := range result {
+		if r == '\uFFFD' {
+			t.Error("toolArgSummary corrupted multi-byte UTF-8")
+		}
+	}
+}
+
+// TestBuildSystemPrompt_UpdatePlanHint verifies that buildSystemPrompt
+// includes the update_plan tool hint.
+func TestBuildSystemPrompt_UpdatePlanHint(t *testing.T) {
+	cat := skill.NewCatalog(nil)
+	prompt := buildSystemPrompt("/tmp", "main", cat, nil)
+
+	if !strings.Contains(prompt, "update_plan") {
+		t.Error("system prompt should mention update_plan tool")
 	}
 }

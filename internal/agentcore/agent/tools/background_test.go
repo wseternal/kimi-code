@@ -74,7 +74,9 @@ func TestTaskOutputTool_GetOutput(t *testing.T) {
 	ctx := context.Background()
 
 	taskID, _ := mgr.StartProcess(ctx, "echo 'task output test'", ".", nil)
-	time.Sleep(200 * time.Millisecond)
+	if err := mgr.Wait(taskID, 5*time.Second); err != nil {
+		t.Fatalf("wait for task: %v", err)
+	}
 
 	tool := NewTaskOutputTool(mgr)
 	input, _ := json.Marshal(map[string]interface{}{"task_id": taskID})
@@ -139,26 +141,29 @@ func TestBackgroundBashTool_RunInBackground(t *testing.T) {
 		t.Fatalf("unexpected error result: %s", result.Output)
 	}
 	if !strings.Contains(result.Output, "task_id") {
-		t.Errorf("expected task_id in output, got: %s", result.Output)
+		t.Fatalf("expected task_id in output, got: %s", result.Output)
 	}
-
-	// Wait and check output
-	time.Sleep(200 * time.Millisecond)
-	tasks := mgr.List(false, 20)
-	found := false
-	for _, task := range tasks {
-		if strings.Contains(task.Command, "bg_test_output") {
-			found = true
-			output, _ := mgr.GetOutput(task.TaskID, 1024)
-			if !strings.Contains(output, "bg_test_output") {
-				t.Errorf("expected output in task, got: %s", output)
-			}
-			mgr.Stop(task.TaskID, "cleanup")
+	// Extract task_id from output: "task_id: bg_N"
+	var taskID string
+	for _, line := range strings.Split(result.Output, "\n") {
+		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "task_id:"); ok {
+			taskID = strings.TrimSpace(after)
+			break
 		}
 	}
-	if !found {
-		t.Error("background task not found")
+	if taskID == "" {
+		t.Fatalf("could not parse task_id from output: %s", result.Output)
 	}
+
+	// Wait for the process to complete so output is fully buffered.
+	if err := mgr.Wait(taskID, 5*time.Second); err != nil {
+		t.Fatalf("wait for task: %v", err)
+	}
+	output, _ := mgr.GetOutput(taskID, 1024)
+	if !strings.Contains(output, "bg_test_output") {
+		t.Errorf("expected output in task, got: %s", output)
+	}
+	mgr.Stop(taskID, "cleanup")
 }
 
 func TestBackgroundBashTool_RunInForeground(t *testing.T) {

@@ -19,13 +19,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/background"
-	"github.com/visdomtech/kimi-code/internal/agentcore/config"
+	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/goal"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/permission"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/plan"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
+	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
 	"github.com/visdomtech/kimi-code/internal/audit"
 	"github.com/visdomtech/kimi-code/internal/kosong"
@@ -37,47 +38,47 @@ import (
 // ── Theme (auto-detects light/dark terminal background) ──
 
 type themeColors struct {
-	primary    string
-	accent     string
-	text       string
-	textStrong string
-	textDim    string
-	textMuted  string
-	border     string
-	success    string
-	warning    string
-	error      string
-	roleUser   string
+	primary     string
+	accent      string
+	text        string
+	textStrong  string
+	textDim     string
+	textMuted   string
+	border      string
+	success     string
+	warning     string
+	error       string
+	roleUser    string
 	statusBarBg string
 }
 
 var darkTheme = themeColors{
-	primary:    "#4FA8FF",
-	accent:     "#5BC0BE",
-	text:       "#E0E0E0",
-	textStrong: "#F5F5F5",
-	textDim:    "#888888",
-	textMuted:  "#6B6B6B",
-	border:     "#5A5A5A",
-	success:    "#4EC87E",
-	warning:    "#E8A838",
-	error:      "#E85454",
-	roleUser:   "#FFCB6B",
+	primary:     "#4FA8FF",
+	accent:      "#5BC0BE",
+	text:        "#E0E0E0",
+	textStrong:  "#F5F5F5",
+	textDim:     "#888888",
+	textMuted:   "#6B6B6B",
+	border:      "#5A5A5A",
+	success:     "#4EC87E",
+	warning:     "#E8A838",
+	error:       "#E85454",
+	roleUser:    "#FFCB6B",
 	statusBarBg: "#1A1A2E",
 }
 
 var lightTheme = themeColors{
-	primary:    "#1A5FB4",
-	accent:     "#26A269",
-	text:       "#3D3846",
-	textStrong: "#1E1E2E",
-	textDim:    "#77767B",
-	textMuted:  "#9A9A9A",
-	border:     "#C0BFBC",
-	success:    "#26A269",
-	warning:    "#E5A50A",
-	error:      "#C01C28",
-	roleUser:   "#A2734C",
+	primary:     "#1A5FB4",
+	accent:      "#26A269",
+	text:        "#3D3846",
+	textStrong:  "#1E1E2E",
+	textDim:     "#77767B",
+	textMuted:   "#9A9A9A",
+	border:      "#C0BFBC",
+	success:     "#26A269",
+	warning:     "#E5A50A",
+	error:       "#C01C28",
+	roleUser:    "#A2734C",
 	statusBarBg: "#DEDDDA",
 }
 
@@ -92,19 +93,19 @@ var (
 // ── Styles (initialized by initTheme) ──
 
 var (
-	primaryStyle    lipgloss.Style
-	boldPrimary     lipgloss.Style
-	dimStyle        lipgloss.Style
-	textStyle       lipgloss.Style
-	strongStyle     lipgloss.Style
-	successStyle    lipgloss.Style
-	warningStyle    lipgloss.Style
-	userStyle       lipgloss.Style
-	mutedStyle      lipgloss.Style
-	borderStyle     lipgloss.Style
-	inputBorderStyle lipgloss.Style
+	primaryStyle      lipgloss.Style
+	boldPrimary       lipgloss.Style
+	dimStyle          lipgloss.Style
+	textStyle         lipgloss.Style
+	strongStyle       lipgloss.Style
+	successStyle      lipgloss.Style
+	warningStyle      lipgloss.Style
+	userStyle         lipgloss.Style
+	mutedStyle        lipgloss.Style
+	borderStyle       lipgloss.Style
+	inputBorderStyle  lipgloss.Style
 	inputFocusedStyle lipgloss.Style
-	statusBarStyle   lipgloss.Style
+	statusBarStyle    lipgloss.Style
 )
 
 func init() {
@@ -190,24 +191,24 @@ type activeSkillInfo struct {
 
 type tuiModel struct {
 	// State
-	sessionID string
-	version   string
-	cwd       string
-	model     string
-	branch    string
-	messages  []chatMessage
-	input     string
-	cursor    int
-	width     int
-	height    int
-	turnCount int
-	yoloMode  bool
-	planMode  bool
-	quitting      bool
-	ctrlCPending  bool // true after first Ctrl+C; second press quits
-	streaming     bool
-	sess      *session.Session
-	app       *App
+	sessionID    string
+	version      string
+	cwd          string
+	model        string
+	branch       string
+	messages     []chatMessage
+	input        string
+	cursor       int
+	width        int
+	height       int
+	turnCount    int
+	yoloMode     bool
+	planMode     bool
+	quitting     bool
+	ctrlCPending bool // true after first Ctrl+C; second press quits
+	streaming    bool
+	sess         *session.Session
+	app          *App
 
 	// LLM provider
 	provider kosong.ChatProvider
@@ -219,22 +220,22 @@ type tuiModel struct {
 	permChain    *permission.Chain
 
 	// Autocomplete
-	suggestions      []slashCommand
-	selectedSuggest  int
-	showSuggestions  bool
+	suggestions     []slashCommand
+	selectedSuggest int
+	showSuggestions bool
 
 	// Cursor
 	cursorBlink bool
 
 	// Streaming state
-	streamCh           chan streamEvent
-	streamThinking     string
-	streamResponse     string
-	mdBuffer           MarkdownBuffer
-	streamToolGroups   []toolGroup
-	streamStep         int
-	responseCursor     int // scroll offset in response view
-	scrollOffset       int // viewport scroll offset in lines (0 = anchored to bottom)
+	streamCh         chan streamEvent
+	streamThinking   string
+	streamResponse   string
+	mdBuffer         MarkdownBuffer
+	streamToolGroups []toolGroup
+	streamStep       int
+	responseCursor   int // scroll offset in response view
+	scrollOffset     int // viewport scroll offset in lines (0 = anchored to bottom)
 
 	// Side query mode (/btw): when true, history is truncated after streaming
 	btwMode       bool
@@ -251,27 +252,27 @@ type tuiModel struct {
 	activeSkill  *activeSkillInfo // currently executing skill (nil = none)
 
 	// Model picker
-	showModelPicker  bool
-	pickerSearch     string
-	pickerSelected   int
-	pickerFilter     string // active provider filter ("" = ALL)
-	pickerModels     []pickerEntry
-	pickerEffort     string // "low", "high", "max"
+	showModelPicker bool
+	pickerSearch    string
+	pickerSelected  int
+	pickerFilter    string // active provider filter ("" = ALL)
+	pickerModels    []pickerEntry
+	pickerEffort    string // "low", "high", "max"
 
 	// Cycle 2: Interactive permission prompts
-	prompter    *permission.Prompter
-	showApproval bool
+	prompter        *permission.Prompter
+	showApproval    bool
 	pendingApproval *permission.ApprovalRequest
 
 	// Cycle 5: Mid-turn interaction
-	cancelCh        chan struct{}
-	queuedMessages  []string
+	cancelCh       chan struct{}
+	queuedMessages []string
 
 	// Cycle 6: Context management
-	contextMgr   *agentctx.ContextManager
-	turnUsage      kosong.TokenUsage // real API usage for current turn (live during streaming)
-	sessionUsage   kosong.TokenUsage // cumulative session token usage
-	lastFinishReason *string         // raw finish_reason from last LLM step (for diagnostics)
+	contextMgr       *agentctx.ContextManager
+	turnUsage        kosong.TokenUsage // real API usage for current turn (live during streaming)
+	sessionUsage     kosong.TokenUsage // cumulative session token usage
+	lastFinishReason *string           // raw finish_reason from last LLM step (for diagnostics)
 
 	// Cycle 8: Goal tracker
 	goalTracker *goal.Tracker
@@ -299,6 +300,13 @@ type tuiModel struct {
 
 	// Audit trail
 	auditWriter *audit.Writer
+
+	// Drawer (right-side panel)
+	showDrawer     bool
+	drawerWidthPct int // percentage of width for drawer (default 35)
+	planTracker    *plan.Tracker
+	drawerToolLog  []drawerToolEntry
+	drawerSkills   []drawerSkillEntry
 }
 
 // pickerEntry is a single model entry in the model picker.
@@ -342,6 +350,10 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	bgMgr := background.NewManager()
 	tools.RegisterBackgroundTools(toolReg, bgMgr)
 
+	// Plan tracker for drawer progress section
+	planTrk := plan.NewTracker()
+	toolReg.Register(&tools.UpdatePlanTool{Tracker: planTrk})
+
 	// Register GoGraph tools and hooks when available (opt-out via experimental.gograph=false)
 	if app.Config.Experimental["gograph"] != false && tools.IsGoGraphAvailable() {
 		runner := tools.NewGoGraphRunner()
@@ -368,25 +380,27 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	}
 
 	return tuiModel{
-		sessionID:    sess.ID,
-		version:      version,
-		cwd:          cwd,
-		model:        modelName,
-		branch:       getGitBranch(skill.FindProjectRoot(cwd)),
-		sess:         sess,
-		app:          app,
-		provider:     provider,
-		history:      []kosong.Message{},
-		skillCatalog: skillCat,
-		toolRegistry: toolReg,
-		bgManager:    bgMgr,
-		permChain:    permChain,
-		focusIndex:   -1,
-		prompter:     permission.NewPrompter(),
-		contextMgr:   agentctx.NewContextManager(maxCtx),
-		goalTracker:  goal.NewTracker(),
-		inputHistory: inputHist,
-		auditWriter:  app.AuditWriter,
+		sessionID:      sess.ID,
+		version:        version,
+		cwd:            cwd,
+		model:          modelName,
+		branch:         getGitBranch(skill.FindProjectRoot(cwd)),
+		sess:           sess,
+		app:            app,
+		provider:       provider,
+		history:        []kosong.Message{},
+		skillCatalog:   skillCat,
+		toolRegistry:   toolReg,
+		bgManager:      bgMgr,
+		permChain:      permChain,
+		focusIndex:     -1,
+		prompter:       permission.NewPrompter(),
+		contextMgr:     agentctx.NewContextManager(maxCtx),
+		goalTracker:    goal.NewTracker(),
+		inputHistory:   inputHist,
+		auditWriter:    app.AuditWriter,
+		planTracker:    planTrk,
+		drawerWidthPct: 35,
 	}
 }
 
@@ -693,7 +707,7 @@ type toolGroup struct {
 type collapsible struct {
 	kind      string // "thinking", "tools", "response"
 	expanded  bool
-	turnIndex int    // which turn this belongs to
+	turnIndex int // which turn this belongs to
 }
 
 // turnData stores the full output of a completed LLM turn.
@@ -701,6 +715,34 @@ type turnData struct {
 	thinking   string
 	text       string
 	toolGroups []toolGroup
+}
+
+// drawerToolEntry records a single tool call for the drawer's Tools section.
+type drawerToolEntry struct {
+	name     string
+	args     string // short summary of arguments
+	isError  bool
+	duration time.Duration
+	at       time.Time
+}
+
+// drawerSkillEntry records a skill invocation for the drawer's Skills section.
+type drawerSkillEntry struct {
+	name string
+	at   time.Time
+}
+
+// truncateRune truncates by rune count (not bytes) to avoid corrupting
+// multi-byte UTF-8 characters. Appends "..." when truncation occurs.
+func truncateRune(s string, maxRunes int) string {
+	if maxRunes < 4 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 // toolArgSummary extracts a short one-line summary from JSON tool arguments.
@@ -711,11 +753,8 @@ func toolArgSummary(args string) string {
 	// Try to parse as JSON and extract key fields
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(args), &m); err != nil {
-		// Not valid JSON, truncate raw
-		if len(args) > 40 {
-			return args[:37] + "..."
-		}
-		return args
+		// Not valid JSON, truncate raw (by runes, not bytes)
+		return truncateRune(args, 40)
 	}
 	// Prioritize key fields for display: file paths and commands first.
 	var parts []string
@@ -724,9 +763,7 @@ func toolArgSummary(args string) string {
 	for _, k := range priorityKeys {
 		if v, ok := m[k]; ok {
 			s := fmt.Sprintf("%v", v)
-			if len(s) > 40 {
-				s = s[:37] + "..."
-			}
+			s = truncateRune(s, 40)
 			parts = append(parts, s)
 			seen[k] = true
 		}
@@ -741,36 +778,32 @@ func toolArgSummary(args string) string {
 	for _, k := range extraKeys {
 		v := m[k]
 		s := fmt.Sprintf("%v", v)
-		if len(s) > 30 {
-			s = s[:27] + "..."
-		}
+		s = truncateRune(s, 30)
 		parts = append(parts, fmt.Sprintf("%s=%s", k, s))
 	}
 	result := strings.Join(parts, ", ")
-	if len(result) > 60 {
-		result = result[:57] + "..."
-	}
+	result = truncateRune(result, 60)
 	return result
 }
 
 // toolVerb maps a tool name to a human-friendly action verb.
 func toolVerb(name string) string {
 	verbs := map[string]string{
-		"write_file":     "Write",
-		"edit_file":      "Edit",
-		"search_replace": "Edit",
-		"read_file":      "Read",
-		"list_dir":       "List",
-		"bash":           "Bash",
-		"execute":        "Bash",
-		"grep":           "Search",
-		"glob":           "Search",
-		"search":         "Search",
+		"write_file":      "Write",
+		"edit_file":       "Edit",
+		"search_replace":  "Edit",
+		"read_file":       "Read",
+		"list_dir":        "List",
+		"bash":            "Bash",
+		"execute":         "Bash",
+		"grep":            "Search",
+		"glob":            "Search",
+		"search":          "Search",
 		"search_codebase": "Search",
-		"lsp":            "LSP",
-		"fetch":          "Fetch",
-		"web_fetch":      "Fetch",
-		"delete_file":    "Delete",
+		"lsp":             "LSP",
+		"fetch":           "Fetch",
+		"web_fetch":       "Fetch",
+		"delete_file":     "Delete",
 	}
 	lower := strings.ToLower(name)
 	if v, ok := verbs[lower]; ok {
@@ -1136,8 +1169,8 @@ type cursorTickMsg struct{}
 type oauthLoginMsg struct {
 	messages []chatMessage
 	success  bool
-	models   []oauth.ModelInfo    // fetched models for config provisioning
-	baseURL  string               // resolved base URL
+	models   []oauth.ModelInfo // fetched models for config provisioning
+	baseURL  string            // resolved base URL
 }
 
 func (m tuiModel) tickCursor() tea.Cmd {
@@ -1216,6 +1249,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamToolGroups = append(m.streamToolGroups, toolGroup{
 				name: msg.toolName, args: msg.toolArgs, collapsed: true, duration: msg.toolDur,
 			})
+			// Track for drawer (capped to avoid unbounded memory growth)
+			m.drawerToolLog = append(m.drawerToolLog, drawerToolEntry{
+				name: msg.toolName, args: toolArgSummary(msg.toolArgs), at: time.Now(),
+			})
+			if len(m.drawerToolLog) > 500 {
+				m.drawerToolLog = m.drawerToolLog[len(m.drawerToolLog)-500:]
+			}
 			m.rebuildCollapsibles()
 			return m, listenStream(m.streamCh)
 		case "tool_result":
@@ -1225,6 +1265,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				last.isError = msg.toolErr
 				if msg.toolDur > 0 {
 					last.duration = msg.toolDur
+				}
+			}
+			// Update drawer entry — match by name to handle potential reordering
+			if len(m.drawerToolLog) > 0 {
+				dlast := &m.drawerToolLog[len(m.drawerToolLog)-1]
+				if dlast.name == msg.toolName {
+					dlast.isError = msg.toolErr
+					dlast.duration = msg.toolDur
 				}
 			}
 			return m, listenStream(m.streamCh)
@@ -1438,7 +1486,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamCh = nil
 			m.cancelCh = nil
 			m.lastFinishReason = nil // reset for next turn
-			m.scrollOffset = 0 // auto-scroll to bottom on new content
+			m.scrollOffset = 0       // auto-scroll to bottom on new content
 			m.rebuildCollapsibles()
 
 			// /btw mode: discard all messages added to history during streaming
@@ -1562,6 +1610,14 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case msg.Code == 'd' && ctrl:
 		m.quitting = true
 		return m, tea.Quit
+
+	// ── Toggle drawer (Ctrl+T) ──
+	case msg.Code == 't' && ctrl:
+		m.ctrlCPending = false
+		m.showDrawer = !m.showDrawer
+		// Reset scroll position when toggling drawer to avoid jumpy viewport
+		m.scrollOffset = 0
+		return m, nil
 
 	// ── Newline (Alt+Enter / Shift+Enter / Ctrl+J) ──
 	case msg.Code == tea.KeyEnter && (msg.Mod&tea.ModAlt != 0 || msg.Mod&tea.ModShift != 0),
@@ -2248,6 +2304,11 @@ func parseSkillCommand(input string) (name, args string) {
 // executeSkill activates a skill and starts streaming its prompt.
 func (m tuiModel) executeSkill(s *skill.Skill, skillArgs, displayInput string) (tea.Model, tea.Cmd) {
 	m.activeSkill = &activeSkillInfo{name: s.Name, args: skillArgs}
+	// Track for drawer (capped to avoid unbounded memory growth)
+	m.drawerSkills = append(m.drawerSkills, drawerSkillEntry{name: s.Name, at: time.Now()})
+	if len(m.drawerSkills) > 500 {
+		m.drawerSkills = m.drawerSkills[len(m.drawerSkills)-500:]
+	}
 	m.messages = append(m.messages, chatMessage{"user", displayInput})
 	m.messages = append(m.messages, chatMessage{"system",
 		fmt.Sprintf("Skill loaded: %s", s.Name)})
@@ -2341,6 +2402,9 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.contextMgr.Reset()
 			m.goalTracker.Clear()
 			m.activeSkill = nil
+			m.drawerToolLog = nil
+			m.drawerSkills = nil
+			m.planTracker.Clear()
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("New session created: %s", newSess.ID)})
 		} else {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error: %s", err)})
@@ -2366,6 +2430,9 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.contextMgr.Reset()
 		m.goalTracker.Clear()
 		m.activeSkill = nil
+		m.drawerToolLog = nil
+		m.drawerSkills = nil
+		m.planTracker.Clear()
 		m.rebuildCollapsibles()
 		m.messages = append(m.messages, chatMessage{"system", "Session reset to clean state."})
 		m.input = ""
@@ -3119,6 +3186,68 @@ func (m tuiModel) View() tea.View {
 		}
 	}
 
+	// ── Drawer split-pane composition ──
+	if m.showDrawer && m.width >= 42 {
+		contentLinesSlice := strings.Split(strings.TrimRight(result.String(), "\n"), "\n")
+
+		drawerW := m.width * m.drawerWidthPct / 100
+		if drawerW < 20 {
+			drawerW = 20
+		}
+		chatW := m.width - drawerW - 1 // -1 for separator
+		if chatW < 20 {
+			drawerW = m.width - 21
+			chatW = 20
+		}
+
+		drawerStr := m.renderDrawer(drawerW)
+		drawerLines := strings.Split(strings.TrimRight(drawerStr, "\n"), "\n")
+
+		// Zip content and drawer lines; ensure at least visibleH lines for viewport padding
+		var splitResult strings.Builder
+		maxLines := len(contentLinesSlice)
+		if len(drawerLines) > maxLines {
+			maxLines = len(drawerLines)
+		}
+		if maxLines < visibleH {
+			maxLines = visibleH
+		}
+
+		for i := 0; i < maxLines; i++ {
+			var chatLine, drawerLine string
+			if i < len(contentLinesSlice) {
+				chatLine = contentLinesSlice[i]
+			}
+			if i < len(drawerLines) {
+				drawerLine = drawerLines[i]
+			}
+
+			// Truncate or pad chat line to fit
+			chatVisible := lipgloss.Width(chatLine)
+			if chatVisible > chatW {
+				chatLine = truncateToWidth(chatLine, chatW)
+			} else if chatVisible < chatW {
+				chatLine = chatLine + strings.Repeat(" ", chatW-chatVisible)
+			}
+
+			// Truncate drawer line to fit
+			drawerVisible := lipgloss.Width(drawerLine)
+			if drawerVisible > drawerW {
+				drawerLine = truncateToWidth(drawerLine, drawerW)
+			} else if drawerVisible < drawerW {
+				drawerLine = drawerLine + strings.Repeat(" ", drawerW-drawerVisible)
+			}
+
+			splitResult.WriteString(chatLine)
+			splitResult.WriteString(dimStyle.Render("│"))
+			splitResult.WriteString(drawerLine)
+			splitResult.WriteString("\n")
+		}
+
+		result.Reset()
+		result.WriteString(splitResult.String())
+	}
+
 	result.WriteString(inputRendered)
 	result.WriteString("\n")
 	result.WriteString(statusBarRendered)
@@ -3559,6 +3688,159 @@ func formatToolMetaRaw(tg toolGroup) string {
 	return " · " + strings.Join(parts, ", ")
 }
 
+// renderDrawer renders the right-side drawer with Progress, Tools, and Skills sections.
+func (m tuiModel) renderDrawer(width int) string {
+	if m.planTracker == nil {
+		return ""
+	}
+	if width < 20 {
+		width = 20
+	}
+	var b strings.Builder
+
+	// ── Progress section ──
+	b.WriteString(primaryStyle.Render("── Progress "))
+	b.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-14))))
+	b.WriteString("\n")
+
+	tasks := m.planTracker.Tasks()
+	if len(tasks) == 0 {
+		b.WriteString(dimStyle.Render("  No tasks"))
+		b.WriteString("\n")
+	} else {
+		for _, task := range tasks {
+			var icon string
+			switch task.Status {
+			case plan.StatusDone:
+				icon = primaryStyle.Render("✓")
+			case plan.StatusActive:
+				icon = boldPrimary.Render("◉")
+			default:
+				icon = dimStyle.Render("●")
+			}
+			title := truncateToWidth(task.Title, width-8)
+			b.WriteString(fmt.Sprintf("  %s %s\n", icon, textStyle.Render(title)))
+		}
+		pending, active, done := m.planTracker.Counts()
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  %d/%d done", done, pending+active+done)))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
+	// ── Tools section ──
+	b.WriteString(primaryStyle.Render("── Tools "))
+	b.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-11))))
+	b.WriteString("\n")
+
+	if len(m.drawerToolLog) == 0 {
+		b.WriteString(dimStyle.Render("  No tool calls"))
+		b.WriteString("\n")
+	} else {
+		// Show last N tool calls that fit in the drawer
+		maxShow := 10
+		start := 0
+		if len(m.drawerToolLog) > maxShow {
+			start = len(m.drawerToolLog) - maxShow
+		}
+		for _, entry := range m.drawerToolLog[start:] {
+			icon := primaryStyle.Render("✓")
+			if entry.isError {
+				icon = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("✗")
+			}
+			args := truncateToWidth(entry.args, 20)
+			line := fmt.Sprintf("  %s %s", icon, textStyle.Render(entry.name))
+			if args != "" {
+				line += " " + dimStyle.Render(args)
+			}
+			if entry.duration > 0 {
+				line += " " + dimStyle.Render(fmt.Sprintf("%.1fs", entry.duration.Seconds()))
+			}
+			b.WriteString(line + "\n")
+		}
+
+		// Summary at bottom
+		counts := make(map[string]int)
+		for _, entry := range m.drawerToolLog {
+			counts[entry.name]++
+		}
+		var parts []string
+		for name, count := range counts {
+			parts = append(parts, fmt.Sprintf("%d %s", count, name))
+		}
+		sort.Strings(parts)
+		b.WriteString(dimStyle.Render("  " + strings.Join(parts, " · ")))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
+	// ── Skills section ──
+	b.WriteString(primaryStyle.Render("── Skills "))
+	b.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-12))))
+	b.WriteString("\n")
+
+	if len(m.drawerSkills) == 0 {
+		b.WriteString(dimStyle.Render("  No skills used"))
+		b.WriteString("\n")
+	} else {
+		// Cap display to last 10 entries to avoid pushing other sections off-screen
+		skills := m.drawerSkills
+		maxShow := 10
+		if len(skills) > maxShow {
+			skills = skills[len(skills)-maxShow:]
+		}
+		for _, s := range skills {
+			b.WriteString(fmt.Sprintf("  %s %s\n", dimStyle.Render(s.at.Format("15:04")), textStyle.Render(s.name)))
+		}
+	}
+
+	return b.String()
+}
+
+// truncateToWidth truncates a string to fit within the given display width,
+// accounting for wide characters and ANSI escape sequences.
+func truncateToWidth(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	w := lipgloss.Width(s)
+	if w <= maxWidth {
+		return s
+	}
+	// Walk runes and track visible width
+	var b strings.Builder
+	curW := 0
+	inEsc := false
+	hadEsc := false
+	ellipsisW := lipgloss.Width("…")
+	for _, r := range s {
+		if r == '\x1b' {
+			inEsc = true
+			hadEsc = true
+			b.WriteRune(r)
+			continue
+		}
+		if inEsc {
+			b.WriteRune(r)
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+				inEsc = false
+			}
+			continue
+		}
+		rW := lipgloss.Width(string(r))
+		if curW+rW > maxWidth-ellipsisW {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+		curW += rW
+	}
+	// Close any open ANSI escape sequences to prevent color bleed
+	if hadEsc {
+		b.WriteString("\x1b[0m")
+	}
+	return b.String()
+}
+
 func (m tuiModel) renderStatusBar() string {
 	w := m.width
 	if w < 20 {
@@ -3714,7 +3996,8 @@ func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog, active *acti
 - Read existing code to understand context before editing
 - Use specific, targeted edits rather than rewriting entire files
 - Explain what you're doing and why
-- If a task requires multiple steps, plan them out first`)
+- If a task requires multiple steps, plan them out first
+- Use the update_plan tool to track your plan task list. Call it whenever you start, complete, or add tasks during your work.`)
 
 	// ── Skills (stable per session, appended after core) ──
 	if skillCat != nil {
@@ -3935,6 +4218,9 @@ func (m *tuiModel) resumeSession(id string) {
 	m.contextMgr.Reset()
 	m.goalTracker.Clear()
 	m.activeSkill = nil
+	m.drawerToolLog = nil
+	m.drawerSkills = nil
+	m.planTracker.Clear()
 	m.sessionUsage = kosong.TokenUsage{}
 	m.turnUsage = kosong.TokenUsage{}
 
