@@ -1530,6 +1530,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case msg.Code == 'c' && msg.Mod&tea.ModCtrl != 0: // ctrl+c
 				m.quitting = true
 				return m, tea.Quit
+			case msg.Code == 't' && msg.Mod&tea.ModCtrl != 0: // ctrl+t
+				// Toggle drawer even while streaming
+				m.showDrawer = !m.showDrawer
+				m.scrollOffset = 0
+				return m, nil
 			case msg.Code == tea.KeyEscape:
 				// Cancel the current stream
 				if m.cancelCh != nil {
@@ -1858,6 +1863,17 @@ func (m *tuiModel) clampCursor() {
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
+	}
+}
+
+// resetDrawerState clears the drawer's accumulated tool log, skill log, and
+// plan tracker. Called on /new, /init, /clear, and session resume so the
+// drawer never shows stale data from a previous context.
+func (m *tuiModel) resetDrawerState() {
+	m.drawerToolLog = nil
+	m.drawerSkills = nil
+	if m.planTracker != nil {
+		m.planTracker.Clear()
 	}
 }
 
@@ -2402,9 +2418,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.contextMgr.Reset()
 			m.goalTracker.Clear()
 			m.activeSkill = nil
-			m.drawerToolLog = nil
-			m.drawerSkills = nil
-			m.planTracker.Clear()
+			m.resetDrawerState()
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("New session created: %s", newSess.ID)})
 		} else {
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error: %s", err)})
@@ -2417,6 +2431,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	case input == "/clear":
 		m.messages = nil
 		m.activeSkill = nil
+		m.resetDrawerState()
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false
@@ -2430,9 +2445,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.contextMgr.Reset()
 		m.goalTracker.Clear()
 		m.activeSkill = nil
-		m.drawerToolLog = nil
-		m.drawerSkills = nil
-		m.planTracker.Clear()
+		m.resetDrawerState()
 		m.rebuildCollapsibles()
 		m.messages = append(m.messages, chatMessage{"system", "Session reset to clean state."})
 		m.input = ""
@@ -4218,9 +4231,7 @@ func (m *tuiModel) resumeSession(id string) {
 	m.contextMgr.Reset()
 	m.goalTracker.Clear()
 	m.activeSkill = nil
-	m.drawerToolLog = nil
-	m.drawerSkills = nil
-	m.planTracker.Clear()
+	m.resetDrawerState()
 	m.sessionUsage = kosong.TokenUsage{}
 	m.turnUsage = kosong.TokenUsage{}
 

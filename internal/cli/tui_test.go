@@ -1366,6 +1366,31 @@ func TestCtrlTToggle_Drawer(t *testing.T) {
 	}
 }
 
+// TestCtrlTToggle_DrawerDuringStreaming verifies that Ctrl+T toggles the
+// showDrawer flag even while a model response is streaming. The streaming
+// branch in Update uses a restricted key handler that previously swallowed
+// Ctrl+T, making the drawer untoggleable mid-stream.
+func TestCtrlTToggle_DrawerDuringStreaming(t *testing.T) {
+	m := tuiModel{
+		showDrawer: false,
+		streaming:  true,
+	}
+
+	// First Ctrl+T should open the drawer even while streaming
+	gotModel, _ := m.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	got := gotModel.(tuiModel)
+	if !got.showDrawer {
+		t.Error("Ctrl+T should toggle showDrawer to true during streaming")
+	}
+
+	// Second Ctrl+T should close the drawer again
+	gotModel2, _ := got.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	got2 := gotModel2.(tuiModel)
+	if got2.showDrawer {
+		t.Error("Ctrl+T should toggle showDrawer back to false during streaming")
+	}
+}
+
 // TestTruncateRune_MultiByteUTF8 verifies that truncateRune handles
 // multi-byte characters without producing invalid UTF-8.
 func TestTruncateRune_MultiByteUTF8(t *testing.T) {
