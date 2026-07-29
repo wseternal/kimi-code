@@ -742,7 +742,7 @@ func truncateRune(s string, maxRunes int) string {
 	if len(runes) <= maxRunes {
 		return s
 	}
-	return string(runes[:maxRunes-3]) + "..."
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 // toolArgSummary extracts a short one-line summary from JSON tool arguments.
@@ -1251,7 +1251,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			// Track for drawer (capped to avoid unbounded memory growth)
 			m.drawerToolLog = append(m.drawerToolLog, drawerToolEntry{
-				name: msg.toolName, args: msg.toolArgs, at: time.Now(),
+				name: msg.toolName, args: toolArgSummary(msg.toolArgs), at: time.Now(),
 			})
 			if len(m.drawerToolLog) > 500 {
 				m.drawerToolLog = m.drawerToolLog[len(m.drawerToolLog)-500:]
@@ -1267,11 +1267,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					last.duration = msg.toolDur
 				}
 			}
-			// Update drawer entry
+			// Update drawer entry — match by name to handle potential reordering
 			if len(m.drawerToolLog) > 0 {
 				dlast := &m.drawerToolLog[len(m.drawerToolLog)-1]
-				dlast.isError = msg.toolErr
-				dlast.duration = msg.toolDur
+				if dlast.name == msg.toolName {
+					dlast.isError = msg.toolErr
+					dlast.duration = msg.toolDur
+				}
 			}
 			return m, listenStream(m.streamCh)
 		case "step_done":
@@ -1613,6 +1615,8 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case msg.Code == 't' && ctrl:
 		m.ctrlCPending = false
 		m.showDrawer = !m.showDrawer
+		// Reset scroll position when toggling drawer to avoid jumpy viewport
+		m.scrollOffset = 0
 		return m, nil
 
 	// ── Newline (Alt+Enter / Shift+Enter / Ctrl+J) ──
@@ -3686,6 +3690,9 @@ func formatToolMetaRaw(tg toolGroup) string {
 
 // renderDrawer renders the right-side drawer with Progress, Tools, and Skills sections.
 func (m tuiModel) renderDrawer(width int) string {
+	if m.planTracker == nil {
+		return ""
+	}
 	if width < 20 {
 		width = 20
 	}
@@ -3775,7 +3782,13 @@ func (m tuiModel) renderDrawer(width int) string {
 		b.WriteString(dimStyle.Render("  No skills used"))
 		b.WriteString("\n")
 	} else {
-		for _, s := range m.drawerSkills {
+		// Cap display to last 10 entries to avoid pushing other sections off-screen
+		skills := m.drawerSkills
+		maxShow := 10
+		if len(skills) > maxShow {
+			skills = skills[len(skills)-maxShow:]
+		}
+		for _, s := range skills {
 			b.WriteString(fmt.Sprintf("  %s %s\n", dimStyle.Render(s.at.Format("15:04")), textStyle.Render(s.name)))
 		}
 	}
@@ -3797,9 +3810,12 @@ func truncateToWidth(s string, maxWidth int) string {
 	var b strings.Builder
 	curW := 0
 	inEsc := false
+	hadEsc := false
+	ellipsisW := lipgloss.Width("…")
 	for _, r := range s {
 		if r == '\x1b' {
 			inEsc = true
+			hadEsc = true
 			b.WriteRune(r)
 			continue
 		}
@@ -3811,12 +3827,16 @@ func truncateToWidth(s string, maxWidth int) string {
 			continue
 		}
 		rW := lipgloss.Width(string(r))
-		if curW+rW > maxWidth-1 {
+		if curW+rW > maxWidth-ellipsisW {
 			b.WriteString("…")
 			break
 		}
 		b.WriteRune(r)
 		curW += rW
+	}
+	// Close any open ANSI escape sequences to prevent color bleed
+	if hadEsc {
+		b.WriteString("\x1b[0m")
 	}
 	return b.String()
 }

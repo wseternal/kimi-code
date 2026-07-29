@@ -225,7 +225,10 @@ func (m *Manager) Stop(taskID, reason string) (*TaskInfo, error) {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
 
-	if task.info.Status.IsTerminal() {
+	m.mu.RLock()
+	alreadyTerminal := task.info.Status.IsTerminal()
+	m.mu.RUnlock()
+	if alreadyTerminal {
 		info := task.info
 		return &info, nil
 	}

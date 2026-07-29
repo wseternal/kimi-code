@@ -61,6 +61,16 @@ func (t *UpdatePlanTool) Execute(_ context.Context, input json.RawMessage, _ Exe
 		default:
 			req.Tasks[i].Status = plan.StatusPending
 		}
+		// Clamp title length to prevent excessive data
+		if len([]rune(req.Tasks[i].Title)) > 200 {
+			req.Tasks[i].Title = string([]rune(req.Tasks[i].Title)[:200])
+		}
+	}
+
+	// Cap task count to prevent unbounded storage
+	const maxTasks = 50
+	if len(req.Tasks) > maxTasks {
+		req.Tasks = req.Tasks[:maxTasks]
 	}
 
 	t.Tracker.SetTasks(req.Tasks)
