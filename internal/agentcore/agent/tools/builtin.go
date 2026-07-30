@@ -545,6 +545,8 @@ func RegisterDefaultTools(registry *Registry) {
 	registry.Register(NewEditTool())
 	registry.Register(NewTodoListTool())
 	registry.Register(NewFetchURLTool())
+	registry.Register(NewReadMediaTool())
+	registry.Register(NewAskUserTool(nil))
 }
 
 func resolvePath(path, workDir string) string {

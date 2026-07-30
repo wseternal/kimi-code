@@ -68,16 +68,16 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/agent/permission/` — runtime mode switching (manual/yolo/auto), parent delegation
 - **Description**: Three permission modes: manual (ask for everything), yolo (approve everything), auto (approve safe operations, ask for risky). Supports parent delegation for nested agents.
-- **Go Status**: Basic permission chain exists, no mode switching.
-- **Files Affected**: `internal/agentcore/agent/permission/`
+- **Go Status**: Implemented in Cycle 4. ModeManager with manual/yolo/auto modes, runtime switching, chain rebuilding, onChange callback. AutoChain with safe tool approval.
+- **Files Affected**: `internal/agentcore/agent/permission/mode.go` (NEW)
 
 ### Gap #30: Comprehensive Policy Set (14 Policies)
 - **Cycle**: 4
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/agent/permission/policies/` — 14 policy implementations
 - **Description**: 14 permission policies: file-access-ask, yolo-mode-approve, auto-mode-approve, user-configured-rules, plan-mode-guard-deny, exit-plan-mode-review-ask, goal-start-review-ask, default-tool-approve, deny-all, git-cwd-write-approve, auto-mode-ask-user-question-deny, agent-swarm-exclusive-deny, fallback-ask.
-- **Go Status**: Has 8 policies. Missing: file-access-ask, yolo-mode, plan-mode-guard, user-configured-rules, exit-plan-mode-review, goal-start-review, auto-mode-ask-user-question-deny, agent-swarm-exclusive-deny.
-- **Files Affected**: `internal/agentcore/agent/permission/`
+- **Go Status**: Implemented in Cycle 4. Added: FileAccessAskPolicy, PlanModeGuardPolicy, UserConfiguredRulesPolicy, ExitPlanModeReviewPolicy, GoalStartReviewPolicy, AutoModeAskUserQuestionDenyPolicy, AgentSwarmExclusiveDenyPolicy, GitCWDWriteApprovePolicy, DefaultToolApprovePolicy, SafeToolApprovePolicy.
+- **Files Affected**: `internal/agentcore/agent/permission/policies.go` (NEW)
 
 ### Gap #33: AgentSwarm Tool + Subagent Infrastructure
 - **Cycle**: 7 (Advanced Agent)
@@ -552,14 +552,16 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/tools/builtin/planning/`
 - **Description**: EnterPlanMode and ExitPlanMode tools for plan-mode workflow.
-- **Go Status**: Not present.
+- **Go Status**: Implemented in Cycle 4. PlanModeController with EnterPlanMode and ExitPlanMode tools, integrates with PlanModeInjector.
+- **Files Affected**: `internal/agentcore/agent/tools/plan_mode.go` (NEW)
 
 ### Gap #32: AskUser Tool
 - **Cycle**: 4
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/tools/builtin/collaboration/ask-user.ts`
 - **Description**: Structured user questions with options, multi-select.
-- **Go Status**: Not present.
+- **Go Status**: Implemented in Cycle 4. AskUserTool with options, multi-select, free-text, and pluggable AskUserHandler.
+- **Files Affected**: `internal/agentcore/agent/tools/ask_user.go` (NEW)
 
 ### Gap #38: select_tools (Progressive Disclosure)
 - **Cycle**: 7
@@ -580,14 +582,16 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/agent/`
 - **Description**: Truncates oversized tool results to fit within context budget.
-- **Go Status**: Not present.
+- **Go Status**: Implemented in Cycle 4. ResultBudget with MaxChars/MaxLines, head+tail truncation, TruncateResult helper.
+- **Files Affected**: `internal/agentcore/agent/tools/budget.go` (NEW)
 
 ### Gap #41: ReadMedia Tool
 - **Cycle**: 4
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/tools/builtin/file/read-media.ts`
 - **Description**: Read image/video/audio files as content parts.
-- **Go Status**: Not present.
+- **Go Status**: Implemented in Cycle 4. ReadMediaTool with MIME detection, base64 encoding, 10MB limit, image/video/audio support.
+- **Files Affected**: `internal/agentcore/agent/tools/read_media.go` (NEW)
 
 ---
 
