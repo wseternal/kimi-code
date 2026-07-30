@@ -415,35 +415,40 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Critical
 - **TS Source**: `packages/protocol/src/events.ts`
 - **Description**: ~50 strongly typed event interfaces with Zod schemas: turn.started, tool.call.delta, compaction.completed, etc. Each event has a typed payload.
-- **Go Status**: 17 string constants + `json.RawMessage` payload.
+- **Go Status**: **IMPLEMENTED** in Cycle 5. Typed event payloads for all major event types: session, turn, step, streaming, tool calls, approval/question, tasks, goals, config, prompts, errors, compaction, phase changes.
+- **Files Affected**: `internal/protocol/typed_events.go` (NEW)
 
 ### Gap #24: PromptOrigin Discriminated Union
 - **Cycle**: 5
 - **Severity**: Critical
 - **TS Source**: `packages/protocol/src/events.ts`
 - **Description**: 13 variants tagging each prompt with its origin: user, skill_activation, plugin_command, injection, shell_command, etc.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 5. PromptOrigin with 13 variants and context fields.
+- **Files Affected**: `internal/protocol/prompt_origin.go` (NEW)
 
 ### Gap #25: AgentPhase State Machine
 - **Cycle**: 5
 - **Severity**: Critical
 - **TS Source**: `packages/protocol/src/events.ts`
 - **Description**: 8 phases: idle, running, streaming, tool_call, retrying, awaiting_approval, interrupted, ended.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 5. AgentPhase with 8 phases, IsTerminal/IsActive helpers, PhaseTransition.
+- **Files Affected**: `internal/protocol/phase.go` (NEW)
 
 ### Gap #26: Approval/Question Wire Types
 - **Cycle**: 5
 - **Severity**: Critical
 - **TS Source**: `packages/protocol/src/approval.ts`, `question.ts`
 - **Description**: ApprovalRequest/Response with diff preview, QuestionRequest/Response with options, multi-select, other text.
-- **Go Status**: Not present in protocol package.
+- **Go Status**: **IMPLEMENTED** in Cycle 5. Full ApprovalRequest/Response and QuestionRequest/Response with lifecycle states.
+- **Files Affected**: `internal/protocol/approval.go` (NEW)
 
 ### Gap #27: REST Endpoint Contract (21 Definitions)
 - **Cycle**: 5
 - **Severity**: Critical
 - **TS Source**: `packages/protocol/src/rest/` — 21 files
 - **Description**: Complete REST API contract definitions for all daemon endpoints.
-- **Go Status**: Only 2 (`rest/message.go`, `rest/session.go`).
+- **Go Status**: **IMPLEMENTED** in Cycle 5. Full REST contract with 21+ endpoint types including config, prompts, approvals, questions, tools, tasks, terminals, snapshot, skills, workspaces, search, export, meta, OAuth, files, model catalog, connections, shutdown, transcript.
+- **Files Affected**: `internal/protocol/rest/endpoints.go` (NEW)
 
 ### Gap #63: SSHKaos — Remote Execution
 - **Cycle**: 8
@@ -506,21 +511,24 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/protocol/src/events.ts`
 - **Description**: Typed semantic error codes (e.g., `session.fork_active_turn`, `provider.rate_limit`).
-- **Go Status**: Integer error codes only.
+- **Go Status**: **IMPLEMENTED** in Cycle 5. KimiErrorCode string enum with 30+ semantic codes, IsRetryable() helper.
+- **Files Affected**: `internal/protocol/errors.go` (MODIFIED)
 
 ### Gap #72: KimiErrorPayload
 - **Cycle**: 5
 - **Severity**: Important
 - **TS Source**: `packages/protocol/src/events.ts`
 - **Description**: Structured wire error with retryable flag and causal chain.
-- **Go Status**: `APIError` with code+message only.
+- **Go Status**: **IMPLEMENTED** in Cycle 5. KimiErrorPayload with code, message, retryable, status_code, request_id, cause chain.
+- **Files Affected**: `internal/protocol/errors.go` (MODIFIED)
 
 ### Gap #73: ToolInputDisplay/ToolResultDisplay (12 Variants Each)
 - **Cycle**: 5
 - **Severity**: Important
 - **TS Source**: `packages/protocol/src/display.ts`
 - **Description**: Discriminated unions for rich TUI rendering of tool calls/results.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 5. ToolInputDisplay and ToolResultDisplay with 12 variants each.
+- **Files Affected**: `internal/protocol/display.go` (NEW)
 
 ### Gap #74: FS Browsing/Search/Git-Status Types
 - **Cycle**: 8

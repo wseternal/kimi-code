@@ -185,3 +185,98 @@ func (e *APIError) Error() string {
 func NewAPIError(code int, message string) *APIError {
 	return &APIError{Code: code, Message: message}
 }
+
+// KimiErrorCode is a typed semantic error code string.
+// Maps to the TS string enum of ~75 codes.
+type KimiErrorCode string
+
+const (
+	// Session errors
+	KimiErrSessionNotFound      KimiErrorCode = "session.not_found"
+	KimiErrSessionBusy          KimiErrorCode = "session.busy"
+	KimiErrSessionForkActiveTurn KimiErrorCode = "session.fork_active_turn"
+	KimiErrSessionUndoUnavailable KimiErrorCode = "session.undo_unavailable"
+
+	// Provider errors
+	KimiErrProviderRateLimit    KimiErrorCode = "provider.rate_limit"
+	KimiErrProviderQuota        KimiErrorCode = "provider.quota_exhausted"
+	KimiErrProviderTimeout      KimiErrorCode = "provider.timeout"
+	KimiErrProviderConnection   KimiErrorCode = "provider.connection"
+	KimiErrProviderContextOverflow KimiErrorCode = "provider.context_overflow"
+	KimiErrProviderEmptyResponse KimiErrorCode = "provider.empty_response"
+	KimiErrProviderFiltered     KimiErrorCode = "provider.filtered"
+	KimiErrProviderBadRequest   KimiErrorCode = "provider.bad_request"
+
+	// Auth errors
+	KimiErrAuthTokenMissing     KimiErrorCode = "auth.token_missing"
+	KimiErrAuthTokenUnauthorized KimiErrorCode = "auth.token_unauthorized"
+	KimiErrAuthProvisioning     KimiErrorCode = "auth.provisioning_required"
+	KimiErrAuthModelNotResolved KimiErrorCode = "auth.model_not_resolved"
+
+	// Goal errors
+	KimiErrGoalAlreadyExists    KimiErrorCode = "goal.already_exists"
+	KimiErrGoalNotFound         KimiErrorCode = "goal.not_found"
+	KimiErrGoalStatusInvalid    KimiErrorCode = "goal.status_invalid"
+	KimiErrGoalBudgetExhausted  KimiErrorCode = "goal.budget_exhausted"
+
+	// Tool errors
+	KimiErrToolExecutionFailed  KimiErrorCode = "tool.execution_failed"
+	KimiErrToolNotAvailable     KimiErrorCode = "tool.not_available"
+	KimiErrToolPermissionDenied KimiErrorCode = "tool.permission_denied"
+
+	// Compaction errors
+	KimiErrCompactionUnable     KimiErrorCode = "compaction.unable"
+	KimiErrCompactionOverflow   KimiErrorCode = "compaction.overflow"
+
+	// Validation errors
+	KimiErrValidationFailed     KimiErrorCode = "validation.failed"
+	KimiErrRequestMalformed     KimiErrorCode = "request.malformed"
+
+	// Internal errors
+	KimiErrInternal             KimiErrorCode = "internal.error"
+	KimiErrPersistenceFailure   KimiErrorCode = "persistence.failure"
+)
+
+// IsRetryable reports whether the error is typically retryable.
+func (c KimiErrorCode) IsRetryable() bool {
+	switch c {
+	case KimiErrProviderRateLimit, KimiErrProviderTimeout,
+		KimiErrProviderConnection, KimiErrProviderEmptyResponse:
+		return true
+	}
+	return false
+}
+
+// KimiErrorPayload is the structured wire error format.
+type KimiErrorPayload struct {
+	Code       KimiErrorCode `json:"code"`
+	Message    string        `json:"message"`
+	Retryable  bool          `json:"retryable,omitempty"`
+	StatusCode int           `json:"status_code,omitempty"`
+	RequestID  string        `json:"request_id,omitempty"`
+	Cause      *KimiErrorPayload `json:"cause,omitempty"`
+}
+
+// NewKimiError creates a KimiErrorPayload.
+func NewKimiError(code KimiErrorCode, message string) *KimiErrorPayload {
+	return &KimiErrorPayload{
+		Code:      code,
+		Message:   message,
+		Retryable: code.IsRetryable(),
+	}
+}
+
+// WithCause attaches a causal error chain.
+func (e *KimiErrorPayload) WithCause(cause *KimiErrorPayload) *KimiErrorPayload {
+	e.Cause = cause
+	return e
+}
+
+// ErrorChain returns the full causal chain as a slice.
+func (e *KimiErrorPayload) ErrorChain() []*KimiErrorPayload {
+	chain := []*KimiErrorPayload{e}
+	for c := e.Cause; c != nil; c = c.Cause {
+		chain = append(chain, c)
+	}
+	return chain
+}

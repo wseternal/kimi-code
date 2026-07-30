@@ -11,7 +11,7 @@ Organized into 8 prioritized cycles based on dependency order and impact.
 | 2 | Core Agent Loop | #1, #2, #4, #5, #6, #7 | **Done** |
 | 3 | Provider Adapters | #8, #9, #10, #42, #44, #45, #46 | **Done** |
 | 4 | Permission & Safety | #29, #30, #31, #32, #40, #41 | **Done** |
-| 5 | Protocol & Events | #23-#27, #71-#73 | Pending |
+| 5 | Protocol & Events | #23-#27, #71-#73 | **Done** |
 | 6 | Server & Klient | #19-#22, #59-#61 | Pending |
 | 7 | Advanced Agent | #33-#39 | Pending |
 | 8 | TUI & Polish | #15-#18, #50-#58, #70, #77-#91 | Pending |
