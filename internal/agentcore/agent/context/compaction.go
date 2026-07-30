@@ -127,7 +127,7 @@ func (c *Compactor) Run(
 	// Build old conversation text for the summarizer
 	var oldConversation strings.Builder
 	for i, t := range oldTurns {
-		oldConversation.WriteString(fmt.Sprintf("[Turn %d]\nUser: %s\nAssistant: %s\n\n", i+1, t.user, t.assistant))
+		fmt.Fprintf(&oldConversation, "[Turn %d]\nUser: %s\nAssistant: %s\n\n", i+1, t.user, t.assistant)
 	}
 
 	// Build the summarizer prompt
@@ -172,7 +172,7 @@ func (c *Compactor) Run(
 			oldTurns = oldTurns[1:]
 			oldConversation.Reset()
 			for i, t := range oldTurns {
-				oldConversation.WriteString(fmt.Sprintf("[Turn %d]\nUser: %s\nAssistant: %s\n\n", i+1, t.user, t.assistant))
+				fmt.Fprintf(&oldConversation, "[Turn %d]\nUser: %s\nAssistant: %s\n\n", i+1, t.user, t.assistant)
 			}
 			summarizerMessages[0] = CompactMessage{
 				Role:    "user",
