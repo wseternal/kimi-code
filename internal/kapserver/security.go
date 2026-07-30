@@ -55,10 +55,10 @@ func (m *SecurityMiddleware) Wrap(next http.Handler) http.Handler {
 				return
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
 		} else {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 		}
+		w.Header().Set("Vary", "Origin")
 
 		// Host header validation for non-loopback
 		if !m.isLoopback {

@@ -340,9 +340,12 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 			return
 		}
 
-		// Apply compacted messages if auto-compaction was triggered
+		// Apply compacted messages if auto-compaction was triggered.
+		// Reset turnStartIdx so the deferred persist uses the compacted
+		// history as the new base instead of the original (now-replaced) one.
 		if result.CompactedMessages != nil {
 			messages = result.CompactedMessages
+			turnStartIdx = len(messages)
 		}
 
 		// Add assistant message to history
@@ -513,6 +516,7 @@ func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message
 			compacted, compactErr := s.runCompaction(currentMessages)
 			if compactErr == nil {
 				currentMessages = compacted
+				compactedMessages = compacted
 				result, err = kosong.GenerateCall(turn.ctx, s.provider, "", kosongTools, currentMessages, callbacks, nil)
 				if err != nil {
 					return nil, err

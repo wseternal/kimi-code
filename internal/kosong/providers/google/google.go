@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync/atomic"
 
 	"github.com/visdomtech/kimi-code/internal/kosong"
 	"github.com/visdomtech/kimi-code/internal/trace"
@@ -310,7 +309,7 @@ func (p *Provider) consumeSSEStream(
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var finishEmitted bool
-	var callSeq atomic.Int64
+	var callSeq int64
 
 	for scanner.Scan() {
 		select {
@@ -376,7 +375,8 @@ func (p *Provider) consumeSSEStream(
 					fc := part.FunctionCall
 					argsJSON, _ := json.Marshal(fc.Args)
 					argsStr := string(argsJSON)
-					seq := callSeq.Add(1)
+					seq := callSeq + 1
+					callSeq = seq
 					select {
 					case partsCh <- kosong.StreamedMessagePart{
 						Type:      "function",

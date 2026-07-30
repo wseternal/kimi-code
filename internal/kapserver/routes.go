@@ -2,7 +2,6 @@ package kapserver
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
 	"time"
 
@@ -228,11 +227,7 @@ func (s *Server) handleArchiveSession(w http.ResponseWriter, r *http.Request) {
 // handleShutdown initiates server shutdown.
 // Restricted to loopback connections only to prevent unauthorized remote shutdown.
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	if !isLoopbackAddress(host) {
+	if !isLoopbackAddress(remoteIP(r)) {
 		respondError(w, http.StatusForbidden, protocol.ErrorCodeAuthTokenUnauthorized,
 			"shutdown is only allowed from loopback connections")
 		return

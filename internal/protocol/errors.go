@@ -117,6 +117,7 @@ var errorCodeReason = map[int]string{
 	ErrorCodeTerminalNotFound:         "terminal.not_found",
 	ErrorCodeSkillNotFound:            "skill.not_found",
 	ErrorCodeToolCallNotFound:         "tool_call.not_found",
+	ErrorCodeSessionExists:            "session.exists",
 	ErrorCodeSessionBusy:              "session.busy",
 	ErrorCodeApprovalAlreadyResolved:  "approval.already_resolved",
 	ErrorCodePromptAlreadyCompleted:   "prompt.already_completed",
