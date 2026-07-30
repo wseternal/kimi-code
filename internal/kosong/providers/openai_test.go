@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -396,8 +397,12 @@ func TestAPIErrorResponse(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 401 response")
 	}
-	if !strings.Contains(err.Error(), "401") {
-		t.Errorf("error should contain status code, got: %v", err)
+	var statusErr *kosong.APIStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("expected APIStatusError, got %T: %v", err, err)
+	}
+	if statusErr.StatusCode != 401 {
+		t.Errorf("expected status 401, got %d", statusErr.StatusCode)
 	}
 }
 

@@ -355,7 +355,7 @@ func (p *OpenAIProvider) Generate(
 				opts.OnRawResponse(f.Name())
 			}
 		}
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, kosong.ClassifyBaseAPIError(fmt.Sprintf("request failed: %s", err))
 	}
 
 	if trace.Enabled() {
@@ -378,7 +378,20 @@ func (p *OpenAIProvider) Generate(
 				opts.OnRawResponse(f.Name())
 			}
 		}
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		// Extract metadata from response headers for structured error
+		var requestID *string
+		if rid := resp.Header.Get("X-Request-Id"); rid != "" {
+			requestID = &rid
+		}
+		var retryAfterMs *int64
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			retryAfterMs = kosong.ParseRetryAfterMs(ra)
+		}
+		var traceID *string
+		if tid := resp.Header.Get("X-Trace-Id"); tid != "" {
+			traceID = &tid
+		}
+		return nil, kosong.NormalizeAPIStatusError(resp.StatusCode, string(body), requestID, retryAfterMs, traceID)
 	}
 
 	// Extract trace ID from headers
