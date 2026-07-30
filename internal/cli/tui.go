@@ -265,8 +265,8 @@ type tuiModel struct {
 	pendingApproval *permission.ApprovalRequest
 
 	// Cycle 5: Mid-turn interaction
-	cancelCh       chan struct{}
-	queuedMessages []string
+	cancelCh     chan struct{}
+	steeringTool *tools.SteeringTool
 
 	// Cycle 6: Context management
 	contextMgr       *agentctx.ContextManager
@@ -357,6 +357,10 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	planTrk := plan.NewTracker()
 	toolReg.Register(&tools.UpdatePlanTool{Tracker: planTrk})
 
+	// Steering tool for mid-turn user input (not registered in tool registry;
+	// the streaming loop invokes it directly at step boundaries).
+	steering := tools.NewSteeringTool()
+
 	// Register GoGraph tools and hooks when available (opt-out via experimental.gograph=false)
 	if app.Config.Experimental["gograph"] != false && tools.IsGoGraphAvailable() {
 		runner := tools.NewGoGraphRunner()
@@ -410,6 +414,7 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 		inputHistory:   inputHist,
 		auditWriter:    app.AuditWriter,
 		planTracker:    planTrk,
+		steeringTool:   steering,
 		drawerWidthPct: 35,
 	}
 }
@@ -1164,6 +1169,22 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 				}
 				m.history = append(m.history, kosong.CreateToolMessage(tc.ID, result.Output))
 			}
+
+			// Check for steering messages between steps.
+			// DrainAll is atomic (single lock acquisition) and returns nil if empty.
+			if m.steeringTool != nil {
+				if m.steeringTool.ConsumeSignal() || m.steeringTool.HasMessages() {
+					msgs := m.steeringTool.DrainAll()
+					if len(msgs) > 0 {
+						result := m.steeringTool.FormatMessages(msgs)
+						ch <- streamEvent{kind: "tool_start", toolName: "Steering", toolArgs: ""}
+						ch <- streamEvent{kind: "tool_result", toolName: "Steering", toolOut: result}
+						// Inject as user message to satisfy LLM provider API contracts
+						// (tool messages must correspond to assistant-initiated tool calls)
+						m.history = append(m.history, kosong.CreateUserMessage("[Steering] "+result))
+					}
+				}
+			}
 		}
 
 		ch <- streamEvent{kind: "done"}
@@ -1547,23 +1568,29 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.btwMode = false
 			}
 
-			// Drain queued messages (Cycle 5: mid-turn interaction)
-			if len(m.queuedMessages) > 0 {
-				nextPrompt := strings.Join(m.queuedMessages, "\n")
-				m.queuedMessages = nil
-				m.messages = append(m.messages, chatMessage{"user", nextPrompt})
-				m.turnCount++
-				m.streaming = true
-				m.streamThinking = ""
-				m.streamResponse = ""
-				m.mdBuffer = MarkdownBuffer{}
-				m.streamToolGroups = nil
-				m.streamStep = 0
-				m.turnStartTime = time.Now()
-				m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
-				m.cancelCh = make(chan struct{})
-				m.rebuildCollapsibles()
-				return m, m.runLLMStream(nextPrompt)
+			// Drain queued steering messages for auto-pickup (single atomic drain)
+			if m.steeringTool != nil {
+				msgs := m.steeringTool.DrainAll()
+				if len(msgs) > 0 {
+					parts := make([]string, len(msgs))
+					for i, sm := range msgs {
+						parts[i] = sm.Content
+					}
+					nextPrompt := strings.Join(parts, "\n")
+					m.messages = append(m.messages, chatMessage{"user", nextPrompt})
+					m.turnCount++
+					m.streaming = true
+					m.streamThinking = ""
+					m.streamResponse = ""
+					m.mdBuffer = MarkdownBuffer{}
+					m.streamToolGroups = nil
+					m.streamStep = 0
+					m.turnStartTime = time.Now()
+					m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
+					m.cancelCh = make(chan struct{})
+					m.rebuildCollapsibles()
+					return m, m.runLLMStream(nextPrompt)
+				}
 			}
 
 			return m, nil
@@ -1573,60 +1600,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if m.quitting {
 			return m, nil
-		}
-		if m.streaming {
-			m.clampCursor() // guard against stale cursor after input clear
-			// Allow collapse navigation during streaming
-			switch {
-			case msg.Code == 'c' && msg.Mod&tea.ModCtrl != 0: // ctrl+c
-				m.quitting = true
-				return m, tea.Quit
-			case msg.Code == 't' && msg.Mod&tea.ModCtrl != 0: // ctrl+t
-				// Toggle drawer even while streaming
-				m.showDrawer = !m.showDrawer
-				m.scrollOffset = 0
-				return m, nil
-			case msg.Code == tea.KeyEscape:
-				// Cancel the current stream
-				if m.cancelCh != nil {
-					select {
-					case <-m.cancelCh:
-					default:
-						close(m.cancelCh)
-					}
-				}
-				if m.auditWriter != nil {
-					m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserCancel})
-				}
-				return m, nil
-			case msg.Code == tea.KeyTab:
-				m.toggleFocusedCollapse()
-				return m, nil
-			case msg.Code == tea.KeyEnter:
-				m.toggleFocusedCollapse()
-				return m, nil
-			case msg.Code == tea.KeyUp:
-				if m.focusIndex > 0 {
-					m.focusIndex--
-				}
-				return m, nil
-			case msg.Code == tea.KeyDown:
-				if m.focusIndex < len(m.collapsibles)-1 {
-					m.focusIndex++
-				}
-				return m, nil
-			default:
-				// Queue printable text during streaming
-				if msg.Text != "" {
-					for _, r := range msg.Text {
-						runes := []rune(m.input)
-						runes = append(runes[:m.cursor], append([]rune{r}, runes[m.cursor:]...)...)
-						m.input = string(runes)
-						m.cursor++
-					}
-				}
-				return m, nil
-			}
 		}
 		if m.showSessionPicker {
 			return m.handleSessionPickerKey(msg)
@@ -1869,7 +1842,40 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// ── Steering signal (Ctrl+S) ──
+	case msg.Code == 's' && ctrl:
+		m.ctrlCPending = false
+		if m.streaming && m.steeringTool != nil && m.steeringTool.Len() > 0 {
+			m.steeringTool.Signal()
+			m.messages = append(m.messages, chatMessage{"system",
+				"⚡ Steering signal sent — agent will pick up at next breakpoint"})
+		}
+		return m, nil
+
+	// ── Escape ──
 	case msg.Code == tea.KeyEscape:
+		if m.streaming {
+			// Cancel the current stream
+			if m.cancelCh != nil {
+				select {
+				case <-m.cancelCh:
+				default:
+					close(m.cancelCh)
+				}
+			}
+			// Clear steering queue on cancel — user explicitly stopped
+			if m.steeringTool != nil {
+				discarded := m.steeringTool.DrainAll()
+				if len(discarded) > 0 {
+					m.messages = append(m.messages, chatMessage{"system",
+						fmt.Sprintf("🗑️ %d queued steering message(s) discarded", len(discarded))})
+				}
+			}
+			if m.auditWriter != nil {
+				m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserCancel})
+			}
+			return m, nil
+		}
 		m.showSuggestions = false
 		return m, nil
 
@@ -3220,6 +3226,24 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	default:
+		// If streaming, queue the message instead of starting a new turn
+		if m.streaming {
+			if m.steeringTool != nil {
+				m.steeringTool.Enqueue(input)
+			}
+			m.messages = append(m.messages, chatMessage{"user", input})
+			qLen := 0
+			if m.steeringTool != nil {
+				qLen = m.steeringTool.Len()
+			}
+			m.messages = append(m.messages, chatMessage{"system",
+				fmt.Sprintf("📨 Queued (%d pending, Ctrl+S to steer agent)", qLen)})
+			m.input = ""
+			m.cursor = 0
+			m.showSuggestions = false
+			return m, nil
+		}
+
 		// Regular prompt — route through LLM provider
 		m.activeSkill = nil // clear active skill on regular user input
 		// Reset per-turn compaction counter for the new turn
@@ -3714,7 +3738,13 @@ func (m tuiModel) renderInput() string {
 		style = inputBorderStyle
 	}
 
-	return style.Width(boxW).Render(prompt + inputWithCursor)
+	// Queue indicator when streaming with pending messages
+	var queueHint string
+	if m.streaming && m.steeringTool != nil && m.steeringTool.Len() > 0 {
+		queueHint = mutedStyle.Render(fmt.Sprintf(" [%d queued, Ctrl+S to steer] ", m.steeringTool.Len()))
+	}
+
+	return style.Width(boxW).Render(queueHint + prompt + inputWithCursor)
 }
 
 // ── Streaming render functions ──
