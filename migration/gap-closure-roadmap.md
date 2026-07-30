@@ -13,7 +13,7 @@ Organized into 8 prioritized cycles based on dependency order and impact.
 | 4 | Permission & Safety | #29, #30, #31, #32, #40, #41 | **Done** |
 | 5 | Protocol & Events | #23-#27, #71-#73 | **Done** |
 | 6 | Server & Klient | #19-#22, #59-#61 | **Done** |
-| 7 | Advanced Agent | #33-#39 | Pending |
+| 7 | Advanced Agent | #33-#39 | **Done** |
 | 8 | TUI & Polish | #15-#18, #50-#58, #70, #77-#91 | Pending |
 
 ## Dependency Graph

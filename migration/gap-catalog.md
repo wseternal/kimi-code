@@ -84,7 +84,7 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/tools/builtin/collaboration/agent-swarm.ts`, `agent.ts` + `session/subagent-*.ts`
 - **Description**: Spawn and manage sub-agents: AgentSwarm tool for batch spawning, Agent tool for individual sub-agent lifecycle, subagent-host for lifecycle management, subagent-binding for workspace sharing.
-- **Go Status**: Not present. Has basic swarm flag in CLI but no implementation.
+- **Go Status**: Implemented — `internal/agentcore/agent/swarm/swarm.go` with Roster (spawn/abort/list/complete/fail), SubagentConfig/SubagentResult types, AgentSwarmTool for batch spawning (max 10), goroutine-based agent execution with context cancellation.
 - **Files Affected**: `internal/agentcore/agent/swarm/`, new tools
 
 ### Gap #34: Background Task Persistence + Reconciliation
@@ -92,7 +92,7 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/agent/background/persist.ts`
 - **Description**: Persist background task state to disk. On startup, reconcile persisted tasks with running processes to detect lost tasks.
-- **Go Status**: Background manager is in-memory only. Lost on restart.
+- **Go Status**: Implemented — `internal/agentcore/agent/background/persist.go` with Persistence (save/load/clear), Reconcile (detect lost tasks via PID check), SaveSnapshot/LoadAndReconcile helpers.
 - **Files Affected**: `internal/agentcore/agent/background/manager.go`
 
 ### Gap #35: Cron/Scheduling System
@@ -100,7 +100,7 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/tools/cron/` (12 files) — CronManager, scheduler, expression parser, persistence
 - **Description**: Full cron scheduling: parse cron expressions, manage scheduled tasks, persist to disk, fire at correct times, create/delete/list tools.
-- **Go Status**: Not present.
+- **Go Status**: Implemented — `internal/agentcore/agent/cron/cron.go` with CronManager (create/delete/toggle/tick), Store (JSON persistence), Schedule parser (5-field cron with ranges/steps/wildcards), Next() computation, fire callback.
 - **Files Affected**: New `internal/agentcore/agent/cron/` package, new tools
 
 ### Gap #36: SkillTool (Model-Invoked)
@@ -108,7 +108,7 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/tools/builtin/collaboration/skill-tool.ts`
 - **Description**: A tool the model can call to invoke skills. The model decides when a skill is needed and calls the SkillTool with the skill name.
-- **Go Status**: Not present — skills are CLI commands only.
+- **Go Status**: Implemented — `internal/agentcore/agent/tools/skill_tool.go` with SkillTool (model-invokable), dynamic skill list in description, skill body injection, SkillHandler callback.
 - **Files Affected**: New tool in `internal/agentcore/agent/tools/`
 
 ### Gap #37: Skill Manager Activation Flow
@@ -116,7 +116,7 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/skill/registry.ts`, `scanner.ts`
 - **Description**: Runtime skill activation: scan directories, parse SKILL.md frontmatter, register skills, emit activation events/telemetry.
-- **Go Status**: Basic skill discovery exists but no formal activation flow.
+- **Go Status**: Implemented — `internal/agentcore/agent/skill/activation.go` with ActivationManager (activate/history/count/refresh), ActivationEvent tracking, SkillSummary for system prompt injection.
 - **Files Affected**: `internal/agentcore/agent/skill/`
 
 ---
@@ -576,14 +576,14 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/tools/builtin/select-tools.ts`
 - **Description**: Progressive tool loading — model can request additional tools.
-- **Go Status**: Not present.
+- **Go Status**: Implemented — `internal/agentcore/agent/tools/dynamic.go` with SelectToolsTool (progressive group loading, factory pattern), DynamicRegistry (add/remove/versioning, diff computation, change callbacks).
 
 ### Gap #39: Dynamic Tools Support
 - **Cycle**: 7
 - **Severity**: Important
 - **TS Source**: `packages/agent-core/src/agent/context/dynamic-tools.ts`
 - **Description**: Progressive tool loading infrastructure — tools can be added mid-session.
-- **Go Status**: Not present.
+- **Go Status**: Implemented — `internal/agentcore/agent/tools/dynamic.go` DynamicRegistry with versioned tool changes, DiffSince for incremental updates, ToolChange records (add/remove/update), onChange callbacks.
 
 ### Gap #40: Tool Result Budgeting
 - **Cycle**: 4
