@@ -2536,14 +2536,8 @@ func firstUserPrompt(store *session.SessionStore, sessionID string) string {
 // character. Returns -1 if no valid trigger is found. When multiple triggers
 // exist, the leftmost one wins.
 func findSkillTrigger(input string) int {
-	if len(input) == 0 {
-		return -1
-	}
-	if input[0] == '$' {
-		return 0
-	}
-	for i := 1; i < len(input); i++ {
-		if input[i] == '$' && (input[i-1] == ' ' || input[i-1] == '\t' || input[i-1] == '\n') {
+	for i := 0; i < len(input); i++ {
+		if input[i] == '$' && (i == 0 || input[i-1] == ' ' || input[i-1] == '\t' || input[i-1] == '\n') {
 			return i
 		}
 	}
