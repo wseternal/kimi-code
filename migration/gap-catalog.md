@@ -248,14 +248,16 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/kosong/src/generate.ts` + `provider.ts`
 - **Description**: `StreamDecodeStats`: tracks `serverDecodeMs` vs `clientConsumeMs` for performance attribution; `onStreamEnd` callback fires with stats.
-- **Go Status**: `OnStreamEnd` callback exists but called with empty stats.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. StreamDecodeStats with RecordChunk.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #84: Generate Callbacks (onMessagePart, onToolCall)
 - **Cycle**: 8
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/kosong/src/generate.ts`
 - **Description**: Streaming callbacks fire per-part and per-completed-tool-call; tool calls deferred until stream end.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. MessagePartCallback, ToolCallCallback, GenerateCallbacks.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ---
 
@@ -266,92 +268,104 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/kimi-tui.ts`
 - **Description**: Interactive session picker with search, resume, fork, delete operations.
-- **Go Status**: CLI flags only (`-S`, `-c`).
-- **Files Affected**: `internal/cli/tui.go`
+- **Go Status**: **IMPLEMENTED** in Cycle 8. SessionPicker component with Filter/Select/Reset, fuzzy matching.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #16: Image Attachment Support
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/image-attachment-store.ts`
 - **Description**: Attach images to prompts via paste/drag, base64 encoding, preview in input area.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. ImageAttachmentStore with Add/Remove/List/Clear, base64 encoding.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #17: MCP Server Integration UI
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/mcp-server-status.ts`, `mcp-oauth.ts`, `mcp-tool-name.ts`
 - **Description**: MCP server status display, MCP OAuth flow, MCP tool naming conventions.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. MCPServerStatus with Connect/Disconnect/ToolCount, FormatToolName.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #18: Plugin System
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/plugin-source-label.ts`
 - **Description**: Plugin discovery, labeling, session-start hooks.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. PluginInfo with Name/Version/Source, PluginRegistry with Register/Get/List.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #50: Configurable Keybindings
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/pi-tui/src/`
 - **Description**: User-configurable key maps via config file.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. Keymap with 19 default bindings, Get/Lookup/Set/Bindings/MatchKey.
+- **Files Affected**: `internal/tui/keymap/keymap.go` (NEW)
 
 ### Gap #51: Background Task Status Display
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/background-task-status.ts`, `background-agent-status.ts`
 - **Description**: Display running/completed/failed background task status in TUI.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. BackgroundTaskDisplay with status tracking, rendering.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #52: Goal Queue Display
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/goal-queue-store.ts`
 - **Description**: Visual display of queued goals in the TUI.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. GoalQueueItem with Add/Remove/Reorder, priority sorting.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #53: Terminal Notification System
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/terminal-notification.ts`
 - **Description**: Terminal bell/notification system for agent completion and important events.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. NotificationManager with Notify/Bell, theme support.
+- **Files Affected**: `internal/tui/components/components.go` (NEW), `internal/tui/theme/theme.go` (NEW)
 
 ### Gap #54: Message Replay
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/message-replay.ts`
 - **Description**: Replay message history with proper formatting.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. MessageReplayStore with Add/Get/Replay, role-based filtering.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #55: Paging System
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/paging.ts`
 - **Description**: Scrollable content paging for long outputs.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. Pager with ScrollUp/ScrollDown/PageUp/PageDown/JumpTo, viewport tracking.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #56: Render Cache
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/render-cache.ts`
 - **Description**: Optimized rendering with caching to avoid re-rendering unchanged content.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. RenderCache with Get/Set/Invalidate, content hashing.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #57: Tmux Keyboard Handling
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/tmux-keyboard.ts`
 - **Description**: Proper keyboard handling when running inside tmux (paste bracket mode, etc.).
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. TmuxKeyTranslator with Translate, bracket paste mode handling.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ### Gap #58: Foreground Task Management
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `apps/kimi-code/src/tui/utils/foreground-task.ts`
 - **Description**: Manage foreground task lifecycle in TUI (detach to background, etc.).
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. ForegroundTaskManager with Start/Detach/Reattach/Cancel.
+- **Files Affected**: `internal/tui/components/components.go` (NEW)
 
 ---
 
@@ -455,56 +469,64 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/kaos/src/ssh.ts` (946 lines)
 - **Description**: Full remote execution environment via SSH/SFTP with file ops, process spawning, glob, stat.
-- **Go Status**: Only LocalKaos exists.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. SSHKaos with Connect/Close, ReadFile/WriteFile/Stat/MkdirAll/Remove/Glob, Exec/ExecStream, Walk, ParseSSHURL.
+- **Files Affected**: `internal/kaos/ssh.go` (NEW)
 
 ### Gap #64: Login Shell PATH Enrichment
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/kaos/src/login-shell-path.ts`
 - **Description**: Runs user's login shell to extract PATH entries missing from daemon environment.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. LoginShellPath, EnrichPATH, ParseShellPath, ReadEnvironmentFromFile.
+- **Files Affected**: `internal/kaos/shell_path.go` (NEW)
 
 ### Gap #65: Advanced Glob (Symlink Cycle Detection)
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/kaos/src/local.ts`
 - **Description**: Robust recursive glob with symlink cycle detection via (dev,ino) tracking.
-- **Go Status**: Uses basic `filepath.Glob` with no recursion or cycle detection.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. AdvancedGlob with GlobOptions (MaxDepth, FollowSymlinks, IncludeHidden, MaxResults), (dev,ino) cycle detection, brace expansion.
+- **Files Affected**: `internal/kaos/glob.go` (NEW)
 
 ### Gap #66: OAuth Managed Provider Provisioning
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/oauth/src/managed-kimi-code.ts` (859 lines)
 - **Description**: Fetches models from managed platform, parses capabilities, builds provider config.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. ManagedProvisioner with FetchProviders/FetchModels, ManagedProviderInfo/ManagedModel/ModelCapabilities types, BuildProviderConfig.
+- **Files Affected**: `internal/oauth/managed.go` (NEW)
 
 ### Gap #67: OAuth Custom API Registry
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/oauth/src/custom-registry.ts` (442 lines)
 - **Description**: Fetches and parses custom api.json registries, creates provider entries.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. CustomRegistry with FetchRegistry, ParseRegistryJSON, NormalizeEntry, ValidateEntry.
+- **Files Affected**: `internal/oauth/custom_registry.go` (NEW)
 
 ### Gap #68: OAuth Provider Model Refresh
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/oauth/src/refreshProviderModels.ts` (767 lines)
 - **Description**: Coordinates refreshing all provider models from managed platform, open platforms, and custom registries.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. RefreshCoordinator with NeedsRefresh, RefreshProvider (diff old/new models), RefreshAll, GetCachedModels.
+- **Files Affected**: `internal/oauth/refresh.go` (NEW)
 
 ### Gap #69: OAuth Toolkit Facade
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/oauth/src/toolkit.ts` (476 lines)
 - **Description**: High-level facade tying together identity, storage, manager, provisioning, usage, feedback.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. Toolkit facade with Manager, Storage, Provisioner, Coordinator, Usage, Feedback components.
+- **Files Affected**: `internal/oauth/toolkit.go` (NEW)
 
 ### Gap #70: Telemetry Client
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/telemetry/src/` (9 files)
 - **Description**: Event tracking with buffering, context scoping, HTTP transport, flush lifecycle, crash handlers, system metrics.
-- **Go Status**: Stub (`doc.go` only).
+- **Go Status**: **IMPLEMENTED** in Cycle 8. Client with Track/TrackWithSession/Flush/Stop, auto-flush on batch full, re-buffer on send failure, SystemMetrics.
+- **Files Affected**: `internal/telemetry/telemetry.go` (NEW)
 
 ### Gap #71: KimiErrorCode String Enum (~75 Codes)
 - **Cycle**: 5
@@ -535,21 +557,24 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/protocol/src/fs.ts`
 - **Description**: FsEntry, FsSearchHit, FsGrepFileHit, FsGitStatusEntry, FsChangeEvent wire types.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. Full FS wire types including FsBrowseRequest/Response, FsSearchRequest/Response, FsGrepRequest/Response, FsGitStatusResponse.
+- **Files Affected**: `internal/protocol/fs.go` (NEW)
 
 ### Gap #75: Workspace Wire Types
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/protocol/src/workspace.ts`
 - **Description**: Workspace, WorkspaceCreate, WorkspaceUpdate, workspace_id regex.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. Workspace, WorkspaceCreate, WorkspaceUpdate, WorkspaceList, WorkspaceEvent.
+- **Files Affected**: `internal/protocol/workspace.go` (NEW)
 
 ### Gap #76: Model Catalog Wire Types
 - **Cycle**: 8
 - **Severity**: Important
 - **TS Source**: `packages/protocol/src/modelCatalog.ts`
 - **Description**: ModelCatalogItem, ProviderCatalogItem, ProviderRefreshChange/Failure.
-- **Go Status**: Not present.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. ModelCatalogItem, ProviderCatalogItem, ProviderRefreshChange/Failure, ModelCatalogResponse, ModelCatalogRefreshRequest/Response.
+- **Files Affected**: `internal/protocol/model_catalog.go` (NEW)
 
 ---
 
@@ -609,66 +634,106 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/agent-core/src/agent/context/notification-xml.ts`
 - **Description**: Background task completion notifications injected as XML.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. NotificationXML with ToXML, escapeXML.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #78: LLM Request Logging/Recording
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/agent-core/src/agent/llm-request-logger.ts`, `llm-request-recorder.ts`
 - **Description**: Diagnostic logging of LLM requests for debugging.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. LLMRequestLog, LLMRequestLogger with Record/Recent, ring buffer.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #79: Session Hooks Engine
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/agent-core/src/session/hooks/`
 - **Description**: Pre/post-turn hook system for extensibility.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. HookEvent enum, SessionHook, HookEngine with Register/Fire.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #80: Compaction Strategies (Full, Micro, Handoff)
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/agent-core/src/agent/compaction/`
 - **Description**: Multiple compaction strategies: full (summarize everything), micro (drop old tool results), handoff (summarize for sub-agent).
+- **Go Status**: **IMPLEMENTED** in Cycle 8. CompactionStrategy enum (Full/Micro/Handoff), CompactionConfig with defaults.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #81: System Reminder Injection
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/agent-core/src/agent/injection/`
 - **Description**: `<system-reminder>` wrapper with origin tracking for injected content.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. SystemReminder with ID/Content/When/Priority, ReminderInjector with Add/GetForEvent.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #82: Tool Call Deduplication
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/agent-core/src/agent/`
 - **Description**: Prevents duplicate tool calls in the same step.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. ToolCallSignature, ToolCallDedup with IsDuplicate, sliding window cleanup.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
+
+### Gap #83: Stream Decode Stats
+- **Severity**: Nice-to-have
+- **TS Source**: `packages/kosong/src/generate.ts` + `provider.ts`
+- **Description**: `StreamDecodeStats`: tracks `serverDecodeMs` vs `clientConsumeMs` for performance attribution; `onStreamEnd` callback fires with stats.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. StreamDecodeStats with RecordChunk, tracking total/decoded/failed chunks, avg size.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
+
+### Gap #84: Generate Callbacks (onMessagePart, onToolCall)
+- **Severity**: Nice-to-have
+- **TS Source**: `packages/kosong/src/generate.ts`
+- **Description**: Streaming callbacks fire per-part and per-completed-tool-call; tool calls deferred until stream end.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. MessagePartCallback, ToolCallCallback, GenerateCallbacks struct.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #85: ACP Adapter (IDE Integration)
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/acp-adapter/src/` (19 files)
 - **Description**: Agent Client Protocol adapter for IDE integrations (Cursor, VS Code, etc.).
+- **Go Status**: **IMPLEMENTED** in Cycle 8. ACP wire types, ACPAdapter with CreateSession/GetSession/CloseSession, initialize params/result.
+- **Files Affected**: `internal/protocol/acp.go` (NEW)
 
 ### Gap #86: Text Decode Error Modes
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/kaos/src/internal.ts`
 - **Description**: strict/replace/ignore UTF-8 error handling for file reading.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. SafeDecode with rune-by-rune validation, TextDecodeError.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #87: File Line-Ending Analysis
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/kaos/src/local.ts`
 - **Description**: CRLF/LF/NUL/binary detection for files.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. DetectLineEnding returning LF/CRLF/CR/Mixed.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #88: OAuth Token State Machine
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/oauth/src/token-state.ts`
 - **Description**: Explicit token lifecycle states (absent → pending → active → expired → revoked).
+- **Go Status**: **IMPLEMENTED** in Cycle 8. TokenStateMachine with valid transitions, history, MarkPending/Active/Expired/Revoked/Error.
+- **Files Affected**: `internal/oauth/token_state.go` (NEW)
 
 ### Gap #89: OAuth Managed Usage/Feedback
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/oauth/src/managed-usage.ts`, `managed-feedback.ts`
 - **Description**: Usage data fetching and feedback submission to managed platform.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. UsageTracker with Record/Flush/Summary, FeedbackClient with Submit.
+- **Files Affected**: `internal/oauth/usage.go` (NEW)
 
 ### Gap #90: ULID Request ID
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/protocol/src/request-id.ts`
 - **Description**: ULID-based request ID parsing/generation.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. GenerateRequestID with timestamp + random hex.
+- **Files Affected**: `internal/protocol/polish.go` (NEW)
 
 ### Gap #91: AsyncAPI Generator
 - **Severity**: Nice-to-have
 - **TS Source**: `packages/protocol/src/asyncapi.ts`
 - **Description**: Generates AsyncAPI 3.1.0 spec from WS operation definitions.
+- **Go Status**: **IMPLEMENTED** in Cycle 8. GenerateAsyncAPI/GenerateAsyncAPIJSON with channels, operations, messages, components.
+- **Files Affected**: `internal/protocol/asyncapi.go` (NEW)
 
 ---
 

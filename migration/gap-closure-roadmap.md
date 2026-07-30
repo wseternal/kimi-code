@@ -14,7 +14,7 @@ Organized into 8 prioritized cycles based on dependency order and impact.
 | 5 | Protocol & Events | #23-#27, #71-#73 | **Done** |
 | 6 | Server & Klient | #19-#22, #59-#61 | **Done** |
 | 7 | Advanced Agent | #33-#39 | **Done** |
-| 8 | TUI & Polish | #15-#18, #50-#58, #70, #77-#91 | Pending |
+| 8 | TUI & Polish | #15-#18, #50-#58, #70, #77-#91 | **Done** |
 
 ## Dependency Graph
 
@@ -146,6 +146,7 @@ Cycle 1 (Foundation) ──→ Cycle 2 (Agent Loop) ──→ Cycle 3 (Providers
 **Goal**: Feature-complete TUI with remaining nice-to-have gaps.
 **Gaps**: #15-#18, #50-#58, #70, #77-#91
 **Files**: ~20
+**Status**: Done
 
 | Gap | Description | Priority |
 |-----|-------------|----------|
@@ -162,7 +163,17 @@ Cycle 1 (Foundation) ──→ Cycle 2 (Agent Loop) ──→ Cycle 3 (Providers
 | #56 | Render cache | Important |
 | #57 | Tmux keyboard handling | Important |
 | #58 | Foreground task management | Important |
+| #63 | SSHKaos remote execution | Important |
+| #64 | Login shell PATH enrichment | Important |
+| #65 | Advanced glob (symlink cycle detection) | Important |
+| #66 | OAuth managed provider provisioning | Important |
+| #67 | OAuth custom API registry | Important |
+| #68 | OAuth provider model refresh | Important |
+| #69 | OAuth toolkit facade | Important |
 | #70 | Telemetry client | Important |
+| #74 | FS browsing/search/git-status types | Important |
+| #75 | Workspace wire types | Important |
+| #76 | Model catalog wire types | Important |
 | #77 | Notification XML | Nice-to-have |
 | #78 | LLM request logging/recording | Nice-to-have |
 | #79 | Session hooks engine | Nice-to-have |
