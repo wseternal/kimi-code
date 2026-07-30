@@ -4062,11 +4062,17 @@ func (m tuiModel) renderThinkingBlock(thinking string, streaming bool, turnIndex
 		focusPrefix = primaryStyle.Render("❯ ")
 	}
 
+	// Available width for body text (accounting for 4-space indent).
+	bodyWidth := m.width - 4
+	if bodyWidth < 20 {
+		bodyWidth = 20
+	}
+
 	if streaming {
 		expanded := m.isSectionExpanded(turnIndex, "thinking")
 		if expanded {
 			header := focusPrefix + dimStyle.Render("▾ Thinking…")
-			display := thinking
+			display := wrapText(thinking, bodyWidth)
 			// Height-based cap: min(2000 chars, m.height/3 lines)
 			maxLines := m.height / 3
 			if maxLines < 5 {
@@ -4088,7 +4094,7 @@ func (m tuiModel) renderThinkingBlock(thinking string, streaming bool, turnIndex
 	expanded := m.isSectionExpanded(turnIndex, "thinking")
 	if expanded {
 		header := focusPrefix + dimStyle.Render("▾ Thought")
-		body := dimStyle.Render(indentText(thinking, "    "))
+		body := dimStyle.Render(indentText(wrapText(thinking, bodyWidth), "    "))
 		return header + "\n" + body
 	}
 
@@ -4174,6 +4180,50 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 		b.WriteString(mutedStyle.Render(" (Tab to expand)"))
 	}
 	return b.String()
+}
+
+// wrapText wraps text to fit within maxWidth characters per line.
+// Existing newlines are preserved, and long lines are broken at word
+// boundaries. Words longer than maxWidth are broken at the boundary.
+func wrapText(text string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return text
+	}
+	var result []string
+	for _, line := range strings.Split(text, "\n") {
+		if len(line) <= maxWidth {
+			result = append(result, line)
+			continue
+		}
+		// Break long lines at word boundaries.
+		var wrapped []string
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			result = append(result, "")
+			continue
+		}
+		current := words[0]
+		for _, word := range words[1:] {
+			if len(current)+1+len(word) <= maxWidth {
+				current += " " + word
+			} else {
+				wrapped = append(wrapped, current)
+				current = word
+			}
+		}
+		wrapped = append(wrapped, current)
+		// Handle words that are themselves longer than maxWidth.
+		var finalLines []string
+		for _, wl := range wrapped {
+			for len(wl) > maxWidth {
+				finalLines = append(finalLines, wl[:maxWidth])
+				wl = wl[maxWidth:]
+			}
+			finalLines = append(finalLines, wl)
+		}
+		result = append(result, finalLines...)
+	}
+	return strings.Join(result, "\n")
 }
 
 // indentText indents each line of text by the given prefix.
