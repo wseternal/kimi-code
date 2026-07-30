@@ -111,6 +111,36 @@ func TestHandleKey_MultipleRunesAfterClear(t *testing.T) {
 	}
 }
 
+// TestFindSkillTrigger verifies that '$' is recognized as a skill trigger at
+// the start of the input or immediately after whitespace, and rejected when
+// embedded inside a word (e.g. shell variable expansion like $HOME).
+func TestFindSkillTrigger(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"", -1},
+		{"$", 0},
+		{"$dev-cycle", 0},
+		{"$dev-cycle fix bugs", 0},
+		{"try $dev-cycle", 4},
+		{"hello\t$dev", 6},
+		{"hello\n$dev", 6},
+		{"hello\r$dev", 6},
+		{"hello $dev $other", 6},
+		// Embedded in a word — not a valid trigger.
+		{"a$b", -1},
+		{"/a$b", -1},
+		{" $", 1},
+	}
+	for _, tt := range tests {
+		got := findSkillTrigger(tt.input)
+		if got != tt.want {
+			t.Errorf("findSkillTrigger(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
 // TestParseSkillCommand verifies that /skill:name and $name with arguments correctly
 // separates the skill name from the arguments.
 func TestParseSkillCommand(t *testing.T) {
@@ -124,10 +154,17 @@ func TestParseSkillCommand(t *testing.T) {
 		{"/skill:dev-cycle", "dev-cycle", ""},
 		{"/skill:dev-cycle --verbose", "dev-cycle", "--verbose"},
 		{"/skill:my-skill arg1 arg2 arg3", "my-skill", "arg1 arg2 arg3"},
+		// /skill: prefix wins over a '$' in the arguments.
+		{"/skill:dev-cycle $verbose", "dev-cycle", "$verbose"},
+		{"/skill:my-skill run $HOME", "my-skill", "run $HOME"},
 		// $ prefix
 		{"$dev-cycle", "dev-cycle", ""},
 		{"$dev-cycle fix bugs", "dev-cycle", "fix bugs"},
 		{"$interview-me how to improve", "interview-me", "how to improve"},
+		// $ after whitespace (skill embedded in sentence)
+		{"try $dev-cycle", "dev-cycle", ""},
+		{"please run $dev-cycle fix these bugs", "dev-cycle", "fix these bugs"},
+		{"hello\t$interview-me how", "interview-me", "how"},
 	}
 	for _, tt := range tests {
 		name, args := parseSkillCommand(tt.input)
@@ -175,6 +212,41 @@ func TestUpdateSuggestions_DollarPrefix(t *testing.T) {
 	m.updateSuggestions()
 	if len(m.suggestions) != 3 {
 		t.Errorf("expected 3 suggestions for '$', got %d", len(m.suggestions))
+	}
+
+	// $ after whitespace: same skill-only lookup, prefix preserved.
+	m.input = "please run $dev"
+	m.updateSuggestions()
+	if !m.showSuggestions {
+		t.Fatal("expected showSuggestions to be true for 'please run $dev'")
+	}
+	if len(m.suggestions) != 1 {
+		t.Errorf("expected 1 suggestion for 'please run $dev', got %d", len(m.suggestions))
+	}
+	if m.suggestions[0].name != "dev-cycle" {
+		t.Errorf("expected suggestion 'dev-cycle', got %q", m.suggestions[0].name)
+	}
+
+	// $ alone after whitespace: all skills.
+	m.input = "try $"
+	m.updateSuggestions()
+	if len(m.suggestions) != 3 {
+		t.Errorf("expected 3 suggestions for 'try $', got %d", len(m.suggestions))
+	}
+
+	// $ followed by whitespace triggers lookup, but the token after '$' does
+	// not match any skill in the catalog — so no suggestions appear.
+	m.input = "echo $HOME"
+	m.updateSuggestions()
+	if m.showSuggestions && len(m.suggestions) > 0 {
+		t.Errorf("expected no suggestions for 'echo $HOME' (token 'HOME' not in catalog), got %d", len(m.suggestions))
+	}
+
+	// $ embedded in a word (no whitespace before) must NOT trigger lookup.
+	m.input = "echo$HOME"
+	m.updateSuggestions()
+	if m.showSuggestions && len(m.suggestions) > 0 {
+		t.Errorf("expected no suggestions for 'echo$HOME' (no whitespace before $), got %d", len(m.suggestions))
 	}
 }
 
@@ -242,6 +314,118 @@ func TestHandleSubmit_DollarAloneShowsUsage(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected 'Usage: $skill-name' system message for $ alone")
+	}
+}
+
+// TestHandleSubmit_DollarAfterWhitespaceRoutesThroughLLM verifies that
+// a '$'-triggered skill is still invoked when the '$' appears after
+// whitespace (e.g. natural language prefix like "try $skill args").
+func TestHandleSubmit_DollarAfterWhitespaceRoutesThroughLLM(t *testing.T) {
+	cat := skill.NewCatalog([]skill.Skill{
+		{
+			Name:        "test-skill",
+			Description: "A test skill",
+			Body:        "# Test Skill\nFollow these instructions carefully.",
+		},
+	})
+
+	m := tuiModel{
+		input:        "try $test-skill do something useful",
+		cursor:       50,
+		skillCatalog: cat,
+	}
+
+	result, cmd := m.handleSubmit()
+	rm := result.(tuiModel)
+
+	if !rm.streaming {
+		t.Error("expected streaming to be true after embedded $ skill invocation")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil tea.Cmd (should route through runLLMStream)")
+	}
+	if rm.turnCount != 1 {
+		t.Errorf("turnCount = %d, want 1", rm.turnCount)
+	}
+	// The user message should preserve the original input verbatim.
+	if len(rm.messages) < 1 || rm.messages[0].content != "try $test-skill do something useful" {
+		t.Errorf("first user message = %q, want original input", rm.messages[0].content)
+	}
+}
+
+// TestHandleSubmit_SlashUnknownWithDollarDoesNotInvokeSkill verifies that an
+// unrecognized slash command containing '$' after whitespace is NOT silently
+// routed as a skill invocation. It must fall through to the slash-command
+// default handler and report "Unknown command".
+func TestHandleSubmit_SlashUnknownWithDollarDoesNotInvokeSkill(t *testing.T) {
+	cat := skill.NewCatalog([]skill.Skill{
+		{
+			Name:        "test-skill",
+			Description: "A test skill",
+			Body:        "# Test Skill",
+		},
+	})
+
+	m := tuiModel{
+		input:        "/foobar $test-skill",
+		cursor:       30,
+		skillCatalog: cat,
+	}
+
+	result, cmd := m.handleSubmit()
+	rm := result.(tuiModel)
+
+	if rm.streaming {
+		t.Error("unrecognized slash command must not start streaming as a skill")
+	}
+	if cmd != nil {
+		t.Error("unrecognized slash command must not return a tea.Cmd")
+	}
+
+	found := false
+	for _, msg := range rm.messages {
+		if msg.role == "system" && strings.Contains(msg.content, "Unknown command") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Unknown command' system message for '/foobar $test-skill'")
+	}
+}
+
+// TestTabAutocomplete_DollarAfterWhitespace verifies that pressing Tab when
+// the '$' trigger appears after whitespace preserves the prefix and
+// autocompletes the skill name (e.g. "try $dev" -> "try $dev-cycle").
+func TestTabAutocomplete_DollarAfterWhitespace(t *testing.T) {
+	cat := skill.NewCatalog([]skill.Skill{
+		{Name: "dev-cycle", Description: "Dev cycle skill"},
+		{Name: "pr-review", Description: "PR review skill"},
+	})
+
+	m := tuiModel{
+		input:        "try $dev",
+		cursor:       8,
+		skillCatalog: cat,
+	}
+	m.updateSuggestions()
+
+	if !m.showSuggestions || len(m.suggestions) == 0 {
+		t.Fatalf("expected suggestions for 'try $dev', got none")
+	}
+
+	// Simulate Tab
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+
+	want := "try $dev-cycle"
+	if m.input != want {
+		t.Errorf("after Tab, input = %q, want %q", m.input, want)
+	}
+	if m.cursor != len([]rune(want)) {
+		t.Errorf("after Tab, cursor = %d, want %d", m.cursor, len([]rune(want)))
+	}
+	if m.showSuggestions {
+		t.Error("expected showSuggestions to be false after Tab")
 	}
 }
 

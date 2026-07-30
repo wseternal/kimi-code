@@ -1827,10 +1827,12 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// ── Tab ──
 	case msg.Code == tea.KeyTab:
 		if m.showSuggestions && len(m.suggestions) > 0 {
-			// autocomplete — preserve the prefix ($ or /)
+			// autocomplete — preserve text before the '$' trigger (if any)
+			// and the '$' / '/' prefix itself.
 			selected := m.suggestions[m.selectedSuggest].name
-			if strings.HasPrefix(m.input, "$") {
-				m.input = "$" + selected
+			if idx := findSkillTrigger(m.input); idx >= 0 {
+				prefix := m.input[:idx]
+				m.input = prefix + "$" + selected
 			} else {
 				m.input = "/" + selected
 			}
@@ -2342,9 +2344,10 @@ func (m *tuiModel) toggleFocusedCollapse() {
 }
 
 func (m *tuiModel) updateSuggestions() {
-	if strings.HasPrefix(m.input, "$") {
-		// $ prefix: skill-only lookup
-		filter := strings.ToLower(m.input[1:])
+	if idx := findSkillTrigger(m.input); idx >= 0 {
+		// $ trigger (at start or after whitespace): skill-only lookup.
+		// Filter on the text following the '$'.
+		filter := strings.ToLower(m.input[idx+1:])
 		m.suggestions = nil
 		if m.skillCatalog != nil {
 			for _, s := range m.skillCatalog.List() {
@@ -2528,15 +2531,33 @@ func firstUserPrompt(store *session.SessionStore, sessionID string) string {
 	return ""
 }
 
+// findSkillTrigger returns the byte index of a '$' skill trigger in input,
+// where '$' is valid at the start of the input or immediately after a whitespace
+// character. Returns -1 if no valid trigger is found. When multiple triggers
+// exist, the leftmost one wins.
+func findSkillTrigger(input string) int {
+	for i := 0; i < len(input); i++ {
+		if input[i] == '$' && (i == 0 || input[i-1] == ' ' || input[i-1] == '\t' || input[i-1] == '\n' || input[i-1] == '\r') {
+			return i
+		}
+	}
+	return -1
+}
+
 // parseSkillCommand extracts the skill name and arguments from a /skill: or $ invocation.
+// The '$' trigger may appear at the start of the input or after whitespace, allowing
+// natural embedding such as "please run $dev-cycle fix bugs".
 // Input: "/skill:interview-me how to improve" → name="interview-me", args="how to improve"
 // Input: "$dev-cycle fix bugs" → name="dev-cycle", args="fix bugs"
+// Input: "try $dev-cycle fix bugs" → name="dev-cycle", args="fix bugs"
 func parseSkillCommand(input string) (name, args string) {
 	var raw string
-	if strings.HasPrefix(input, "$") {
-		raw = strings.TrimPrefix(input, "$")
-	} else {
+	if strings.HasPrefix(input, "/skill:") {
 		raw = strings.TrimPrefix(input, "/skill:")
+	} else if idx := findSkillTrigger(input); idx >= 0 {
+		raw = input[idx+1:]
+	} else {
+		raw = input
 	}
 	parts := strings.SplitN(raw, " ", 2)
 	name = parts[0]
@@ -3173,7 +3194,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.showSuggestions = false
 		return m, nil
 
-	case strings.HasPrefix(input, "$"):
+	case !strings.HasPrefix(input, "/") && findSkillTrigger(input) >= 0:
 		skillName, skillArgs := parseSkillCommand(input)
 		if skillName == "" {
 			m.messages = append(m.messages, chatMessage{"user", input})
