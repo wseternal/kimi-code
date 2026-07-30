@@ -235,17 +235,14 @@ func (p *Provider) Generate(
 		opts.OnRequestStart()
 	}
 
-	// Use streaming endpoint with SSE
+	// Use streaming endpoint with SSE.
+	// API key is passed via header (x-goog-api-key) to avoid leaking it in URLs/logs.
 	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse", p.baseURL, p.model)
-	if p.apiKey != "" {
-		url += "&key=" + p.apiKey
-	}
 
-	// Check for request-scoped API key override
+	// Determine the API key to use (request-scoped override or provider default).
+	apiKey := p.apiKey
 	if opts != nil && opts.Auth != nil && opts.Auth.APIKey != nil {
-		// Replace API key in URL
-		baseURL := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse", p.baseURL, p.model)
-		url = baseURL + "&key=" + *opts.Auth.APIKey
+		apiKey = *opts.Auth.APIKey
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
@@ -255,6 +252,9 @@ func (p *Provider) Generate(
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	if apiKey != "" {
+		req.Header.Set("x-goog-api-key", apiKey)
+	}
 	for k, v := range p.defaultHeaders {
 		req.Header.Set(k, v)
 	}
@@ -309,6 +309,7 @@ func (p *Provider) consumeSSEStream(
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var finishEmitted bool
+	var callSeq int64
 
 	for scanner.Scan() {
 		select {
@@ -374,10 +375,12 @@ func (p *Provider) consumeSSEStream(
 					fc := part.FunctionCall
 					argsJSON, _ := json.Marshal(fc.Args)
 					argsStr := string(argsJSON)
+					seq := callSeq + 1
+					callSeq = seq
 					select {
 					case partsCh <- kosong.StreamedMessagePart{
 						Type:      "function",
-						ID:        fmt.Sprintf("call_%s_%d", fc.Name, candidate.Index),
+						ID:        fmt.Sprintf("call_%d_%s_%d", seq, fc.Name, candidate.Index),
 						Name:      fc.Name,
 						Arguments: &argsStr,
 					}:

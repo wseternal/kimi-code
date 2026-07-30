@@ -53,9 +53,8 @@ func GenerateCall(
 	// Strip deferred tools from the wire request
 	wireTools := filterDeferredTools(tools)
 
-	if opts != nil && opts.OnRequestStart != nil {
-		opts.OnRequestStart()
-	}
+	// Note: OnRequestStart is fired by individual provider Generate() methods
+	// (right before the HTTP request), not here, to avoid double invocation.
 
 	stream, err := provider.Generate(ctx, systemPrompt, wireTools, history, opts)
 	if err != nil {

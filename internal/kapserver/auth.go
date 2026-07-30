@@ -77,7 +77,15 @@ func (s *TokenStore) ValidateToken(rawToken string) (*AuthToken, bool) {
 	token, ok := s.tokens[hash]
 	s.mu.RUnlock()
 
-	if !ok || token.IsExpired() {
+	if !ok {
+		return nil, false
+	}
+
+	if token.IsExpired() {
+		// Evict expired token to prevent unbounded map growth.
+		s.mu.Lock()
+		delete(s.tokens, hash)
+		s.mu.Unlock()
 		return nil, false
 	}
 

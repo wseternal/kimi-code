@@ -83,6 +83,9 @@ type StepResult struct {
 	ToolCalls    []kosong.ToolCall
 	FinishReason kosong.FinishReason
 	Usage        *kosong.TokenUsage
+	// CompactedMessages is non-nil when auto-compaction was applied during this step.
+	// The caller should replace its message slice with this value.
+	CompactedMessages []kosong.Message
 }
 
 // Event is a loop-level event.
@@ -299,6 +302,7 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 	}()
 
 	// Execute steps
+	completed := false
 	for step := 0; step < s.maxSteps; step++ {
 		select {
 		case <-turn.ctx.Done():
@@ -311,6 +315,14 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 			})
 			return
 		case <-parentCtx.Done():
+			turn.SetStatus(TurnAborted)
+			s.eventBus.Publish(Event{
+				Type:      "turn.aborted",
+				TurnID:    turn.ID,
+				SessionID: turn.SessionID,
+				Timestamp: time.Now(),
+				Data:      map[string]any{"reason": "parent context cancelled"},
+			})
 			return
 		default:
 		}
@@ -328,6 +340,14 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 			return
 		}
 
+		// Apply compacted messages if auto-compaction was triggered.
+		// Reset turnStartIdx so the deferred persist uses the compacted
+		// history as the new base instead of the original (now-replaced) one.
+		if result.CompactedMessages != nil {
+			messages = result.CompactedMessages
+			turnStartIdx = len(messages)
+		}
+
 		// Add assistant message to history
 		if result.Message != nil {
 			messages = append(messages, *result.Message)
@@ -335,6 +355,7 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 
 		// If no tool calls, turn is complete
 		if len(result.ToolCalls) == 0 {
+			completed = true
 			break
 		}
 
@@ -359,13 +380,24 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 		}
 	}
 
-	turn.SetStatus(TurnCompleted)
-	s.eventBus.Publish(Event{
-		Type:      "turn.completed",
-		TurnID:    turn.ID,
-		SessionID: turn.SessionID,
-		Timestamp: time.Now(),
-	})
+	if completed {
+		turn.SetStatus(TurnCompleted)
+		s.eventBus.Publish(Event{
+			Type:      "turn.completed",
+			TurnID:    turn.ID,
+			SessionID: turn.SessionID,
+			Timestamp: time.Now(),
+		})
+	} else {
+		turn.SetStatus(TurnFailed)
+		s.eventBus.Publish(Event{
+			Type:      "turn.failed",
+			TurnID:    turn.ID,
+			SessionID: turn.SessionID,
+			Timestamp: time.Now(),
+			Data:      map[string]any{"reason": "max steps exhausted"},
+		})
+	}
 }
 
 func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message) (*StepResult, error) {
@@ -391,17 +423,27 @@ func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message
 	}
 
 	// Auto-compaction check: trigger if usage exceeds threshold
+	var compactedMessages []kosong.Message
 	currentMessages := messages
 	if s.shouldAutoCompact(currentMessages) {
 		compacted, err := s.runCompaction(currentMessages)
 		if err == nil {
 			currentMessages = compacted
+			compactedMessages = compacted
 			s.eventBus.Publish(Event{
 				Type:      "compaction.completed",
 				TurnID:    turn.ID,
 				SessionID: turn.SessionID,
 				Timestamp: time.Now(),
 				Data:      map[string]any{"before": len(messages), "after": len(compacted)},
+			})
+		} else {
+			s.eventBus.Publish(Event{
+				Type:      "compaction.failed",
+				TurnID:    turn.ID,
+				SessionID: turn.SessionID,
+				Timestamp: time.Now(),
+				Data:      map[string]any{"error": err.Error()},
 			})
 		}
 	}
@@ -474,6 +516,7 @@ func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message
 			compacted, compactErr := s.runCompaction(currentMessages)
 			if compactErr == nil {
 				currentMessages = compacted
+				compactedMessages = compacted
 				result, err = kosong.GenerateCall(turn.ctx, s.provider, "", kosongTools, currentMessages, callbacks, nil)
 				if err != nil {
 					return nil, err
@@ -500,9 +543,10 @@ func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message
 	}
 
 	stepResult := &StepResult{
-		StepSeq:   int(seq),
-		Message:   result.Message,
-		ToolCalls: toolCalls,
+		StepSeq:           int(seq),
+		Message:           result.Message,
+		ToolCalls:         toolCalls,
+		CompactedMessages: compactedMessages,
 	}
 	if result.Usage != nil {
 		stepResult.Usage = result.Usage

@@ -77,9 +77,9 @@ func (m *CronManager) Create(expression, prompt, model, workDir string) (*Schedu
 		Enabled:    true,
 	}
 	m.tasks[id] = task
+	m.computeNextRun(task)
 	m.mu.Unlock()
 
-	m.computeNextRun(task)
 	m.persist()
 
 	return task, nil

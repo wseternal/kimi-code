@@ -77,9 +77,12 @@ func (r *Roster) Spawn(ctx context.Context, cfg SubagentConfig) string {
 		cfg.ID = fmt.Sprintf("subagent_%d", id)
 	}
 
-	agentCtx, cancel := context.WithCancel(ctx)
+	var agentCtx context.Context
+	var cancel context.CancelFunc
 	if cfg.TimeoutSec > 0 {
 		agentCtx, cancel = context.WithTimeout(ctx, time.Duration(cfg.TimeoutSec)*time.Second)
+	} else {
+		agentCtx, cancel = context.WithCancel(ctx)
 	}
 
 	sa := &Subagent{

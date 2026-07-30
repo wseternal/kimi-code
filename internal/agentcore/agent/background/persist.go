@@ -123,16 +123,7 @@ func Reconcile(persisted []TaskInfo) *ReconcileResult {
 	return result
 }
 
-// isProcessAlive checks if a process with the given PID exists.
-func isProcessAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// On Unix, FindProcess always succeeds. Send signal 0 to check.
-	err = proc.Signal(nil)
-	return err == nil
-}
+// isProcessAlive is implemented in persist_unix.go and persist_windows.go.
 
 // SaveSnapshot saves the current state of all tasks from a Manager.
 func SaveSnapshot(m *Manager, dir string) error {
