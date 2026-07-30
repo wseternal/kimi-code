@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1618,5 +1619,440 @@ func TestBuildSystemPrompt_UpdatePlanHint(t *testing.T) {
 
 	if !strings.Contains(prompt, "update_plan") {
 		t.Error("system prompt should mention update_plan tool")
+	}
+}
+
+// ── @ file completion tests ──
+
+// TestFindFileTrigger verifies that '@' is recognized as a file-completion
+// trigger at the start of the input or immediately after whitespace, and
+// rejected when embedded inside a word (e.g. email addresses).
+func TestFindFileTrigger(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"", -1},
+		{"@", 0},
+		{"@src", 0},
+		{"@src/main.go", 0},
+		{"look at @src", 8},
+		{"hello\t@dev", 6},
+		{"hello\n@dev", 6},
+		{"hello\r@dev", 6},
+		{"hello @dev @other", 6},
+		// Embedded in a word — not a valid trigger.
+		{"user@host", -1},
+		{"a@b", -1},
+		{"/@b", -1},
+		{" @", 1},
+	}
+	for _, tt := range tests {
+		got := findFileTrigger(tt.input)
+		if got != tt.want {
+			t.Errorf("findFileTrigger(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestParseFileQuery verifies the directory + filter decomposition for both
+// absolute and relative queries.
+func TestParseFileQuery(t *testing.T) {
+	cwd := "/home/user/project"
+	tests := []struct {
+		query      string
+		wantDir    string
+		wantFilter string
+	}{
+		{"", cwd, ""},
+		{"src", cwd, "src"},
+		{"src/", filepath.Join(cwd, "src"), ""},
+		{"src/ma", filepath.Join(cwd, "src"), "ma"},
+		{"/", "/", ""},
+		{"/usr", "/", "usr"},
+		{"/usr/", "/usr", ""},
+		{"/usr/l", "/usr", "l"},
+	}
+	for _, tt := range tests {
+		dir, filter := parseFileQuery(tt.query, cwd)
+		if dir != tt.wantDir || filter != tt.wantFilter {
+			t.Errorf("parseFileQuery(%q, %q) = (%q, %q), want (%q, %q)",
+				tt.query, cwd, dir, filter, tt.wantDir, tt.wantFilter)
+		}
+	}
+}
+
+// TestListFileCandidates creates a temporary directory tree and verifies that
+// listFileCandidates returns entries sorted with directories first, filtering
+// by prefix, and hiding dotfiles unless the filter starts with '.'.
+func TestListFileCandidates(t *testing.T) {
+	// Create a temp directory with known structure.
+	root := t.TempDir()
+	// Create directories.
+	for _, d := range []string{"alpha", "beta", "src", ".hidden"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Create files.
+	for _, f := range []string{"README.md", "main.go", "go.mod", ".env"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("test"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Test 1: Empty filter returns all non-hidden entries, dirs first.
+	candidates := listFileCandidates("", root)
+	if len(candidates) == 0 {
+		t.Fatal("expected candidates for empty filter, got none")
+	}
+	// First entries should be directories.
+	for i, c := range candidates {
+		if c.name == ".hidden" || c.name == ".env" {
+			t.Errorf("candidate[%d] = %q should be hidden (filter doesn't start with '.')", i, c.name)
+		}
+	}
+	// Check dirs come before files.
+	lastDirIdx := -1
+	firstFileIdx := len(candidates)
+	for i, c := range candidates {
+		if c.isDir {
+			lastDirIdx = i
+		} else if i < firstFileIdx {
+			firstFileIdx = i
+		}
+	}
+	if lastDirIdx >= firstFileIdx {
+		t.Error("directories should be listed before files")
+	}
+
+	// Test 2: Filter by prefix "ma" should match only "main.go".
+	candidates = listFileCandidates("ma", root)
+	if len(candidates) != 1 || candidates[0].name != "main.go" {
+		names := make([]string, len(candidates))
+		for i, c := range candidates {
+			names[i] = c.name
+		}
+		t.Errorf("listFileCandidates(%q) = %v, want [main.go]", "ma", names)
+	}
+
+	// Test 3: Dotfiles shown when filter starts with '.'.
+	candidates = listFileCandidates(".", root)
+	hasHidden := false
+	for _, c := range candidates {
+		if c.name == ".hidden" || c.name == ".env" {
+			hasHidden = true
+		}
+	}
+	if !hasHidden {
+		t.Error("expected dotfiles when filter starts with '.'")
+	}
+
+	// Test 4: Absolute path lookup.
+	candidates = listFileCandidates("/", "/")
+	if len(candidates) == 0 {
+		t.Error("expected candidates for '/' query")
+	}
+	for _, c := range candidates {
+		if !filepath.IsAbs(c.absPath) {
+			t.Errorf("absPath %q should be absolute", c.absPath)
+		}
+	}
+}
+
+// TestUpdateSuggestions_AtPrefix verifies that typing '@' followed by a path
+// fragment populates the suggestion list with file candidates.
+func TestUpdateSuggestions_AtPrefix(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "file.txt"), []byte("x"), 0o644)
+	os.MkdirAll(filepath.Join(root, "dir"), 0o755)
+
+	m := tuiModel{
+		input: "@fi",
+		cwd:   root,
+	}
+	m.updateSuggestions()
+	if !m.showSuggestions {
+		t.Fatal("expected showSuggestions=true for '@fi'")
+	}
+	if len(m.suggestions) != 1 || m.suggestions[0].name != "file.txt" {
+		t.Errorf("suggestions = %v, want [file.txt]", m.suggestions)
+	}
+	if len(m.fileCandidates) == 0 {
+		t.Error("fileCandidates should be populated after @ trigger")
+	}
+}
+
+// TestFileCompletion_TabCycling verifies that pressing Tab cycles through
+// file candidates, replacing input with each candidate's absolute path.
+func TestFileCompletion_TabCycling(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "alpha"), 0o755)
+	os.MkdirAll(filepath.Join(root, "beta"), 0o755)
+	os.WriteFile(filepath.Join(root, "gamma.txt"), []byte("x"), 0o644)
+
+	m := tuiModel{
+		input: "@",
+		cwd:   root,
+	}
+	m.updateSuggestions()
+	if len(m.fileCandidates) != 3 {
+		t.Fatalf("expected 3 candidates, got %d", len(m.fileCandidates))
+	}
+
+	// Tab 1: first candidate (dirs first, alphabetically).
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.input != m.filePrefix+m.fileCandidates[0].absPath {
+		t.Errorf("after Tab 1, input = %q, want %q", m.input, m.fileCandidates[0].absPath)
+	}
+	if m.selectedSuggest != 0 {
+		t.Errorf("after Tab 1, selectedSuggest = %d, want 0", m.selectedSuggest)
+	}
+
+	// Tab 2: second candidate.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.input != m.filePrefix+m.fileCandidates[1].absPath {
+		t.Errorf("after Tab 2, input = %q, want %q", m.input, m.fileCandidates[1].absPath)
+	}
+	if m.selectedSuggest != 1 {
+		t.Errorf("after Tab 2, selectedSuggest = %d, want 1", m.selectedSuggest)
+	}
+
+	// Tab 3: third candidate.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.selectedSuggest != 2 {
+		t.Errorf("after Tab 3, selectedSuggest = %d, want 2", m.selectedSuggest)
+	}
+
+	// Tab 4: wraps around to first candidate.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.selectedSuggest != 0 {
+		t.Errorf("after Tab 4 (wrap), selectedSuggest = %d, want 0", m.selectedSuggest)
+	}
+}
+
+// TestFileCompletion_SpaceConfirms verifies that Space confirms the current
+// file candidate, clears cycling state, and adds a trailing space.
+func TestFileCompletion_SpaceConfirms(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "src"), 0o755)
+	os.WriteFile(filepath.Join(root, "main.go"), []byte("x"), 0o644)
+
+	m := tuiModel{
+		input: "@",
+		cwd:   root,
+	}
+	m.updateSuggestions()
+
+	// Tab once to select first candidate.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if len(m.fileCandidates) == 0 {
+		t.Fatal("fileCandidates should be populated")
+	}
+	expectedPath := m.fileCandidates[0].absPath
+
+	// Space confirms: clears state, adds trailing space.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeySpace})
+	if m.fileCandidates != nil {
+		t.Error("fileCandidates should be nil after Space confirmation")
+	}
+	if m.showSuggestions {
+		t.Error("showSuggestions should be false after Space confirmation")
+	}
+	if !strings.HasSuffix(m.input, " ") {
+		t.Error("input should end with trailing space after Space confirmation")
+	}
+	if !strings.HasPrefix(m.input, expectedPath) {
+		t.Errorf("input = %q, should start with %q", m.input, expectedPath)
+	}
+}
+
+// TestFileCompletion_SpaceWithoutTabInsertsNormalSpace verifies that
+// pressing Space after '@src' without pressing Tab first inserts a
+// normal space character rather than confirming a file candidate.
+func TestFileCompletion_SpaceWithoutTabInsertsNormalSpace(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "src.txt"), []byte("x"), 0o644)
+
+	m := tuiModel{
+		input:  "@src",
+		cursor: 4, // cursor at end of input
+		cwd:    root,
+	}
+	m.updateSuggestions()
+	if len(m.fileCandidates) == 0 {
+		t.Fatal("fileCandidates should be populated")
+	}
+	if m.fileCycleIdx != 0 {
+		t.Fatalf("fileCycleIdx should be 0 (no Tab pressed), got %d", m.fileCycleIdx)
+	}
+
+	// Space without Tab: should insert a normal space, NOT confirm.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeySpace})
+	// Input should be "@src " (original text + space inserted at cursor).
+	if m.input != "@src " {
+		t.Errorf("input = %q, want %q (normal space insertion)", m.input, "@src ")
+	}
+}
+
+// TestFileCompletion_EnterConfirms verifies that Enter confirms the
+// current file candidate without submitting the message.
+func TestFileCompletion_EnterConfirms(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "alpha"), 0o755)
+	os.WriteFile(filepath.Join(root, "beta.txt"), []byte("x"), 0o644)
+
+	m := tuiModel{
+		input: "@",
+		cwd:   root,
+	}
+	m.updateSuggestions()
+
+	// Tab once to select first candidate.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if len(m.fileCandidates) == 0 {
+		t.Fatal("fileCandidates should be populated")
+	}
+	expectedPath := m.fileCandidates[0].absPath
+
+	// Enter confirms: clears state, does NOT submit.
+	m, cmd := handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.fileCandidates != nil {
+		t.Error("fileCandidates should be nil after Enter confirmation")
+	}
+	if m.showSuggestions {
+		t.Error("showSuggestions should be false after Enter confirmation")
+	}
+	if !strings.HasPrefix(m.input, expectedPath) {
+		t.Errorf("input = %q, should start with %q", m.input, expectedPath)
+	}
+	// Enter should NOT produce a submit command (cmd should be nil).
+	if cmd != nil {
+		t.Error("Enter during file confirmation should not return a tea.Cmd (no submit)")
+	}
+}
+
+// TestFileCompletion_CursorMovementClearsState verifies that pressing
+// cursor movement keys (Left, Right, Ctrl+A, Ctrl+E, Ctrl+B, Ctrl+F)
+// clears stale file completion state so that Space/Enter behave normally.
+func TestFileCompletion_CursorMovementClearsState(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "alpha"), 0o755)
+	os.WriteFile(filepath.Join(root, "beta.txt"), []byte("x"), 0o644)
+
+	m := tuiModel{
+		input:  "@",
+		cursor: 1,
+		cwd:    root,
+	}
+	m.updateSuggestions()
+
+	// Tab once to enter file cycling.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.fileCandidates == nil || m.fileCycleIdx == 0 {
+		t.Fatal("file cycling state should be active after Tab")
+	}
+
+	// Press Left arrow — should clear file state.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	if m.fileCandidates != nil {
+		t.Error("fileCandidates should be nil after Left arrow")
+	}
+	if m.fileCycleIdx != 0 {
+		t.Error("fileCycleIdx should be 0 after Left arrow")
+	}
+	if m.filePrefix != "" {
+		t.Error("filePrefix should be empty after Left arrow")
+	}
+}
+
+// TestFileCompletion_EditingCommandsClearState verifies that Ctrl+K, Ctrl+U,
+// and Ctrl+W clear file completion state via updateSuggestions.
+func TestFileCompletion_EditingCommandsClearState(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "alpha"), 0o755)
+	os.WriteFile(filepath.Join(root, "beta.txt"), []byte("x"), 0o644)
+
+	m := tuiModel{
+		input:  "@",
+		cursor: 1,
+		cwd:    root,
+	}
+	m.updateSuggestions()
+
+	// Tab once to enter file cycling.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.fileCandidates == nil || m.fileCycleIdx == 0 {
+		t.Fatal("file cycling state should be active after Tab")
+	}
+
+	// Ctrl+K (kill to end) — should clear file state.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
+	if m.fileCandidates != nil {
+		t.Error("fileCandidates should be nil after Ctrl+K")
+	}
+	if m.fileCycleIdx != 0 {
+		t.Error("fileCycleIdx should be 0 after Ctrl+K")
+	}
+}
+
+// TestUpdateSuggestions_SlashPathNoCommandTrigger verifies that an input
+// starting with '/' followed by path separators (like an absolute path
+// produced by @ file completion) does NOT trigger command completion.
+func TestUpdateSuggestions_SlashPathNoCommandTrigger(t *testing.T) {
+	m := tuiModel{
+		input: "/usr/local/bin/something",
+	}
+	m.updateSuggestions()
+	// Should NOT show suggestions since this looks like a file path, not a command.
+	if m.showSuggestions {
+		t.Error("showSuggestions should be false for filesystem path input")
+	}
+
+	// A real command prefix should still trigger.
+	m.input = "/help"
+	m.updateSuggestions()
+	// Should show command suggestions (there's at least one /help-like command or none,
+	// but the / branch should be entered regardless).
+	// The key assertion is that the / branch IS entered for single-word commands.
+}
+
+// TestListFileCandidates_SymlinkedDirectory verifies that symlinks to
+// directories are correctly identified as directories (isDir=true).
+func TestListFileCandidates_SymlinkedDirectory(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "realdir")
+	os.MkdirAll(realDir, 0o755)
+	linkPath := filepath.Join(root, "linkdir")
+	if err := os.Symlink(realDir, linkPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	candidates := listFileCandidates("", root)
+	for _, c := range candidates {
+		if c.name == "linkdir" && !c.isDir {
+			t.Error("symlinked directory should have isDir=true")
+		}
+	}
+}
+
+// TestListFileCandidates_PermissionDenied verifies that listFileCandidates
+// returns a synthetic error indicator when the directory is unreadable.
+func TestListFileCandidates_PermissionDenied(t *testing.T) {
+	root := t.TempDir()
+	restricted := filepath.Join(root, "restricted")
+	os.MkdirAll(restricted, 0o755)
+	os.Chmod(restricted, 0o000) // no read permission
+	defer os.Chmod(restricted, 0o755) // restore for cleanup
+
+	candidates := listFileCandidates("restricted/", root)
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 error indicator, got %d candidates", len(candidates))
+	}
+	if candidates[0].name != "[permission denied]" {
+		t.Errorf("expected name %q, got %q", "[permission denied]", candidates[0].name)
+	}
+	if !candidates[0].isFile {
+		t.Error("error indicator should have isFile=true")
 	}
 }

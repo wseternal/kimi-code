@@ -164,7 +164,10 @@ func initTheme() {
 type slashCommand struct {
 	name    string
 	desc    string
-	isSkill bool // true if this is a skill (shown with [Skill] prefix)
+	isSkill bool   // true if this is a skill (shown with [Skill] prefix)
+	isFile  bool   // true for file/directory completions
+	isDir   bool   // true when the completion is a directory (isFile must also be true)
+	absPath string // absolute filesystem path (populated for file completions)
 }
 
 // commandReg is the global command registry.
@@ -223,6 +226,11 @@ type tuiModel struct {
 	suggestions     []slashCommand
 	selectedSuggest int
 	showSuggestions bool
+
+	// @ file completion cycling (persists after Tab replaces input with abs path)
+	fileCandidates []slashCommand // full candidate list for Tab cycling
+	fileCycleIdx   int            // next candidate index in fileCandidates
+	filePrefix     string         // text before the '@' trigger (restored on confirm)
 
 	// Cursor
 	cursorBlink bool
@@ -1652,6 +1660,9 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case msg.Code == tea.KeyEnter && (msg.Mod&tea.ModAlt != 0 || msg.Mod&tea.ModShift != 0),
 		msg.Code == 'j' && ctrl:
 		m.ctrlCPending = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		runes := []rune(m.input)
 		runes = append(runes[:m.cursor], append([]rune{'\n'}, runes[m.cursor:]...)...)
 		m.input = string(runes)
@@ -1662,6 +1673,20 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// ── Submit ──
 	case msg.Code == tea.KeyEnter:
 		m.ctrlCPending = false
+		if len(m.fileCandidates) > 0 && m.fileCycleIdx > 0 {
+			// Confirm current file candidate without submitting.
+			// Input already holds the absolute path (set by Tab);
+			// close the suggestion panel so the user can continue
+			// editing or press Enter again to submit.
+			m.fileCandidates = nil
+			m.fileCycleIdx = 0
+			m.filePrefix = ""
+			m.showSuggestions = false
+			return m, nil
+		}
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		return m.handleSubmit()
 
 	// ── Open external editor (Ctrl+G) ──
@@ -1672,12 +1697,18 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// ── Readline: Ctrl+A (start of line) ──
 	case msg.Code == 'a' && ctrl:
 		m.ctrlCPending = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.cursor = 0
 		return m, nil
 
 	// ── Readline: Ctrl+E (end of line) ──
 	case msg.Code == 'e' && ctrl:
 		m.ctrlCPending = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.cursor = utf8.RuneCountInString(m.input)
 		return m, nil
 
@@ -1686,6 +1717,7 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.ctrlCPending = false
 		runes := []rune(m.input)
 		m.input = string(runes[:m.cursor])
+		m.updateSuggestions()
 		return m, nil
 
 	// ── Readline: Ctrl+U (kill to start) ──
@@ -1694,23 +1726,31 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		runes := []rune(m.input)
 		m.input = string(runes[m.cursor:])
 		m.cursor = 0
+		m.updateSuggestions()
 		return m, nil
 
 	// ── Readline: Ctrl+W (delete word backward) ──
 	case msg.Code == 'w' && ctrl:
 		m.ctrlCPending = false
 		m.deleteWordBackward()
+		m.updateSuggestions()
 		return m, nil
 
 	// ── Readline: Ctrl+B / Alt+B (word back) ──
 	case msg.Code == 'b' && ctrl, msg.Mod&tea.ModAlt != 0 && msg.Text == "b":
 		m.ctrlCPending = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.moveWordBackward()
 		return m, nil
 
 	// ── Readline: Ctrl+F / Alt+F (word forward) ──
 	case msg.Code == 'f' && ctrl, msg.Mod&tea.ModAlt != 0 && msg.Text == "f":
 		m.ctrlCPending = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.moveWordForward()
 		return m, nil
 
@@ -1740,6 +1780,9 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		return m, nil
 
 	// ── Right arrow ──
@@ -1748,6 +1791,9 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < runeCount {
 			m.cursor++
 		}
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		return m, nil
 
 	// ── Up arrow ──
@@ -1771,6 +1817,7 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if prev, ok := m.inputHistory.Prev(); ok {
 				m.input = prev
 				m.cursor = utf8.RuneCountInString(m.input)
+				m.updateSuggestions()
 			}
 		}
 		return m, nil
@@ -1802,6 +1849,7 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.savedInput = ""
 				m.cursor = utf8.RuneCountInString(m.input)
 			}
+			m.updateSuggestions()
 		}
 		return m, nil
 
@@ -1826,7 +1874,19 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// ── Tab ──
 	case msg.Code == tea.KeyTab:
-		if m.showSuggestions && len(m.suggestions) > 0 {
+		if len(m.fileCandidates) > 0 {
+			// @ file completion: Tab cycles through candidates.
+			// Each press replaces the @… token with the candidate's
+			// absolute path and advances to the next candidate.
+			idx := m.fileCycleIdx % len(m.fileCandidates)
+			candidate := m.fileCandidates[idx]
+			m.input = m.filePrefix + candidate.absPath
+			m.cursor = utf8.RuneCountInString(m.input)
+			m.selectedSuggest = idx
+			m.suggestions = m.fileCandidates
+			m.showSuggestions = true
+			m.fileCycleIdx = idx + 1
+		} else if m.showSuggestions && len(m.suggestions) > 0 {
 			// autocomplete — preserve text before the '$' trigger (if any)
 			// and the '$' / '/' prefix itself.
 			selected := m.suggestions[m.selectedSuggest].name
@@ -1879,10 +1939,26 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.showSuggestions = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		return m, nil
 
 	// ── Space ──
 	case msg.Code == tea.KeySpace:
+		if len(m.fileCandidates) > 0 && m.fileCycleIdx > 0 {
+			// Confirm current file completion candidate (only after Tab
+			// has cycled at least once). Input already holds the absolute
+			// path set by Tab; append a trailing space so the user can
+			// continue typing.
+			m.fileCandidates = nil
+			m.fileCycleIdx = 0
+			m.filePrefix = ""
+			m.showSuggestions = false
+			m.input += " "
+			m.cursor = utf8.RuneCountInString(m.input)
+			return m, nil
+		}
 		runes := []rune(m.input)
 		runes = append(runes[:m.cursor], append([]rune{' '}, runes[m.cursor:]...)...)
 		m.input = string(runes)
@@ -1901,6 +1977,10 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if !isPaste {
 			m.updateSuggestions()
+		} else {
+			m.fileCandidates = nil
+			m.fileCycleIdx = 0
+			m.filePrefix = ""
 		}
 		// Reset history navigation when typing
 		if m.inputHistory != nil {
@@ -2347,6 +2427,9 @@ func (m *tuiModel) updateSuggestions() {
 	if idx := findSkillTrigger(m.input); idx >= 0 {
 		// $ trigger (at start or after whitespace): skill-only lookup.
 		// Filter on the text following the '$'.
+		m.fileCandidates = nil // clear any stale file completion state
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		filter := strings.ToLower(m.input[idx+1:])
 		m.suggestions = nil
 		if m.skillCatalog != nil {
@@ -2366,7 +2449,27 @@ func (m *tuiModel) updateSuggestions() {
 		}
 		m.showSuggestions = len(m.suggestions) > 0
 		m.selectedSuggest = 0
-	} else if strings.HasPrefix(m.input, "/") {
+	} else if idx := findFileTrigger(m.input); idx >= 0 {
+		// @ trigger (at start or after whitespace): file/directory lookup.
+		query := m.input[idx+1:]
+		candidates := listFileCandidates(query, m.cwd)
+		m.fileCandidates = candidates
+		m.fileCycleIdx = 0
+		m.filePrefix = m.input[:idx]
+		m.suggestions = candidates
+		m.showSuggestions = len(candidates) > 0
+		m.selectedSuggest = 0
+	} else if strings.HasPrefix(m.input, "/") && func() bool {
+		// Don't trigger command completion when the leading '/' is part
+		// of a filesystem path (e.g. after @ file completion produces
+		// "/usr/local/bin"). A single '/' prefix without further path
+		// separators in the first word is treated as a command.
+		firstWord := strings.Fields(m.input)[0]
+		return strings.Count(firstWord, "/") <= 1
+	}() {
+		m.fileCandidates = nil // clear stale file completion state
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		filter := strings.ToLower(m.input[1:])
 		m.suggestions = nil
 		// Built-in commands always shown
@@ -2395,6 +2498,9 @@ func (m *tuiModel) updateSuggestions() {
 		m.showSuggestions = len(m.suggestions) > 0
 		m.selectedSuggest = 0
 	} else {
+		m.fileCandidates = nil // clear stale file completion state
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.showSuggestions = false
 	}
 }
@@ -2565,6 +2671,124 @@ func parseSkillCommand(input string) (name, args string) {
 		args = strings.TrimSpace(parts[1])
 	}
 	return name, args
+}
+
+// findFileTrigger returns the byte index of an '@' file-completion trigger in
+// input, where '@' is valid at the start of the input or immediately after a
+// whitespace character. Returns -1 if no valid trigger is found. When multiple
+// triggers exist, the leftmost one wins.
+func findFileTrigger(input string) int {
+	for i := 0; i < len(input); i++ {
+		if input[i] == '@' && (i == 0 || input[i-1] == ' ' || input[i-1] == '\t' || input[i-1] == '\n' || input[i-1] == '\r') {
+			return i
+		}
+	}
+	return -1
+}
+
+// parseFileQuery splits the text after an '@' trigger into the parent directory
+// to scan and the filename prefix to filter on.
+//
+//	query=""        → dir=cwd,           filter=""
+//	query="src"     → dir=cwd,           filter="src"
+//	query="src/"    → dir=cwd/src,       filter=""
+//	query="src/ma"  → dir=cwd/src,       filter="ma"
+//	query="/"       → dir="/",          filter=""
+//	query="/usr/l"  → dir="/usr",        filter="l"
+func parseFileQuery(query, cwd string) (dir, filter string) {
+	if strings.HasPrefix(query, "/") {
+		// Absolute path lookup.
+		if query == "/" {
+			return "/", ""
+		}
+		dir = filepath.Dir(query)
+		filter = filepath.Base(query)
+		// filepath.Base("/foo/") returns "foo"; we want "" when trailing slash.
+		if strings.HasSuffix(query, "/") {
+			dir = filepath.Clean(query)
+			filter = ""
+		}
+		return dir, filter
+	}
+	// Relative path lookup.
+	if query == "" {
+		return cwd, ""
+	}
+	if strings.HasSuffix(query, "/") {
+		dir = filepath.Join(cwd, filepath.Clean(query))
+		return dir, ""
+	}
+	dir = filepath.Join(cwd, filepath.Dir(query))
+	filter = filepath.Base(query)
+	return dir, filter
+}
+
+// maxFileCandidates caps the number of filesystem entries returned for a
+// single completion query to avoid flooding the UI on huge directories.
+const maxFileCandidates = 50
+
+// listFileCandidates scans the filesystem for entries matching the given query
+// and returns them as []slashCommand suitable for the suggestion dropdown.
+// Directories are listed first, followed by files; each group is sorted by
+// name. Hidden entries (starting with '.') are included only when filter
+// itself starts with '.'.
+func listFileCandidates(query, cwd string) []slashCommand {
+	dir, filter := parseFileQuery(query, cwd)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []slashCommand{{name: "[permission denied]", isFile: true, absPath: dir}}
+	}
+	lowerFilter := strings.ToLower(filter)
+	includeHidden := strings.HasPrefix(filter, ".")
+
+	// First pass: collect matching directories and files separately.
+	// os.ReadDir has already read all entries into memory, so iterating
+	// is fast regardless of directory size. The final cap at
+	// maxFileCandidates (applied after sorting) limits the result set.
+	var dirs, files []slashCommand
+	for _, e := range entries {
+		name := e.Name()
+		if !includeHidden && strings.HasPrefix(name, ".") {
+			continue
+		}
+		if lowerFilter != "" && !strings.HasPrefix(strings.ToLower(name), lowerFilter) {
+			continue
+		}
+		absPath := filepath.Join(dir, name)
+		isDir := e.IsDir()
+		// Resolve symlinks: DirEntry.IsDir uses lstat, so symlinks to
+		// directories appear as non-dirs. Stat follows the symlink.
+		if !isDir {
+			if info, statErr := os.Stat(absPath); statErr == nil {
+				isDir = info.IsDir()
+			}
+		}
+		entry := slashCommand{
+			name:    name,
+			absPath: absPath,
+			isFile:  true,
+			isDir:   isDir,
+		}
+		if isDir {
+			dirs = append(dirs, entry)
+		} else {
+			files = append(files, entry)
+		}
+	}
+	// Sort each group by name (case-insensitive).
+	sortByName := func(s []slashCommand) {
+		sort.Slice(s, func(i, j int) bool {
+			return strings.ToLower(s[i].name) < strings.ToLower(s[j].name)
+		})
+	}
+	sortByName(dirs)
+	sortByName(files)
+	// Merge: directories first, then files, capped.
+	result := append(dirs, files...)
+	if len(result) > maxFileCandidates {
+		result = result[:maxFileCandidates]
+	}
+	return result
 }
 
 // executeSkill activates a skill and starts streaming its prompt.
@@ -3656,13 +3880,16 @@ func (m tuiModel) renderSuggestions() string {
 	}
 
 	// Calculate max display width (for alignment) across all suggestions,
-	// accounting for the optional [Skill] label prefix.
+	// accounting for the optional [Skill], [Dir], or [File] label prefixes.
 	const skillLabelW = 8 // len("[Skill] ")
+	const fileLabelW = 7  // len("[Dir]  ") or len("[File] ")
 	maxNameW := 0
 	for _, s := range m.suggestions {
 		w := len(s.name)
 		if s.isSkill {
 			w += skillLabelW
+		} else if s.isFile {
+			w += fileLabelW
 		}
 		if w > maxNameW {
 			maxNameW = w
@@ -3689,19 +3916,30 @@ func (m tuiModel) renderSuggestions() string {
 	for i := start; i < end; i++ {
 		s := m.suggestions[i]
 		name := s.name
-		// Show [Skill] prefix for skill entries
+		// Show label prefix for skill / file entries.
 		label := ""
 		if s.isSkill {
 			label = "[Skill] "
+		} else if s.isFile {
+			if s.isDir {
+				label = "[Dir]  "
+			} else {
+				label = "[File] "
+			}
+		}
+		// For file entries, show the absolute path in the description column.
+		desc := s.desc
+		if s.isFile {
+			desc = s.absPath
 		}
 		displayW := len(name) + len(label)
 		pad := strings.Repeat(" ", maxNameW-displayW+2)
 		if i == sel {
 			b.WriteString(fmt.Sprintf("  → %s%s%s%s\n",
-				dimStyle.Render(label), strongStyle.Render(name), pad, primaryStyle.Render(s.desc)))
+				dimStyle.Render(label), strongStyle.Render(name), pad, primaryStyle.Render(desc)))
 		} else {
 			b.WriteString(fmt.Sprintf("    %s%s%s%s\n",
-				dimStyle.Render(label), textStyle.Render(name), pad, dimStyle.Render(s.desc)))
+				dimStyle.Render(label), textStyle.Render(name), pad, dimStyle.Render(desc)))
 		}
 	}
 
