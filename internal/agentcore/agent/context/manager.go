@@ -17,15 +17,7 @@ func TurnEstimate(text string) int {
 	return TokenEstimate(text) + PerTurnOverhead
 }
 
-// TokenEstimate estimates token count from text using the ~4 chars/token heuristic.
-func TokenEstimate(text string) int {
-	if text == "" {
-		return 0
-	}
-	// Approximate: 1 token ≈ 4 characters for English, ~3 for code
-	chars := len(text)
-	return (chars + 3) / 4
-}
+// TokenEstimate is defined in tokens.go (CJK-aware heuristic).
 
 // ContextManager tracks context window usage and manages compaction.
 type ContextManager struct {
