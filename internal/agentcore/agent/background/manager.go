@@ -100,13 +100,10 @@ func (m *Manager) StartProcess(ctx context.Context, command, workDir string, env
 		done:   make(chan struct{}),
 	}
 
-	// Capture stdout and stderr combined
-	outputPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		return "", fmt.Errorf("stdout pipe: %w", err)
-	}
-	cmd.Stderr = cmd.Stdout // merge stderr into stdout
+	// Direct buffer assignment: exec package handles pipe draining internally.
+	// cmd.Wait() guarantees the buffer is fully populated before returning.
+	cmd.Stdout = task.output
+	cmd.Stderr = task.output
 
 	m.mu.Lock()
 	m.tasks[taskID] = task
@@ -127,40 +124,18 @@ func (m *Manager) StartProcess(ctx context.Context, command, workDir string, env
 	task.info.PID = cmd.Process.Pid
 	m.mu.Unlock()
 
-	// readerDone closes when the pipe reader goroutine has drained all output.
-	readerDone := make(chan struct{})
-
-	// Capture output in background
-	go func() {
-		defer close(readerDone)
-		buf := make([]byte, 4096)
-		for {
-			n, readErr := outputPipe.Read(buf)
-			if n > 0 {
-				task.outputMu.Lock()
-				task.output.Write(buf[:n])
-				task.totalBytes += int64(n)
-				task.outputMu.Unlock()
-			}
-			if readErr != nil {
-				break
-			}
-		}
-	}()
-
-	// Wait for process to finish in background
+	// Wait for process to finish in background.
+	// cmd.Wait() blocks until stdout/stderr copying is complete, so the
+	// output buffer is guaranteed to be fully populated when done closes.
 	go func() {
 		defer close(task.done)
 		waitErr := cmd.Wait()
-
-		// Wait for pipe reader to finish draining before updating state,
-		// so that GetOutput always sees complete output after Wait returns.
-		<-readerDone
 
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
 		task.info.EndedAt = time.Now()
+		task.totalBytes = int64(task.output.Len())
 
 		if waitErr != nil {
 			if taskCtx.Err() != nil {
