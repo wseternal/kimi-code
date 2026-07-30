@@ -48,20 +48,20 @@ func TestSteeringTool_EnqueueDrainAll(t *testing.T) {
 	}
 }
 
-func TestSteeringTool_SignalSwap(t *testing.T) {
+func TestSteeringTool_ConsumeSignal(t *testing.T) {
 	st := NewSteeringTool()
 
-	if st.IsSignaled() {
+	if st.ConsumeSignal() {
 		t.Error("new tool should not be signaled")
 	}
 
 	st.Signal()
-	if !st.IsSignaled() {
+	if !st.ConsumeSignal() {
 		t.Error("should be signaled after Signal()")
 	}
 	// Second read should return false (swap clears it)
-	if st.IsSignaled() {
-		t.Error("second IsSignaled() should return false after swap")
+	if st.ConsumeSignal() {
+		t.Error("second ConsumeSignal() should return false after swap")
 	}
 }
 
@@ -130,7 +130,7 @@ func TestSteeringTool_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < messagesPerGoroutine; i++ {
 				st.Signal()
-				st.IsSignaled()
+				st.ConsumeSignal()
 			}
 		}()
 	}
@@ -149,5 +149,3 @@ func TestSteeringTool_Definition(t *testing.T) {
 		t.Error("Description should not be empty")
 	}
 }
-
-

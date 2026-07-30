@@ -24,6 +24,8 @@ type SteeringTool struct {
 	signaled atomic.Bool
 }
 
+var _ Tool = (*SteeringTool)(nil)
+
 // NewSteeringTool creates a new steering tool with an empty queue.
 func NewSteeringTool() *SteeringTool {
 	return &SteeringTool{}
@@ -65,8 +67,10 @@ func (t *SteeringTool) Signal() {
 	t.signaled.Store(true)
 }
 
-// IsSignaled checks and clears the priority signal (atomic swap).
-func (t *SteeringTool) IsSignaled() bool {
+// ConsumeSignal checks and clears the priority signal (atomic swap).
+// Returns true if the signal was set. The signal is consumed regardless
+// of whether messages are queued, so callers should act on the result.
+func (t *SteeringTool) ConsumeSignal() bool {
 	return t.signaled.Swap(false)
 }
 
@@ -88,11 +92,18 @@ func (t *SteeringTool) Execute(_ context.Context, _ json.RawMessage, _ ExecConte
 	if len(msgs) == 0 {
 		return &Result{Output: "No steering messages."}, nil
 	}
+	output := t.FormatMessages(msgs)
+	return &Result{Output: output}, nil
+}
+
+// FormatMessages formats a slice of steering messages into a human-readable string.
+// Exported so the streaming loop can format messages without going through Execute().
+func (t *SteeringTool) FormatMessages(msgs []SteeringMessage) string {
 	var sb strings.Builder
 	sb.WriteString("The user has sent the following steering messages. ")
 	sb.WriteString("Please consider these instructions before proceeding with further actions:\n")
 	for i, m := range msgs {
 		sb.WriteString(fmt.Sprintf("\n%d. %s", i+1, m.Content))
 	}
-	return &Result{Output: sb.String()}, nil
+	return sb.String()
 }

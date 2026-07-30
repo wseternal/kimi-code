@@ -31,8 +31,8 @@ internal/cli/
   tui.go                        → TUI model, key handling, streaming, rendering
   tui_test.go                   → TUI unit tests
 internal/agentcore/agent/tools/
-  steering.go                   → NEW: SteeringTool implementation
-  builtin.go                    → Register SteeringTool in RegisterDefaultTools
+  steering.go                   → NEW: SteeringTool implementation (system tool, NOT registered in tool registry)
+  builtin.go                    → Unchanged (steering is invoked directly by streaming loop)
   registry.go                   → Tool interface and Registry (unchanged)
 internal/agentcore/agent/loop/
   service.go                    → Agent loop (unchanged — steering is TUI-level)
@@ -52,9 +52,7 @@ type SteeringTool struct {
 }
 
 type SteeringMessage struct {
-    Content   string    `json:"content"`
-    Priority  bool      `json:"priority"` // true = user pressed steering key
-    SubmittedAt time.Time `json:"submittedAt"`
+    Content string `json:"content"`
 }
 ```
 
@@ -128,7 +126,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
     if m.streaming {
         // Queue the message — don't start a new stream
-        m.queuedMessages = append(m.queuedMessages, input)
+        m.steeringTool.Enqueue(input)
         m.messages = append(m.messages, chatMessage{"user", input})
         m.messages = append(m.messages, chatMessage{"system",
             fmt.Sprintf("📨 Queued (press %s to steer agent)", steeringKeyHint)})
@@ -147,8 +145,8 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 Added to `handleKey()`:
 ```go
 case msg.Code == 's' && ctrl:
-    if m.streaming && len(m.queuedMessages) > 0 {
-        m.steeringSignaled = true
+    if m.streaming && m.steeringTool != nil && m.steeringTool.Len() > 0 {
+        m.steeringTool.Signal()
         m.messages = append(m.messages, chatMessage{"system",
             "⚡ Steering signal sent — agent will pick up at next breakpoint"})
     }
@@ -165,7 +163,7 @@ type SteeringTool struct {
 }
 
 // Enqueue adds a message to the steering queue.
-func (t *SteeringTool) Enqueue(content string, priority bool) { ... }
+func (t *SteeringTool) Enqueue(content string) { ... }
 
 // HasMessages reports whether there are queued messages.
 func (t *SteeringTool) HasMessages() bool { ... }
@@ -176,8 +174,8 @@ func (t *SteeringTool) DrainAll() []SteeringMessage { ... }
 // Signal sets the steering priority flag.
 func (t *SteeringTool) Signal() { t.signaled.Store(true) }
 
-// IsSignaled checks and clears the priority signal.
-func (t *SteeringTool) IsSignaled() bool {
+// ConsumeSignal checks and clears the priority signal.
+func (t *SteeringTool) ConsumeSignal() bool {
     return t.signaled.Swap(false)
 }
 
@@ -220,11 +218,13 @@ the next step begins, check for queued messages:
 
 ```go
 // After processing tool calls for this step:
-if steering.HasMessages() || steering.IsSignaled() {
-    // Invoke steering tool and inject result as tool message
-    result, _ := steering.Execute(ctx, nil, tools.ExecContext{})
-    toolMsg := kosong.CreateToolMessage("steering", result.Output)
-    messages = append(messages, toolMsg)
+if steering.ConsumeSignal() || steering.HasMessages() {
+    msgs := steering.DrainAll()
+    if len(msgs) > 0 {
+        output := steering.FormatMessages(msgs)
+        // Inject as user message to satisfy LLM provider API contracts
+        messages = append(messages, kosong.CreateUserMessage("[Steering] "+output))
+    }
 }
 ```
 
@@ -242,9 +242,14 @@ case "done":
     // ...existing done handling...
 
     // Auto-pickup queued steering messages
-    if len(m.queuedMessages) > 0 {
-        nextPrompt := strings.Join(m.queuedMessages, "\n\n---\n\n")
-        m.queuedMessages = nil
+    if m.steeringTool != nil {
+        msgs := m.steeringTool.DrainAll()
+        if len(msgs) > 0 {
+            parts := make([]string, len(msgs))
+            for i, sm := range msgs {
+                parts[i] = sm.Content
+            }
+            nextPrompt := strings.Join(parts, "\n")
         m.streaming = true
         m.cancelCh = make(chan struct{})
         // ...reset streaming state...

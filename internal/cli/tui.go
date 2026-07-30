@@ -1170,15 +1170,19 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 				m.history = append(m.history, kosong.CreateToolMessage(tc.ID, result.Output))
 			}
 
-			// Check for steering messages between steps
-			if m.steeringTool != nil && (m.steeringTool.HasMessages() || m.steeringTool.IsSignaled()) {
-				result, _ := m.steeringTool.Execute(ctx, nil, tools.ExecContext{})
-				if result.Output != "No steering messages." {
-					ch <- streamEvent{kind: "tool_start", toolName: "Steering", toolArgs: ""}
-					ch <- streamEvent{kind: "tool_result", toolName: "Steering", toolOut: result.Output}
-					// Inject as user message to satisfy LLM provider API contracts
-					// (tool messages must correspond to assistant-initiated tool calls)
-					m.history = append(m.history, kosong.CreateUserMessage("[Steering] "+result.Output))
+			// Check for steering messages between steps.
+			// DrainAll is atomic (single lock acquisition) and returns nil if empty.
+			if m.steeringTool != nil {
+				if m.steeringTool.ConsumeSignal() || m.steeringTool.HasMessages() {
+					msgs := m.steeringTool.DrainAll()
+					if len(msgs) > 0 {
+						result := m.steeringTool.FormatMessages(msgs)
+						ch <- streamEvent{kind: "tool_start", toolName: "Steering", toolArgs: ""}
+						ch <- streamEvent{kind: "tool_result", toolName: "Steering", toolOut: result}
+						// Inject as user message to satisfy LLM provider API contracts
+						// (tool messages must correspond to assistant-initiated tool calls)
+						m.history = append(m.history, kosong.CreateUserMessage("[Steering] "+result))
+					}
 				}
 			}
 		}
@@ -1564,27 +1568,29 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.btwMode = false
 			}
 
-			// Drain queued steering messages for auto-pickup
-			if m.steeringTool != nil && m.steeringTool.HasMessages() {
+			// Drain queued steering messages for auto-pickup (single atomic drain)
+			if m.steeringTool != nil {
 				msgs := m.steeringTool.DrainAll()
-				parts := make([]string, len(msgs))
-				for i, sm := range msgs {
-					parts[i] = sm.Content
+				if len(msgs) > 0 {
+					parts := make([]string, len(msgs))
+					for i, sm := range msgs {
+						parts[i] = sm.Content
+					}
+					nextPrompt := strings.Join(parts, "\n")
+					m.messages = append(m.messages, chatMessage{"user", nextPrompt})
+					m.turnCount++
+					m.streaming = true
+					m.streamThinking = ""
+					m.streamResponse = ""
+					m.mdBuffer = MarkdownBuffer{}
+					m.streamToolGroups = nil
+					m.streamStep = 0
+					m.turnStartTime = time.Now()
+					m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
+					m.cancelCh = make(chan struct{})
+					m.rebuildCollapsibles()
+					return m, m.runLLMStream(nextPrompt)
 				}
-				nextPrompt := strings.Join(parts, "\n")
-				m.messages = append(m.messages, chatMessage{"user", nextPrompt})
-				m.turnCount++
-				m.streaming = true
-				m.streamThinking = ""
-				m.streamResponse = ""
-				m.mdBuffer = MarkdownBuffer{}
-				m.streamToolGroups = nil
-				m.streamStep = 0
-				m.turnStartTime = time.Now()
-				m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
-				m.cancelCh = make(chan struct{})
-				m.rebuildCollapsibles()
-				return m, m.runLLMStream(nextPrompt)
 			}
 
 			return m, nil
@@ -1859,7 +1865,11 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			// Clear steering queue on cancel — user explicitly stopped
 			if m.steeringTool != nil {
-				m.steeringTool.DrainAll()
+				discarded := m.steeringTool.DrainAll()
+				if len(discarded) > 0 {
+					m.messages = append(m.messages, chatMessage{"system",
+						fmt.Sprintf("🗑️ %d queued steering message(s) discarded", len(discarded))})
+				}
 			}
 			if m.auditWriter != nil {
 				m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserCancel})
