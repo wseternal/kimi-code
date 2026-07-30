@@ -2537,7 +2537,7 @@ func firstUserPrompt(store *session.SessionStore, sessionID string) string {
 // exist, the leftmost one wins.
 func findSkillTrigger(input string) int {
 	for i := 0; i < len(input); i++ {
-		if input[i] == '$' && (i == 0 || input[i-1] == ' ' || input[i-1] == '\t' || input[i-1] == '\n') {
+		if input[i] == '$' && (i == 0 || input[i-1] == ' ' || input[i-1] == '\t' || input[i-1] == '\n' || input[i-1] == '\r') {
 			return i
 		}
 	}
@@ -2552,10 +2552,12 @@ func findSkillTrigger(input string) int {
 // Input: "try $dev-cycle fix bugs" → name="dev-cycle", args="fix bugs"
 func parseSkillCommand(input string) (name, args string) {
 	var raw string
-	if idx := findSkillTrigger(input); idx >= 0 {
+	if strings.HasPrefix(input, "/skill:") {
+		raw = strings.TrimPrefix(input, "/skill:")
+	} else if idx := findSkillTrigger(input); idx >= 0 {
 		raw = input[idx+1:]
 	} else {
-		raw = strings.TrimPrefix(input, "/skill:")
+		raw = input
 	}
 	parts := strings.SplitN(raw, " ", 2)
 	name = parts[0]
