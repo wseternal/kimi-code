@@ -1263,7 +1263,7 @@ func TestReplayHistory_RestoresContextUsage(t *testing.T) {
 		sessionID:  sessID,
 		sess:       sess,
 		app:        &App{SessionStore: sessStore},
-		contextMgr: agentctx.NewContextManager(262144),
+		contextMgr: agentctx.NewContextManager(262144, 0, 0),
 	}
 	m.replayHistory()
 

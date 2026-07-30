@@ -395,7 +395,7 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 		permChain:      permChain,
 		focusIndex:     -1,
 		prompter:       permission.NewPrompter(),
-		contextMgr:     agentctx.NewContextManager(maxCtx),
+		contextMgr:     agentctx.NewContextManager(maxCtx, app.Config.LoopControl.CompactionTriggerRatio, app.Config.LoopControl.ReservedContextSize),
 		goalTracker:    goal.NewTracker(),
 		inputHistory:   inputHist,
 		auditWriter:    app.AuditWriter,
@@ -1303,6 +1303,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "usage":
 			if msg.usage != nil {
 				m.turnUsage = kosong.AddUsage(m.turnUsage, *msg.usage)
+				// Update pending estimate for live context bar display
+				m.contextMgr.SetPendingEstimate(m.turnUsage.InputTotal() + m.turnUsage.Output)
 				// Record audit: usage event
 				if m.auditWriter != nil {
 					usageData := map[string]any{
@@ -3926,13 +3928,9 @@ func (m tuiModel) renderTokenStatus() string {
 	dot := mutedStyle.Render(" · ")
 	isLive := m.streaming && m.turnUsage.GrandTotal() > 0
 
-	// During streaming, include current turn tokens in context display (live)
-	var ctxStr string
-	if isLive {
-		ctxStr = m.contextMgr.UsageDisplay(m.turnUsage.InputTotal() + m.turnUsage.Output)
-	} else {
-		ctxStr = m.contextMgr.UsageDisplay()
-	}
+	// Pending estimate is already tracked via SetPendingEstimate in CurrentUsage(),
+	// so UsageDisplay() without extra args shows the correct live total.
+	ctxStr := m.contextMgr.UsageDisplay()
 
 	// During streaming, show live current-turn usage
 	if isLive {

@@ -113,7 +113,9 @@ func DefaultConfig() *Config {
 		Providers: make(map[string]ProviderConfig),
 		Models:    make(map[string]ModelConfig),
 		LoopControl: LoopControlConfig{
-			MaxStepsPerTurn: 50,
+			MaxStepsPerTurn:        50,
+			CompactionTriggerRatio: 0.85,
+			ReservedContextSize:    50000,
 		},
 		Experimental: make(map[string]bool),
 		Server: ServerConfig{
