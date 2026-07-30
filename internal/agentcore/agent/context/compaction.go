@@ -307,11 +307,8 @@ func applyHeadTailSplit(messages []CompactMessage, opts CompactOptions) []Compac
 		if tokens <= tailRemaining {
 			tailIndices = append([]int{idx}, tailIndices...)
 			tailRemaining -= tokens
-		} else {
-			// Partial: keep the end of this message
-			tailIndices = append([]int{idx}, tailIndices...)
-			break
 		}
+		// Skip messages that don't fit — no partial inclusion to avoid exceeding budget
 	}
 
 	// Build result: keep all non-user messages, and selected user messages

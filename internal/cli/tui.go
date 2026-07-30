@@ -878,7 +878,9 @@ func isContextOverflow(errText string) bool {
 		strings.Contains(lower, "too many tokens") ||
 		strings.Contains(lower, "maximum context") ||
 		strings.Contains(lower, "context limit") ||
-		strings.Contains(lower, "413") ||
+		strings.Contains(lower, "status 413") ||
+		strings.Contains(lower, "http 413") ||
+		strings.Contains(lower, "413 request entity") ||
 		strings.Contains(lower, "token limit")
 }
 
@@ -1317,17 +1319,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.overflowRetries < m.compactStrategy.MaxOverflowAttempts() &&
 				m.compactStrategy.CanCompact() && m.lastPrompt != "" {
 				m.overflowRetries++
-				m.performCompaction(true)
-				m.messages = append(m.messages, chatMessage{"system",
-					fmt.Sprintf("Context overflow detected, compacted (attempt %d/%d). Retrying...",
-						m.overflowRetries, m.compactStrategy.MaxOverflowAttempts())})
-				m.streaming = true
-				m.streamToolGroups = nil
-				m.streamStep = 0
-				m.turnStartTime = time.Now()
-				m.cancelCh = make(chan struct{})
-				m.rebuildCollapsibles()
-				return m, m.runLLMStream(m.lastPrompt)
+				if m.performCompaction(true) {
+					m.messages = append(m.messages, chatMessage{"system",
+						fmt.Sprintf("Context overflow detected, compacted (attempt %d/%d). Retrying...",
+							m.overflowRetries, m.compactStrategy.MaxOverflowAttempts())})
+					m.streaming = true
+					m.streamToolGroups = nil
+					m.streamStep = 0
+					m.turnStartTime = time.Now()
+					m.cancelCh = make(chan struct{})
+					m.rebuildCollapsibles()
+					return m, m.runLLMStream(m.lastPrompt)
+				} // else: compaction failed, fall through to normal error handling
 			}
 			// /btw: reset side-query state so next prompt isn't affected
 			if m.btwMode {
@@ -1929,20 +1932,22 @@ func (m *tuiModel) resetDrawerState() {
 // provider is available, falling back to naive truncation otherwise.
 // When auto is true, the compaction was triggered automatically by the strategy;
 // when false, it was triggered manually via /compact.
-func (m *tuiModel) performCompaction(auto bool) {
-	m.performCompactionWithInstruction(auto, "")
+// Returns true if compaction succeeded, false otherwise.
+func (m *tuiModel) performCompaction(auto bool) bool {
+	return m.performCompactionWithInstruction(auto, "")
 }
 
 // performCompactionWithInstruction is like performCompaction but accepts an
 // optional custom instruction to append to the compaction prompt.
-func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction string) {
+// Returns true if compaction succeeded.
+func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction string) bool {
 	if m.streaming {
 		m.messages = append(m.messages, chatMessage{"system", "Cannot compact while streaming is active."})
-		return
+		return false
 	}
 	if len(m.completedTurns) <= 2 {
 		m.messages = append(m.messages, chatMessage{"system", "Not enough turns to compact (need > 2)."})
-		return
+		return false
 	}
 
 	// Build message list for compactor
@@ -1975,7 +1980,7 @@ func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction
 			if m.compactStrategy != nil {
 				m.compactStrategy.RecordCompaction(result.CompactTokens)
 			}
-			return
+			return true
 		}
 		// LLM compaction failed, fall through to naive
 		m.messages = append(m.messages, chatMessage{"system",
@@ -1986,14 +1991,54 @@ func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction
 	result, err := agentctx.CompactMessages(compactMsgs, agentctx.DefaultKeepRecentTurns)
 	if err != nil {
 		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Compaction failed: %s", err)})
-		return
+		return false
 	}
+
+	// Build rewritten messages from naive result: summary + recent turns verbatim
+	var rewritten []agentctx.CompactMessage
+	rewritten = append(rewritten, agentctx.CompactMessage{Role: "user", Content: result.Summary})
+	keepN := result.KeptTurns
+	type naiveTurn struct{ user, assistant string }
+	var naiveTurns []naiveTurn
+	var cur *naiveTurn
+	for _, msg := range compactMsgs {
+		switch msg.Role {
+		case "user":
+			if cur != nil {
+				naiveTurns = append(naiveTurns, *cur)
+			}
+			cur = &naiveTurn{user: msg.Content}
+		case "assistant":
+			if cur != nil {
+				cur.assistant = msg.Content
+				naiveTurns = append(naiveTurns, *cur)
+				cur = nil
+			}
+		}
+	}
+	if cur != nil {
+		naiveTurns = append(naiveTurns, *cur)
+	}
+	if keepN > len(naiveTurns) {
+		keepN = len(naiveTurns)
+	}
+	for _, t := range naiveTurns[len(naiveTurns)-keepN:] {
+		if t.user != "" {
+			rewritten = append(rewritten, agentctx.CompactMessage{Role: "user", Content: t.user})
+		}
+		if t.assistant != "" {
+			rewritten = append(rewritten, agentctx.CompactMessage{Role: "assistant", Content: t.assistant})
+		}
+	}
+
+	m.rewriteContext(rewritten)
 	m.messages = append(m.messages, chatMessage{"system",
 		fmt.Sprintf("%sCompacted %d turns into summary (%d → %d tokens).\nKept %d recent turns.\n\n%s",
 			prefix, result.RemovedTurns, result.OriginalTokens, result.CompactTokens, result.KeptTurns, result.Summary)})
 	if m.compactStrategy != nil {
 		m.compactStrategy.RecordCompaction(m.contextMgr.CurrentUsage())
 	}
+	return true
 }
 
 // makeGenerateFunc creates a GenerateFunc that calls the LLM provider
@@ -2052,6 +2097,7 @@ func (m *tuiModel) rewriteContext(compactedMsgs []agentctx.CompactMessage) {
 
 	// Clear completed turns (they've been compacted)
 	m.completedTurns = nil
+	m.rebuildCollapsibles()
 }
 
 func (m *tuiModel) deleteWordBackward() {
@@ -2593,6 +2639,9 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.turnCount = 0
 			m.history = nil
 			m.contextMgr.Reset()
+			if m.compactStrategy != nil {
+				m.compactStrategy.ResetForTurn()
+			}
 			m.goalTracker.Clear()
 			m.activeSkill = nil
 			m.resetDrawerState()
@@ -3173,6 +3222,10 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	default:
 		// Regular prompt — route through LLM provider
 		m.activeSkill = nil // clear active skill on regular user input
+		// Reset per-turn compaction counter for the new turn
+		if m.compactStrategy != nil {
+			m.compactStrategy.ResetForTurn()
+		}
 		// Save to input history
 		if m.inputHistory != nil {
 			m.inputHistory.Add(input)
