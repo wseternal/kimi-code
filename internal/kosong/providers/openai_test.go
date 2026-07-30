@@ -486,6 +486,439 @@ func TestGenerateAssemblesMessage(t *testing.T) {
 	}
 }
 
+// ── Reasoning key dialect tests ──
+
+func TestReasoningKeyDialect_Observe(t *testing.T) {
+	d := NewReasoningKeyDialect("")
+
+	// No reasoning key present
+	_, found := d.Observe(map[string]interface{}{"content": "hello"})
+	if found {
+		t.Error("expected not found when no reasoning key")
+	}
+
+	// Detect reasoning_content
+	text, found := d.Observe(map[string]interface{}{
+		"reasoning_content": "my thinking",
+	})
+	if !found || text != "my thinking" {
+		t.Errorf("expected 'my thinking', got %q (found=%v)", text, found)
+	}
+	if d.Detected() != "reasoning_content" {
+		t.Errorf("expected detected 'reasoning_content', got %q", d.Detected())
+	}
+	if d.OutboundKey() != "reasoning_content" {
+		t.Errorf("expected outbound key 'reasoning_content', got %q", d.OutboundKey())
+	}
+}
+
+func TestReasoningKeyDialect_Priority(t *testing.T) {
+	d := NewReasoningKeyDialect("")
+
+	// reasoning_content takes priority over reasoning_details
+	text, found := d.Observe(map[string]interface{}{
+		"reasoning_content": "first",
+		"reasoning_details": "second",
+		"reasoning":         "third",
+	})
+	if !found || text != "first" {
+		t.Errorf("expected priority to pick 'reasoning_content', got %q", text)
+	}
+}
+
+func TestReasoningKeyDialect_ExplicitKey(t *testing.T) {
+	d := NewReasoningKeyDialect("reasoning_details")
+
+	// Even though reasoning_content exists, explicit key wins
+	d.Observe(map[string]interface{}{"reasoning_content": "observed"})
+
+	if d.OutboundKey() != "reasoning_details" {
+		t.Errorf("explicit key should override, got %q", d.OutboundKey())
+	}
+}
+
+func TestReasoningKeyDialect_Default(t *testing.T) {
+	d := NewReasoningKeyDialect("")
+	if d.OutboundKey() != DefaultReasoningKey {
+		t.Errorf("expected default key %q, got %q", DefaultReasoningKey, d.OutboundKey())
+	}
+}
+
+func TestReasoningKeyDialect_Reset(t *testing.T) {
+	d := NewReasoningKeyDialect("")
+	d.Observe(map[string]interface{}{"reasoning_details": "x"})
+	if d.Detected() != "reasoning_details" {
+		t.Fatal("expected detected")
+	}
+	d.Reset()
+	if d.Detected() != "" {
+		t.Errorf("expected empty after reset, got %q", d.Detected())
+	}
+}
+
+func TestExtractReasoning(t *testing.T) {
+	key, val := ExtractReasoning(map[string]interface{}{
+		"reasoning": "deep thought",
+	})
+	if key != "reasoning" || val != "deep thought" {
+		t.Errorf("unexpected: key=%q val=%q", key, val)
+	}
+
+	key, val = ExtractReasoning(map[string]interface{}{"content": "no reasoning"})
+	if key != "" || val != "" {
+		t.Errorf("expected empty for no reasoning, got key=%q val=%q", key, val)
+	}
+}
+
+// ── Tool call ID normalization tests ──
+
+func TestSanitizeToolCallId(t *testing.T) {
+	tests := []struct {
+		id     string
+		maxLen int
+		want   string
+	}{
+		{"call_abc123", 64, "call_abc123"},
+		{"call abc!@#", 64, "call_abc___"},
+		{"", 64, ""},
+		{"a-very-long-id-that-exceeds-limit", 10, "a-very-lon"},
+	}
+	for _, tt := range tests {
+		got := SanitizeToolCallId(tt.id, tt.maxLen)
+		if got != tt.want {
+			t.Errorf("SanitizeToolCallId(%q, %d) = %q, want %q", tt.id, tt.maxLen, got, tt.want)
+		}
+	}
+}
+
+func TestSanitizeOpenAIResponsesCallId(t *testing.T) {
+	got := SanitizeOpenAIResponsesCallId("call_abc|", 64)
+	if got != "call_abc" {
+		t.Errorf("expected 'call_abc', got %q", got)
+	}
+
+	got = SanitizeOpenAIResponsesCallId("call_abc|suffix", 64)
+	if got != "call_abc" {
+		t.Errorf("expected 'call_abc' after stripping |suffix, got %q", got)
+	}
+}
+
+func TestNormalizeToolCallIdsForProvider(t *testing.T) {
+	// Both the tool call and the tool result reference the same original ID
+	origID := "call 1!"
+	messages := []kosong.Message{
+		{
+			Role: kosong.RoleAssistant,
+			ToolCalls: []kosong.ToolCall{
+				{ID: origID, Name: "read", Type: "function"},
+			},
+		},
+		{
+			Role:       kosong.RoleTool,
+			Content:    []kosong.ContentPart{kosong.NewTextPart("result")},
+			ToolCallID: &origID,
+		},
+	}
+
+	policy := DefaultKimiPolicy()
+	result := NormalizeToolCallIdsForProvider(messages, policy)
+
+	// The tool call ID should be sanitized
+	sanitizedID := "call_1_"
+	if result[0].ToolCalls[0].ID != sanitizedID {
+		t.Errorf("expected sanitized ID %q, got %q", sanitizedID, result[0].ToolCalls[0].ID)
+	}
+
+	// The tool_call_id reference should point to the same sanitized ID
+	if result[1].ToolCallID == nil || *result[1].ToolCallID != sanitizedID {
+		got := "<nil>"
+		if result[1].ToolCallID != nil {
+			got = *result[1].ToolCallID
+		}
+		t.Errorf("expected tool_call_id %q, got %s", sanitizedID, got)
+	}
+}
+
+func TestEnsureUnique(t *testing.T) {
+	used := map[string]bool{"call_1": true}
+	got := ensureUnique("call_1", used)
+	if got != "call_1_2" {
+		t.Errorf("expected 'call_1_2', got %q", got)
+	}
+
+	// No collision
+	got = ensureUnique("call_2", used)
+	if got != "call_2" {
+		t.Errorf("expected 'call_2', got %q", got)
+	}
+}
+
+// ── Kimi schema normalization tests ──
+
+func TestNormalizeKimiToolSchema_RefResolution(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"item": map[string]interface{}{
+				"$ref": "#/$defs/Item",
+			},
+		},
+		"$defs": map[string]interface{}{
+			"Item": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name": map[string]interface{}{"type": "string"},
+				},
+			},
+		},
+	}
+
+	result := NormalizeKimiToolSchema(schema)
+	props := result["properties"].(map[string]interface{})
+	item := props["item"].(map[string]interface{})
+
+	// $ref should be resolved
+	if item["type"] != "object" {
+		t.Errorf("expected type 'object', got %v", item["type"])
+	}
+	itemProps := item["properties"].(map[string]interface{})
+	if _, ok := itemProps["name"]; !ok {
+		t.Error("expected 'name' property after ref resolution")
+	}
+}
+
+func TestNormalizeKimiToolSchema_TypeCompletion(t *testing.T) {
+	schema := map[string]interface{}{
+		"properties": map[string]interface{}{
+			"name": map[string]interface{}{"type": "string"},
+		},
+	}
+
+	result := NormalizeKimiToolSchema(schema)
+	if result["type"] != "object" {
+		t.Errorf("expected inferred type 'object', got %v", result["type"])
+	}
+}
+
+func TestNormalizeKimiToolSchema_StripsMetaFields(t *testing.T) {
+	schema := map[string]interface{}{
+		"type":     "object",
+		"$schema":  "http://json-schema.org/draft-07/schema#",
+		"$id":      "https://example.com/schema",
+		"required": []interface{}{},
+	}
+
+	result := NormalizeKimiToolSchema(schema)
+	if _, ok := result["$schema"]; ok {
+		t.Error("expected $schema to be stripped")
+	}
+	if _, ok := result["$id"]; ok {
+		t.Error("expected $id to be stripped")
+	}
+	if _, ok := result["required"]; ok {
+		t.Error("expected empty required to be stripped")
+	}
+}
+
+func TestNormalizeKimiToolSchema_Nullable(t *testing.T) {
+	schema := map[string]interface{}{
+		"type":     "string",
+		"nullable": true,
+	}
+
+	result := NormalizeKimiToolSchema(schema)
+	if _, ok := result["nullable"]; ok {
+		t.Error("expected nullable to be removed")
+	}
+	anyOf, ok := result["anyOf"].([]interface{})
+	if !ok {
+		t.Fatal("expected anyOf after nullable normalization")
+	}
+	if len(anyOf) != 2 {
+		t.Errorf("expected 2 anyOf items, got %d", len(anyOf))
+	}
+}
+
+func TestFlattenSchemaRefs(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"ref_field": map[string]interface{}{
+				"$ref": "#/definitions/MyType",
+			},
+		},
+		"definitions": map[string]interface{}{
+			"MyType": map[string]interface{}{
+				"type":        "string",
+				"description": "A custom type",
+			},
+		},
+	}
+
+	result := FlattenSchemaRefs(schema)
+	// defs should be removed
+	if _, ok := result["definitions"]; ok {
+		t.Error("expected definitions to be removed")
+	}
+	props := result["properties"].(map[string]interface{})
+	refField := props["ref_field"].(map[string]interface{})
+	if refField["type"] != "string" {
+		t.Errorf("expected resolved type 'string', got %v", refField["type"])
+	}
+}
+
+// ── OpenAI Responses API tests ──
+
+func TestResponsesAPI_SSEStreamParsing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/responses") {
+			t.Errorf("expected /responses path, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		events := []string{
+			`{"type":"response.created","response":{"id":"resp_1"}}`,
+			`{"type":"response.output_text.delta","delta":{"type":"response.output_text.delta","text":"Hello"}}`,
+			`{"type":"response.output_text.delta","delta":{"type":"response.output_text.delta","text":" world"}}`,
+			`{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":10,"output_tokens":5}}}`,
+		}
+		for _, ev := range events {
+			w.Write([]byte("data: " + ev + "\n\n"))
+			w.(http.Flusher).Flush()
+		}
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	provider := NewOpenAIResponsesProvider(OpenAIResponsesConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+		Model:   "gpt-4o",
+	})
+
+	stream, err := provider.Generate(context.Background(), "Be helpful", nil,
+		[]kosong.Message{kosong.CreateUserMessage("Hi")}, nil)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	parts, err := kosong.CollectParts(context.Background(), stream)
+	if err != nil {
+		t.Fatalf("CollectParts failed: %v", err)
+	}
+
+	hasText := false
+	hasUsage := false
+	for _, p := range parts {
+		if p.Type == "text" {
+			hasText = true
+		}
+		if p.Type == "usage" {
+			hasUsage = true
+		}
+	}
+	if !hasText {
+		t.Error("expected text parts")
+	}
+	if !hasUsage {
+		t.Error("expected usage part")
+	}
+}
+
+func TestResponsesAPI_FunctionCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		events := []string{
+			`{"type":"response.output_item.added","item":{"type":"function_call","call_id":"fc_1","name":"read"},"output_index":0}`,
+			`{"type":"response.function_call_arguments.delta","delta":{"type":"response.function_call_arguments.delta","delta":"{\"path\":\"/tmp\"}"},"output_index":0}`,
+			`{"type":"response.output_item.done","item":{"type":"function_call","call_id":"fc_1","name":"read","arguments":"{\"path\":\"/tmp\"}"},"output_index":0}`,
+			`{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":20,"output_tokens":10}}}`,
+		}
+		for _, ev := range events {
+			w.Write([]byte("data: " + ev + "\n\n"))
+			w.(http.Flusher).Flush()
+		}
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	provider := NewOpenAIResponsesProvider(OpenAIResponsesConfig{
+		BaseURL: server.URL,
+		Model:   "gpt-4o",
+	})
+
+	stream, err := provider.Generate(context.Background(), "", nil,
+		[]kosong.Message{kosong.CreateUserMessage("read file")}, nil)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	parts, err := kosong.CollectParts(context.Background(), stream)
+	if err != nil {
+		t.Fatalf("CollectParts failed: %v", err)
+	}
+
+	hasFunction := false
+	hasToolCallPart := false
+	for _, p := range parts {
+		if p.Type == "function" && p.Name == "read" && p.ID == "fc_1" {
+			hasFunction = true
+		}
+		if p.Type == "tool_call_part" {
+			hasToolCallPart = true
+		}
+	}
+	if !hasFunction {
+		t.Error("expected function header part")
+	}
+	if !hasToolCallPart {
+		t.Error("expected tool_call_part delta")
+	}
+}
+
+func TestResponsesAPI_BuildInput(t *testing.T) {
+	p := NewOpenAIResponsesProvider(OpenAIResponsesConfig{
+		BaseURL: "https://api.openai.com/v1",
+		Model:   "gpt-4o",
+	})
+
+	callID := "fc_1"
+	args := `{"path":"/tmp"}`
+	history := []kosong.Message{
+		kosong.CreateUserMessage("read a file"),
+		kosong.CreateAssistantMessage(nil, []kosong.ToolCall{
+			{Type: "function", ID: "fc_1", Name: "read", Arguments: &args},
+		}),
+		{
+			Role:       kosong.RoleTool,
+			Content:    []kosong.ContentPart{kosong.NewTextPart("file contents")},
+			ToolCallID: &callID,
+		},
+	}
+
+	input := p.buildInput("Be helpful", history)
+	items, ok := input.([]responsesInputItem)
+	if !ok {
+		t.Fatalf("expected []responsesInputItem, got %T", input)
+	}
+	// Should have: user message + assistant function_call + function_call_output
+	if len(items) != 3 {
+		t.Errorf("expected 3 items, got %d", len(items))
+	}
+	if items[0].Type != "message" || items[0].Role != "user" {
+		t.Errorf("first item should be user message, got %+v", items[0])
+	}
+	if items[1].Type != "function_call" || items[1].Name != "read" {
+		t.Errorf("second item should be function_call, got %+v", items[1])
+	}
+	if items[2].Type != "function_call_output" || items[2].CallID != "fc_1" {
+		t.Errorf("third item should be function_call_output, got %+v", items[2])
+	}
+}
+
 func strPtr(s string) *string {
 	return &s
 }

@@ -128,24 +128,24 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Critical
 - **TS Source**: `packages/kosong/src/providers/anthropic.ts` (1335 lines)
 - **Description**: Full Anthropic SDK adapter: native content blocks, thinking config (budget/adaptive modes, effort params), tool_use/tool_result format, `pause_turn` finish reason, beta features.
-- **Go Status**: Only stub `doc.go` exists.
-- **Files Affected**: `internal/kosong/providers/anthropic/`
+- **Go Status**: Implemented in Cycle 3. Full Anthropic Messages API adapter with native content blocks, thinking config, tool_use/tool_result format, `pause_turn` finish reason, SSE streaming.
+- **Files Affected**: `internal/kosong/providers/anthropic/anthropic.go` (NEW)
 
 ### Gap #9: Google GenAI Provider
 - **Cycle**: 3
 - **Severity**: Critical
 - **TS Source**: `packages/kosong/src/providers/google-genai.ts` (34.5KB)
 - **Description**: Full Gemini/Vertex adapter: native `Content` format, function calling, multimodal (image/video/audio), thinking support.
-- **Go Status**: Only stub `doc.go` exists.
-- **Files Affected**: `internal/kosong/providers/google/`
+- **Go Status**: Implemented in Cycle 3. Full Gemini/Vertex adapter with native `Content` format, function calling, multimodal support, thinking support.
+- **Files Affected**: `internal/kosong/providers/google/google.go` (NEW)
 
 ### Gap #10: Kimi-Specific Provider
 - **Cycle**: 3
 - **Severity**: Critical
 - **TS Source**: `packages/kosong/src/providers/kimi.ts` (683 lines)
 - **Description**: Kimi-specific features: `reasoning_content`/`reasoning_details` handling, `generationKwargs` (temperature, top_p, penalties, stop, cache key), `thinking` extra_body config, Kimi schema normalization, `prompt_cache_key`.
-- **Go Status**: Only stub `doc.go`. Generic OpenAI adapter used instead, missing all Kimi-specific features.
-- **Files Affected**: `internal/kosong/providers/kimi/`
+- **Go Status**: Implemented in Cycle 3. Self-contained Kimi provider with reasoning key dialect detection, schema normalization, thinking config, prompt_cache_key support.
+- **Files Affected**: `internal/kosong/providers/kimi/kimi.go` (NEW)
 
 ### Gap #11: Typed Error Hierarchy
 - **Cycle**: 1 (Foundation)
@@ -184,8 +184,8 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/kosong/src/providers/openai-responses.ts` (1229 lines)
 - **Description**: Dedicated provider for OpenAI's newer Responses API (`/responses` endpoint), different from Chat Completions. Handles `function_call` items, `incomplete_details`, developer role messages.
-- **Go Status**: Not present.
-- **Files Affected**: New provider in `internal/kosong/providers/`
+- **Go Status**: Implemented in Cycle 3. Full Responses API adapter with function_call items, streaming, tool call ID normalization.
+- **Files Affected**: `internal/kosong/providers/openai_responses.go` (NEW)
 
 ### Gap #43: Model Catalog System
 - **Cycle**: 3
@@ -200,24 +200,24 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Important
 - **TS Source**: `packages/kosong/src/providers/reasoning-key.ts` (90 lines)
 - **Description**: Auto-detects which reasoning field (`reasoning_content`, `reasoning_details`, `reasoning`) the endpoint uses and echoes it back on outbound messages.
-- **Go Status**: Hardcodes `reasoning_content` only.
-- **Files Affected**: OpenAI/Kimi providers
+- **Go Status**: Implemented in Cycle 3. Auto-detects reasoning_content vs reasoning_details vs reasoning.
+- **Files Affected**: `internal/kosong/providers/reasoning_key.go` (NEW)
 
 ### Gap #45: Tool Call ID Normalization
 - **Cycle**: 3
 - **Severity**: Important
 - **TS Source**: `packages/kosong/src/providers/tool-call-id.ts` (133 lines)
 - **Description**: Per-provider ID policies: sanitizes IDs to safe chars, truncates to max length, deduplicates with suffixes; different policies for Kimi (64 chars) vs Anthropic vs OpenAI Responses.
-- **Go Status**: Tool call IDs passed through as-is.
-- **Files Affected**: Provider adapters
+- **Go Status**: Implemented in Cycle 3. Per-provider ID policies with sanitization, truncation, deduplication.
+- **Files Affected**: `internal/kosong/providers/tool_call_id.go` (NEW)
 
 ### Gap #46: Kimi Schema Normalization
 - **Cycle**: 3
 - **Severity**: Important
 - **TS Source**: `packages/kosong/src/providers/kimi-schema.ts` (472 lines)
 - **Description**: JSON Schema `$ref` dereferencing, type completion, Moonshot-specific normalizations for tool parameter schemas.
-- **Go Status**: Not present.
-- **Files Affected**: Kimi provider
+- **Go Status**: Implemented in Cycle 3. JSON Schema $ref dereferencing, type completion, Moonshot-specific normalizations.
+- **Files Affected**: `internal/kosong/providers/kimi_schema.go` (NEW)
 
 ### Gap #47: Kimi File Upload (Video)
 - **Cycle**: 3

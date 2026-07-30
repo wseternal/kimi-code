@@ -7,6 +7,9 @@ import (
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/kosong"
+	"github.com/visdomtech/kimi-code/internal/kosong/providers/anthropic"
+	"github.com/visdomtech/kimi-code/internal/kosong/providers/google"
+	"github.com/visdomtech/kimi-code/internal/kosong/providers/kimi"
 	"github.com/visdomtech/kimi-code/internal/oauth"
 )
 
@@ -76,13 +79,52 @@ func NewFromConfig(cfg *config.Config) (kosong.ChatProvider, error) {
 
 	headers := prov.CustomHeaders
 
-	inner := NewOpenAIProvider(OpenAIProviderConfig{
-		Name:           name,
-		APIKey:         prov.APIKey,
-		BaseURL:        baseURL,
-		Model:          model,
-		DefaultHeaders: headers,
-	})
+	// Create the appropriate provider based on type
+	var inner kosong.ChatProvider
+	switch provType {
+	case "kimi":
+		inner = kimi.NewProvider(kimi.ProviderConfig{
+			APIKey:         prov.APIKey,
+			BaseURL:        baseURL,
+			Model:          model,
+			DefaultHeaders: headers,
+		})
+
+	case "anthropic":
+		inner = anthropic.NewProvider(anthropic.Config{
+			APIKey:         prov.APIKey,
+			BaseURL:        baseURL,
+			Model:          model,
+			DefaultHeaders: headers,
+		})
+
+	case "google-genai", "vertexai":
+		inner = google.NewProvider(google.Config{
+			APIKey:         prov.APIKey,
+			BaseURL:        baseURL,
+			Model:          model,
+			DefaultHeaders: headers,
+		})
+
+	case "openai_responses":
+		inner = NewOpenAIResponsesProvider(OpenAIResponsesConfig{
+			Name:           name,
+			APIKey:         prov.APIKey,
+			BaseURL:        baseURL,
+			Model:          model,
+			DefaultHeaders: headers,
+		})
+
+	default:
+		// Default to OpenAI-compatible provider
+		inner = NewOpenAIProvider(OpenAIProviderConfig{
+			Name:           name,
+			APIKey:         prov.APIKey,
+			BaseURL:        baseURL,
+			Model:          model,
+			DefaultHeaders: headers,
+		})
+	}
 
 	// Wrap with OAuth if configured
 	if prov.OAuth != nil {
