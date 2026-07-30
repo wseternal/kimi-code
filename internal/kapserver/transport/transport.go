@@ -254,8 +254,9 @@ type Broadcaster struct {
 	registry    *Registry
 	sequence    atomic.Int64
 	epoch       string
-	ringBuffer  []BroadcasterEvent
-	ringSize    int
+	ring        []BroadcasterEvent // fixed-size circular buffer
+	ringHead    int                // index of the oldest element
+	ringCount   int                // number of elements currently in the ring
 	journal     *EventJournal
 	turnTracker *TurnTracker
 	mu          sync.RWMutex
@@ -283,8 +284,7 @@ func NewBroadcaster(registry *Registry, ringSize int, logger *slog.Logger) *Broa
 	return &Broadcaster{
 		registry:    registry,
 		epoch:       time.Now().Format(time.RFC3339Nano),
-		ringBuffer:  make([]BroadcasterEvent, 0, ringSize),
-		ringSize:    ringSize,
+		ring:        make([]BroadcasterEvent, ringSize),
 		journal:     NewEventJournal(),
 		turnTracker: NewTurnTracker(),
 		logger:      logger,
@@ -309,10 +309,15 @@ func (b *Broadcaster) Publish(eventType string, sessionID string, data any) {
 	}
 
 	b.mu.Lock()
-	if len(b.ringBuffer) >= b.ringSize {
-		b.ringBuffer = b.ringBuffer[1:]
+	// Circular buffer write: overwrite oldest when full.
+	idx := (b.ringHead + b.ringCount) % len(b.ring)
+	if b.ringCount == len(b.ring) {
+		// Buffer full — advance head (overwrite oldest)
+		b.ringHead = (b.ringHead + 1) % len(b.ring)
+	} else {
+		b.ringCount++
 	}
-	b.ringBuffer = append(b.ringBuffer, event)
+	b.ring[idx] = event
 	b.mu.Unlock()
 
 	// Persist to journal for replay
@@ -366,7 +371,8 @@ func (b *Broadcaster) EventsAfter(seq int64) []BroadcasterEvent {
 	defer b.mu.RUnlock()
 
 	var result []BroadcasterEvent
-	for _, e := range b.ringBuffer {
+	for i := 0; i < b.ringCount; i++ {
+		e := b.ring[(b.ringHead+i)%len(b.ring)]
 		if e.Seq > seq {
 			result = append(result, e)
 		}
@@ -434,7 +440,7 @@ func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.
 				WSConnectionID:     connID,
 				ProtocolVersion:    ws.ProtocolVersion,
 				HeartbeatMs:        30000,
-				MaxEventBufferSize: broadcaster.ringSize,
+				MaxEventBufferSize: len(broadcaster.ring),
 				Capabilities: ws.ServerHelloCapabilities{
 					EventBatching: true,
 					Compression:   false,

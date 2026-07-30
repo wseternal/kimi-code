@@ -29,7 +29,6 @@ const (
 
 	// Not found (404xx)
 	ErrorCodeSessionNotFound   = 40401
-	ErrorCodeSessionExists     = 40901
 	ErrorCodePromptNotFound    = 40402
 	ErrorCodeMessageNotFound   = 40403
 	ErrorCodeApprovalNotFound  = 40404
@@ -47,7 +46,8 @@ const (
 	ErrorCodeToolCallNotFound  = 40416
 
 	// Conflict (409xx)
-	ErrorCodeSessionBusy            = 40901
+	ErrorCodeSessionExists            = 40901
+	ErrorCodeSessionBusy              = 40921
 	ErrorCodeApprovalAlreadyResolved = 40902
 	ErrorCodePromptAlreadyCompleted = 40903
 	ErrorCodeTaskAlreadyFinished    = 40904

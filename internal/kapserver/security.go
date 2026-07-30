@@ -16,6 +16,10 @@ type SecurityConfig struct {
 	RateLimitPerMinute int
 	// BindAddress is the address the server is bound to.
 	BindAddress string
+	// TrustedProxies is the set of proxy IPs whose X-Forwarded-For /
+	// X-Real-IP headers should be trusted. When empty, proxy headers are
+	// ignored and RemoteAddr is used directly.
+	TrustedProxies map[string]bool
 }
 
 // SecurityMiddleware provides host classification, origin/CORS validation,
@@ -51,6 +55,7 @@ func (m *SecurityMiddleware) Wrap(next http.Handler) http.Handler {
 				return
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
 		} else {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 		}
@@ -69,7 +74,7 @@ func (m *SecurityMiddleware) Wrap(next http.Handler) http.Handler {
 
 		// Rate limiting
 		if m.rateLimiter != nil {
-			clientIP := extractClientIP(r)
+			clientIP := extractClientIP(r, m.config.TrustedProxies)
 			if !m.rateLimiter.Allow(clientIP) {
 				w.Header().Set("Retry-After", "60")
 				http.Error(w, `{"code":42901,"msg":"rate limit exceeded"}`, http.StatusTooManyRequests)
@@ -121,17 +126,26 @@ func isLoopbackAddress(addr string) bool {
 	return false
 }
 
-func extractClientIP(r *http.Request) string {
-	// Check X-Forwarded-For
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.SplitN(xff, ",", 2)
-		return strings.TrimSpace(parts[0])
-	}
-	// Check X-Real-IP
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
+func extractClientIP(r *http.Request, trustedProxies map[string]bool) string {
+	// Only trust proxy headers when the direct connection is from a trusted proxy.
+	directIP := remoteIP(r)
+	if trustedProxies != nil && trustedProxies[directIP] {
+		// Check X-Forwarded-For
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.SplitN(xff, ",", 2)
+			return strings.TrimSpace(parts[0])
+		}
+		// Check X-Real-IP
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			return xri
+		}
 	}
 	// Fall back to RemoteAddr
+	return directIP
+}
+
+// remoteIP extracts the IP from RemoteAddr, stripping the port.
+func remoteIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

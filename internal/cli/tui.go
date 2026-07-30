@@ -2890,7 +2890,9 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		info := fmt.Sprintf("Session:   %s\nModel:     %s\nProvider:  %s (%s)\nTurns:     %d\nContext:   %s\nYOLO:      %v\nPlan:      %v",
 			m.sessionID, m.model, provName, status, m.turnCount, m.contextMgr.UsageDisplay(), m.yoloMode, m.planMode)
 		if m.goalTracker.IsActive() {
-			info += "\nGoal:      " + m.goalTracker.Current().Objective
+			if snap := m.goalTracker.Current(); snap != nil {
+				info += "\nGoal:      " + snap.Objective
+			}
 		}
 		m.messages = append(m.messages, chatMessage{"system", info})
 		m.input = ""
@@ -3061,11 +3063,17 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		text, clear := goal.ParseGoalCommand(args)
 		m.messages = append(m.messages, chatMessage{"user", input})
 		if clear {
-			m.goalTracker.CancelGoal("user")
-			m.messages = append(m.messages, chatMessage{"system", "Goal cleared."})
+			if _, _, err := m.goalTracker.CancelGoal("user"); err != nil {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error clearing goal: %s", err)})
+			} else {
+				m.messages = append(m.messages, chatMessage{"system", "Goal cleared."})
+			}
 		} else {
-			m.goalTracker.CreateGoal(text, "", goal.BudgetLimits{}, "user")
-			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal set: %s", text)})
+			if _, _, err := m.goalTracker.CreateGoal(text, "", goal.BudgetLimits{}, "user"); err != nil {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error setting goal: %s", err)})
+			} else {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal set: %s", text)})
+			}
 		}
 		m.input = ""
 		m.cursor = 0
