@@ -259,3 +259,151 @@ func TestSetBudgetLimits(t *testing.T) {
 		t.Errorf("expected token budget 5000, got %v", snap.Budget.TokenBudget)
 	}
 }
+
+// ── Continuation Driver Tests ──
+
+func TestContinuationDriverBasic(t *testing.T) {
+	tr := NewTracker()
+	driver := NewContinuationDriver(tr, DefaultContinuationConfig())
+
+	// No goal → no continuation
+	prompt := driver.OnTurnEnded("turn1", false, false)
+	if prompt != nil {
+		t.Error("expected nil prompt when no goal")
+	}
+
+	// Create goal → continuation should trigger
+	tr.CreateGoal("Build API", "", BudgetLimits{}, "user")
+	prompt = driver.OnTurnEnded("turn1", false, false)
+	if prompt == nil {
+		t.Fatal("expected continuation prompt")
+	}
+	if prompt.Objective != "Build API" {
+		t.Errorf("Objective = %q", prompt.Objective)
+	}
+	if prompt.StepCapped {
+		t.Error("should not be step capped")
+	}
+
+	// Confirm launched → clears pending
+	driver.ConfirmLaunched("turn2")
+	if driver.HasPending() {
+		t.Error("should not have pending after confirm")
+	}
+	if driver.ContinuationCount() != 1 {
+		t.Errorf("ContinuationCount = %d", driver.ContinuationCount())
+	}
+}
+
+func TestContinuationDriverStepCapped(t *testing.T) {
+	tr := NewTracker()
+	driver := NewContinuationDriver(tr, DefaultContinuationConfig())
+
+	tr.CreateGoal("Complex task", "", BudgetLimits{}, "user")
+	prompt := driver.OnTurnEnded("turn1", true, false)
+	if prompt == nil {
+		t.Fatal("expected continuation prompt for step-capped")
+	}
+	if !prompt.StepCapped {
+		t.Error("expected StepCapped = true")
+	}
+	if !strings.Contains(prompt.Message, "step limit") {
+		t.Error("expected step-cap mention in prompt")
+	}
+}
+
+func TestContinuationDriverFailedTurn(t *testing.T) {
+	tr := NewTracker()
+	driver := NewContinuationDriver(tr, DefaultContinuationConfig())
+
+	tr.CreateGoal("Task", "", BudgetLimits{}, "user")
+	// Failed turn (not step-capped) → no continuation
+	prompt := driver.OnTurnEnded("turn1", false, true)
+	if prompt != nil {
+		t.Error("expected nil prompt for failed turn")
+	}
+}
+
+func TestContinuationDriverCompletedGoal(t *testing.T) {
+	tr := NewTracker()
+	driver := NewContinuationDriver(tr, DefaultContinuationConfig())
+
+	tr.CreateGoal("Done task", "", BudgetLimits{}, "user")
+	tr.MarkComplete("done", "user")
+
+	prompt := driver.OnTurnEnded("turn1", false, false)
+	if prompt != nil {
+		t.Error("expected nil prompt for completed goal")
+	}
+}
+
+func TestContinuationDriverMaxTurns(t *testing.T) {
+	tr := NewTracker()
+	driver := NewContinuationDriver(tr, ContinuationConfig{
+		MaxContinuationTurns: 2,
+	})
+
+	tr.CreateGoal("Limited task", "", BudgetLimits{}, "user")
+
+	// First continuation
+	p := driver.OnTurnEnded("turn1", false, false)
+	if p == nil {
+		t.Fatal("expected prompt")
+	}
+	driver.ConfirmLaunched("turn2")
+
+	// Second continuation
+	p = driver.OnTurnEnded("turn2", false, false)
+	if p == nil {
+		t.Fatal("expected prompt")
+	}
+	driver.ConfirmLaunched("turn3")
+
+	// Third should be blocked
+	p = driver.OnTurnEnded("turn3", false, false)
+	if p != nil {
+		t.Error("expected nil after max turns")
+	}
+
+	snap := tr.Current()
+	if snap.Status != StatusBlocked {
+		t.Errorf("expected blocked status, got %q", snap.Status)
+	}
+}
+
+func TestContinuationDriverDisabled(t *testing.T) {
+	tr := NewTracker()
+	driver := NewContinuationDriver(tr, DefaultContinuationConfig())
+	driver.SetDisabled(true)
+
+	tr.CreateGoal("Task", "", BudgetLimits{}, "user")
+	prompt := driver.OnTurnEnded("turn1", false, false)
+	if prompt != nil {
+		t.Error("expected nil prompt when driver is disabled")
+	}
+}
+
+func TestContinuationDriverDoubleEnqueue(t *testing.T) {
+	tr := NewTracker()
+	driver := NewContinuationDriver(tr, DefaultContinuationConfig())
+
+	tr.CreateGoal("Task", "", BudgetLimits{}, "user")
+
+	p1 := driver.OnTurnEnded("turn1", false, false)
+	if p1 == nil {
+		t.Fatal("expected first prompt")
+	}
+
+	// Second call without confirm → nil (pending exists)
+	p2 := driver.OnTurnEnded("turn1", false, false)
+	if p2 != nil {
+		t.Error("expected nil for double enqueue")
+	}
+
+	// Clear pending and try again
+	driver.ClearPending()
+	p3 := driver.OnTurnEnded("turn1", false, false)
+	if p3 == nil {
+		t.Error("expected prompt after clear pending")
+	}
+}
