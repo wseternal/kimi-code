@@ -91,8 +91,10 @@ func TestManager_GetOutput(t *testing.T) {
 
 	taskID, _ := mgr.StartProcess(ctx, "echo 'hello world'", ".", nil)
 
-	// Wait for completion
-	time.Sleep(200 * time.Millisecond)
+	// Wait for completion deterministically instead of relying on time.Sleep
+	if err := mgr.Wait(taskID, 5*time.Second); err != nil {
+		t.Fatalf("wait failed: %v", err)
+	}
 
 	output, err := mgr.GetOutput(taskID, 1024)
 	if err != nil {
@@ -141,7 +143,9 @@ func TestManager_ListActiveOnly(t *testing.T) {
 
 	// Start and complete a task
 	taskID1, _ := mgr.StartProcess(ctx, "echo done", ".", nil)
-	time.Sleep(200 * time.Millisecond)
+	if err := mgr.Wait(taskID1, 5*time.Second); err != nil {
+		t.Fatalf("wait for task1 failed: %v", err)
+	}
 
 	// Start a running task
 	taskID2, _ := mgr.StartProcess(ctx, "sleep 10", ".", nil)

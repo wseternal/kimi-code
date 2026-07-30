@@ -25,7 +25,7 @@ func TestTokenEstimate(t *testing.T) {
 }
 
 func TestContextManager(t *testing.T) {
-	cm := NewContextManager(1000)
+	cm := NewContextManager(1000, 0.85, 50000)
 
 	if cm.MaxTokens() != 1000 {
 		t.Errorf("MaxTokens = %d, want 1000", cm.MaxTokens())
@@ -56,16 +56,93 @@ func TestContextManager(t *testing.T) {
 }
 
 func TestContextManagerNeedsCompaction(t *testing.T) {
-	cm := NewContextManager(100)
+	cm := NewContextManager(100, 0.8, 50000)
 	cm.AddTurnUsage(70)
 
-	if cm.NeedsCompaction(0.8) {
+	if cm.NeedsCompaction() {
 		t.Error("should not need compaction at 70%")
 	}
 
 	cm.AddTurnUsage(20)
-	if !cm.NeedsCompaction(0.8) {
+	if !cm.NeedsCompaction() {
 		t.Error("should need compaction at 90%")
+	}
+}
+
+func TestTwoTierTracking(t *testing.T) {
+	cm := NewContextManager(1000, 0.85, 50000)
+
+	// Add measured turns
+	cm.AddTurnUsage(200)
+	cm.AddTurnUsage(300)
+	if cm.CurrentUsage() != 500 {
+		t.Errorf("CurrentUsage = %d, want 500", cm.CurrentUsage())
+	}
+
+	// Set pending estimate (simulates streaming)
+	cm.SetPendingEstimate(150)
+	if cm.CurrentUsage() != 650 {
+		t.Errorf("CurrentUsage with pending = %d, want 650", cm.CurrentUsage())
+	}
+
+	// Commit turn: pending clears, measured increases
+	cm.AddTurnUsage(150)
+	if cm.CurrentUsage() != 650 {
+		t.Errorf("CurrentUsage after commit = %d, want 650", cm.CurrentUsage())
+	}
+
+	// Pending should be cleared after AddTurnUsage
+	cm.SetPendingEstimate(0)
+	if cm.CurrentUsage() != 650 {
+		t.Errorf("CurrentUsage after clearing pending = %d, want 650", cm.CurrentUsage())
+	}
+}
+
+func TestNeedsCompactionReservedContext(t *testing.T) {
+	// maxTokens=1000, triggerRatio=0.85, reservedContext=200
+	cm := NewContextManager(1000, 0.85, 200)
+
+	// At 750 tokens: ratio check 750 < 850 (no), reserved check 750+200=950 < 1000 (no)
+	cm.AddTurnUsage(750)
+	if cm.NeedsCompaction() {
+		t.Error("should not need compaction at 750 with reserved=200")
+	}
+
+	// At 800 tokens: ratio check 800 < 850 (no), reserved check 800+200=1000 >= 1000 (yes)
+	cm.AddTurnUsage(50)
+	if !cm.NeedsCompaction() {
+		t.Error("should need compaction at 800 with reserved=200 (800+200>=1000)")
+	}
+}
+
+func TestNeedsCompactionRatioTrigger(t *testing.T) {
+	// maxTokens=100, triggerRatio=0.85, reservedContext=50000 (default)
+	// Ratio check fires at 85; reserved check fires at max(0, 100-50000)=0, always true.
+	// Use large maxTokens so reserved check doesn't dominate.
+	cm := NewContextManager(200000, 0.85, 50000)
+	// Ratio fires at 170000; reserved fires at 150000. Reserved fires first.
+	cm.AddTurnUsage(140000)
+	if cm.NeedsCompaction() {
+		t.Error("should not need compaction at 140000/200000 with reserved=50000")
+	}
+	// At 150000: reserved check fires (150000+50000 >= 200000)
+	cm.AddTurnUsage(10000)
+	if !cm.NeedsCompaction() {
+		t.Error("should need compaction at 150000/200000 (reserved context exhausted)")
+	}
+}
+
+func TestSetMaxTokensResetThresholds(t *testing.T) {
+	cm := NewContextManager(1000, 0.85, 100)
+	cm.AddTurnUsage(900)
+	if !cm.NeedsCompaction() {
+		t.Error("should need compaction at 900/1000")
+	}
+
+	// Expand window — same usage should no longer trigger
+	cm.SetMaxTokens(2000)
+	if cm.NeedsCompaction() {
+		t.Error("should not need compaction at 900/2000")
 	}
 }
 
@@ -116,7 +193,7 @@ func TestCompactMessagesNotEnoughTurns(t *testing.T) {
 }
 
 func TestSetMaxTokens(t *testing.T) {
-	cm := NewContextManager(1000)
+	cm := NewContextManager(1000, 0.85, 50000)
 	cm.AddTurnUsage(500)
 
 	// Verify initial state

@@ -17,48 +17,64 @@ func TurnEstimate(text string) int {
 	return TokenEstimate(text) + PerTurnOverhead
 }
 
-// TokenEstimate estimates token count from text using the ~4 chars/token heuristic.
-func TokenEstimate(text string) int {
-	if text == "" {
-		return 0
-	}
-	// Approximate: 1 token ≈ 4 characters for English, ~3 for code
-	chars := len(text)
-	return (chars + 3) / 4
+// TokenEstimate is defined in tokens.go (CJK-aware heuristic).
+
+// turnRecord stores token usage for a single turn.
+type turnRecord struct {
+	tokens   int
+	measured bool // true if from real API usage, false if estimated
 }
 
-// ContextManager tracks context window usage and manages compaction.
+// ContextManager tracks context window usage using a two-tier model:
+// measured (confirmed by API responses) and pending (estimated for in-flight turns).
+// It also stores compaction thresholds from config.
 type ContextManager struct {
-	maxTokens    int
-	currentUsage int
-	turnUsages   []int // per-turn token counts
+	maxTokens       int
+	measuredTotal   int // confirmed by API usage responses
+	pendingEstimate int // estimated tokens for in-flight turn (transient)
+	turnRecords     []turnRecord
+	// Compaction thresholds (from config)
+	triggerRatio    float64 // default 0.85
+	reservedContext int     // default 50000
 }
 
-// NewContextManager creates a new context manager with the given max tokens.
-func NewContextManager(maxTokens int) *ContextManager {
+// NewContextManager creates a new context manager with the given max tokens
+// and compaction thresholds. If triggerRatio <= 0, defaults to 0.85.
+// If reservedContext <= 0, defaults to 50000.
+func NewContextManager(maxTokens int, triggerRatio float64, reservedContext int) *ContextManager {
 	if maxTokens <= 0 {
 		maxTokens = 262144 // default 256K
 	}
-	return &ContextManager{maxTokens: maxTokens}
-}
-
-// AddTurnUsage records token usage for a completed turn.
-func (cm *ContextManager) AddTurnUsage(tokens int) {
-	cm.turnUsages = append(cm.turnUsages, tokens)
-	cm.recalculate()
-}
-
-// recalculate recomputes total usage from per-turn data.
-func (cm *ContextManager) recalculate() {
-	cm.currentUsage = 0
-	for _, u := range cm.turnUsages {
-		cm.currentUsage += u
+	if triggerRatio <= 0 {
+		triggerRatio = 0.85
+	}
+	if reservedContext <= 0 {
+		reservedContext = 50000
+	}
+	return &ContextManager{
+		maxTokens:       maxTokens,
+		triggerRatio:    triggerRatio,
+		reservedContext: reservedContext,
 	}
 }
 
-// CurrentUsage returns the estimated current token usage.
+// AddTurnUsage records measured token usage for a completed turn.
+// This clears the pending estimate and promotes it to measured.
+func (cm *ContextManager) AddTurnUsage(tokens int) {
+	cm.turnRecords = append(cm.turnRecords, turnRecord{tokens: tokens, measured: true})
+	cm.measuredTotal += tokens
+	cm.pendingEstimate = 0
+}
+
+// SetPendingEstimate sets the transient token estimate for the current
+// in-flight turn (e.g. during streaming). This does not affect measuredTotal.
+func (cm *ContextManager) SetPendingEstimate(tokens int) {
+	cm.pendingEstimate = tokens
+}
+
+// CurrentUsage returns measured total plus any pending estimate.
 func (cm *ContextManager) CurrentUsage() int {
-	return cm.currentUsage
+	return cm.measuredTotal + cm.pendingEstimate
 }
 
 // MaxTokens returns the context window size.
@@ -81,14 +97,14 @@ func (cm *ContextManager) UsagePercent() float64 {
 	if cm.maxTokens == 0 {
 		return 0
 	}
-	return float64(cm.currentUsage) / float64(cm.maxTokens) * 100
+	return float64(cm.CurrentUsage()) / float64(cm.maxTokens) * 100
 }
 
 // UsageDisplay returns a formatted string like "12.3K / 128K tokens (9.6%)".
-// If currentTurn > 0, those tokens are included in the used count (for live
+// If currentTurn > 0, those tokens are added to the used count (for live
 // streaming display where the current turn hasn't been committed yet).
 func (cm *ContextManager) UsageDisplay(currentTurn ...int) string {
-	used := cm.currentUsage
+	used := cm.CurrentUsage()
 	for _, t := range currentTurn {
 		used += t
 	}
@@ -103,28 +119,59 @@ func (cm *ContextManager) UsageDisplay(currentTurn ...int) string {
 	return fmt.Sprintf("%s / %s tokens (%.1f%%)", usedStr, maxStr, pct)
 }
 
-// RemoveLastNTurns removes the last N turn usages.
+// RemoveLastNTurns removes the last N turn records and recalculates measured total.
 func (cm *ContextManager) RemoveLastNTurns(n int) {
-	if n >= len(cm.turnUsages) {
-		cm.turnUsages = nil
+	if n >= len(cm.turnRecords) {
+		cm.turnRecords = nil
 	} else {
-		cm.turnUsages = cm.turnUsages[:len(cm.turnUsages)-n]
+		cm.turnRecords = cm.turnRecords[:len(cm.turnRecords)-n]
 	}
 	cm.recalculate()
 }
 
-// Reset clears all usage tracking.
-func (cm *ContextManager) Reset() {
-	cm.turnUsages = nil
-	cm.currentUsage = 0
+// recalculate recomputes measuredTotal from turn records.
+func (cm *ContextManager) recalculate() {
+	cm.measuredTotal = 0
+	for _, r := range cm.turnRecords {
+		cm.measuredTotal += r.tokens
+	}
 }
 
-// NeedsCompaction returns true if context usage exceeds the trigger ratio.
-func (cm *ContextManager) NeedsCompaction(triggerRatio float64) bool {
-	if triggerRatio <= 0 {
-		triggerRatio = 0.8
+// Reset clears all usage tracking.
+func (cm *ContextManager) Reset() {
+	cm.turnRecords = nil
+	cm.measuredTotal = 0
+	cm.pendingEstimate = 0
+}
+
+// NeedsCompaction returns true if context usage exceeds the configured
+// trigger ratio or if usage plus reserved context would exhaust the window.
+func (cm *ContextManager) NeedsCompaction() bool {
+	if cm.maxTokens <= 0 {
+		return false
 	}
-	return cm.UsagePercent() >= triggerRatio*100
+	used := cm.CurrentUsage()
+	// Trigger if usage exceeds ratio threshold
+	if float64(used) >= float64(cm.maxTokens)*cm.triggerRatio {
+		return true
+	}
+	// Trigger if reserved context would be exhausted
+	if cm.reservedContext > 0 && cm.reservedContext < cm.maxTokens {
+		if used+cm.reservedContext >= cm.maxTokens {
+			return true
+		}
+	}
+	return false
+}
+
+// TriggerRatio returns the configured compaction trigger ratio.
+func (cm *ContextManager) TriggerRatio() float64 {
+	return cm.triggerRatio
+}
+
+// ReservedContext returns the configured reserved context size.
+func (cm *ContextManager) ReservedContext() int {
+	return cm.reservedContext
 }
 
 // FormatTokenCount formats a token count with K/M suffix.
