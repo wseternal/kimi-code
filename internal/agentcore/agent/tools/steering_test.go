@@ -17,8 +17,8 @@ func TestSteeringTool_EnqueueDrainAll(t *testing.T) {
 		t.Errorf("new tool Len() = %d, want 0", st.Len())
 	}
 
-	st.Enqueue("first", false)
-	st.Enqueue("second", true)
+	st.Enqueue("first")
+	st.Enqueue("second")
 
 	if !st.HasMessages() {
 		t.Error("should have messages after enqueue")
@@ -31,11 +31,11 @@ func TestSteeringTool_EnqueueDrainAll(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("DrainAll returned %d messages, want 2", len(msgs))
 	}
-	if msgs[0].Content != "first" || msgs[0].Priority {
-		t.Errorf("msgs[0] = %+v, want first/priority=false", msgs[0])
+	if msgs[0].Content != "first" {
+		t.Errorf("msgs[0].Content = %q, want %q", msgs[0].Content, "first")
 	}
-	if msgs[1].Content != "second" || !msgs[1].Priority {
-		t.Errorf("msgs[1] = %+v, want second/priority=true", msgs[1])
+	if msgs[1].Content != "second" {
+		t.Errorf("msgs[1].Content = %q, want %q", msgs[1].Content, "second")
 	}
 
 	// After drain, should be empty
@@ -78,8 +78,8 @@ func TestSteeringTool_ExecuteEmpty(t *testing.T) {
 
 func TestSteeringTool_ExecuteWithMessages(t *testing.T) {
 	st := NewSteeringTool()
-	st.Enqueue("stop using bash", false)
-	st.Enqueue("use grep instead", true)
+	st.Enqueue("stop using bash")
+	st.Enqueue("use grep instead")
 
 	result, err := st.Execute(context.Background(), nil, ExecContext{})
 	if err != nil {
@@ -109,7 +109,7 @@ func TestSteeringTool_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := 0; i < messagesPerGoroutine; i++ {
-				st.Enqueue("msg", false)
+				st.Enqueue("msg")
 			}
 		}(g)
 	}

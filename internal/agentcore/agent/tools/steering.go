@@ -7,14 +7,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // SteeringMessage represents a user message queued for steering the agent.
 type SteeringMessage struct {
-	Content     string    `json:"content"`
-	Priority    bool      `json:"priority"`    // true when user pressed steering key
-	SubmittedAt time.Time `json:"submittedAt"`
+	Content string `json:"content"`
 }
 
 // SteeringTool is a system-injected tool that delivers queued user messages
@@ -33,14 +30,10 @@ func NewSteeringTool() *SteeringTool {
 }
 
 // Enqueue adds a message to the steering queue.
-func (t *SteeringTool) Enqueue(content string, priority bool) {
+func (t *SteeringTool) Enqueue(content string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.queue = append(t.queue, SteeringMessage{
-		Content:     content,
-		Priority:    priority,
-		SubmittedAt: time.Now(),
-	})
+	t.queue = append(t.queue, SteeringMessage{Content: content})
 }
 
 // HasMessages reports whether there are queued messages.

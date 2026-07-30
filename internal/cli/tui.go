@@ -3219,7 +3219,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		// If streaming, queue the message instead of starting a new turn
 		if m.streaming {
 			if m.steeringTool != nil {
-				m.steeringTool.Enqueue(input, false)
+				m.steeringTool.Enqueue(input)
 			}
 			m.messages = append(m.messages, chatMessage{"user", input})
 			qLen := 0
