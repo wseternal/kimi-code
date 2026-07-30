@@ -3198,7 +3198,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.showSuggestions = false
 		return m, nil
 
-	case findSkillTrigger(input) >= 0:
+	case !strings.HasPrefix(input, "/") && findSkillTrigger(input) >= 0:
 		skillName, skillArgs := parseSkillCommand(input)
 		if skillName == "" {
 			m.messages = append(m.messages, chatMessage{"user", input})

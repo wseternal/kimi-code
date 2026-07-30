@@ -130,7 +130,6 @@ func TestFindSkillTrigger(t *testing.T) {
 		// Embedded in a word — not a valid trigger.
 		{"a$b", -1},
 		{"/a$b", -1},
-		{"$", 0},
 		{" $", 1},
 	}
 	for _, tt := range tests {
@@ -339,6 +338,47 @@ func TestHandleSubmit_DollarAfterWhitespaceRoutesThroughLLM(t *testing.T) {
 	// The user message should preserve the original input verbatim.
 	if len(rm.messages) < 1 || rm.messages[0].content != "try $test-skill do something useful" {
 		t.Errorf("first user message = %q, want original input", rm.messages[0].content)
+	}
+}
+
+// TestHandleSubmit_SlashUnknownWithDollarDoesNotInvokeSkill verifies that an
+// unrecognized slash command containing '$' after whitespace is NOT silently
+// routed as a skill invocation. It must fall through to the slash-command
+// default handler and report "Unknown command".
+func TestHandleSubmit_SlashUnknownWithDollarDoesNotInvokeSkill(t *testing.T) {
+	cat := skill.NewCatalog([]skill.Skill{
+		{
+			Name:        "test-skill",
+			Description: "A test skill",
+			Body:        "# Test Skill",
+		},
+	})
+
+	m := tuiModel{
+		input:        "/foobar $test-skill",
+		cursor:       30,
+		skillCatalog: cat,
+	}
+
+	result, cmd := m.handleSubmit()
+	rm := result.(tuiModel)
+
+	if rm.streaming {
+		t.Error("unrecognized slash command must not start streaming as a skill")
+	}
+	if cmd != nil {
+		t.Error("unrecognized slash command must not return a tea.Cmd")
+	}
+
+	found := false
+	for _, msg := range rm.messages {
+		if msg.role == "system" && strings.Contains(msg.content, "Unknown command") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Unknown command' system message for '/foobar $test-skill'")
 	}
 }
 
