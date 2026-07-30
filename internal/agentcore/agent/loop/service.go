@@ -343,13 +343,14 @@ func (s *Service) executeTurn(parentCtx context.Context, turn *TurnJob) {
 
 func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message) (*StepResult, error) {
 	seq := s.stepSeq.Add(1)
+	stepID := fmt.Sprintf("step_%d", seq)
 
 	s.eventBus.Publish(Event{
 		Type:      "step.started",
 		TurnID:    turn.ID,
 		SessionID: turn.SessionID,
 		Timestamp: time.Now(),
-		Data:      map[string]any{"seq": seq},
+		Data:      map[string]any{"seq": seq, "stepId": stepID},
 	})
 
 	// Convert tool definitions
@@ -362,33 +363,88 @@ func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message
 		})
 	}
 
-	// Call LLM
-	stream, err := s.provider.Generate(turn.ctx, "", kosongTools, messages, nil)
-	if err != nil {
-		return nil, err
+	// Streaming callbacks: emit delta events for live UI updates
+	callbacks := &kosong.GenerateCallbacks{
+		OnMessagePart: func(part kosong.StreamedMessagePart) {
+			switch part.Type {
+			case "text":
+				s.eventBus.Publish(Event{
+					Type:      "text.delta",
+					TurnID:    turn.ID,
+					SessionID: turn.SessionID,
+					Timestamp: time.Now(),
+					Data:      map[string]any{"delta": part.Text, "stepId": stepID},
+				})
+			case "think":
+				s.eventBus.Publish(Event{
+					Type:      "thinking.delta",
+					TurnID:    turn.ID,
+					SessionID: turn.SessionID,
+					Timestamp: time.Now(),
+					Data:      map[string]any{"delta": part.Think, "stepId": stepID},
+				})
+			default:
+				// Tool call delta: partial argument streaming
+				if part.ID != "" {
+					s.eventBus.Publish(Event{
+						Type:      "tool.call.delta",
+						TurnID:    turn.ID,
+						SessionID: turn.SessionID,
+						Timestamp: time.Now(),
+						Data: map[string]any{
+							"toolCallId":    part.ID,
+							"name":          part.Name,
+							"argumentsPart": part.Arguments,
+							"stepId":        stepID,
+						},
+					})
+				}
+			}
+		},
+		OnToolCall: func(tc kosong.ToolCall) {
+			s.eventBus.Publish(Event{
+				Type:      "tool.call",
+				TurnID:    turn.ID,
+				SessionID: turn.SessionID,
+				Timestamp: time.Now(),
+				Data: map[string]any{
+					"toolCallId": tc.ID,
+					"name":       tc.Name,
+					"arguments":  tc.Arguments,
+					"stepId":     stepID,
+				},
+			})
+		},
 	}
 
-	// Consume stream
-	msg, err := kosong.Generate(turn.ctx, stream)
+	result, err := kosong.GenerateCall(turn.ctx, s.provider, "", kosongTools, messages, callbacks, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	// Extract tool calls from the message
 	var toolCalls []kosong.ToolCall
-	for _, tc := range msg.ToolCalls {
-		toolCalls = append(toolCalls, kosong.ToolCall{
-			Type:      tc.Type,
-			ID:        tc.ID,
-			Name:      tc.Name,
-			Arguments: tc.Arguments,
-		})
+	if result.Message != nil {
+		for _, tc := range result.Message.ToolCalls {
+			toolCalls = append(toolCalls, kosong.ToolCall{
+				Type:      tc.Type,
+				ID:        tc.ID,
+				Name:      tc.Name,
+				Arguments: tc.Arguments,
+			})
+		}
 	}
 
-	result := &StepResult{
+	stepResult := &StepResult{
 		StepSeq:   int(seq),
-		Message:   msg,
+		Message:   result.Message,
 		ToolCalls: toolCalls,
+	}
+	if result.Usage != nil {
+		stepResult.Usage = result.Usage
+	}
+	if result.FinishReason != nil {
+		stepResult.FinishReason = *result.FinishReason
 	}
 
 	s.eventBus.Publish(Event{
@@ -396,10 +452,15 @@ func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message
 		TurnID:    turn.ID,
 		SessionID: turn.SessionID,
 		Timestamp: time.Now(),
-		Data:      map[string]any{"seq": seq, "toolCalls": len(toolCalls)},
+		Data: map[string]any{
+			"seq":          seq,
+			"stepId":       stepID,
+			"toolCalls":    len(toolCalls),
+			"finishReason": stepResult.FinishReason,
+		},
 	})
 
-	return result, nil
+	return stepResult, nil
 }
 
 func (s *Service) executeToolCall(turn *TurnJob, tc kosong.ToolCall) (*tools.Result, error) {

@@ -224,3 +224,78 @@ func extractTextFromMessage(msg kosong.Message) string {
 	}
 	return result
 }
+
+// TestStreamingEventsEmitted verifies that text.delta and step events are
+// emitted during a turn via the event bus.
+func TestStreamingEventsEmitted(t *testing.T) {
+	provider := &mockProvider{response: "Hello streaming!"}
+	toolReg := tools.NewRegistry()
+	eventBus := event.NewBus[Event]()
+
+	// Collect events
+	var mu sync.Mutex
+	var events []Event
+	eventBus.Subscribe(func(ev Event) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	})
+
+	svc := NewService(provider, toolReg, eventBus, Config{
+		MaxTurns:        10,
+		MaxStepsPerTurn: 5,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	svc.Start(ctx)
+	defer svc.Stop()
+
+	turn, err := svc.SubmitTurn(ctx, "test-session", "hi")
+	if err != nil {
+		t.Fatalf("SubmitTurn failed: %v", err)
+	}
+	waitForTurn(t, turn, 3*time.Second)
+
+	// Give subscriber a moment to drain
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	hasTurnStarted := false
+	hasStepStarted := false
+	hasTextDelta := false
+	hasStepCompleted := false
+	hasTurnCompleted := false
+	for _, ev := range events {
+		switch ev.Type {
+		case "turn.started":
+			hasTurnStarted = true
+		case "step.started":
+			hasStepStarted = true
+		case "text.delta":
+			hasTextDelta = true
+		case "step.completed":
+			hasStepCompleted = true
+		case "turn.completed":
+			hasTurnCompleted = true
+		}
+	}
+
+	if !hasTurnStarted {
+		t.Error("missing turn.started event")
+	}
+	if !hasStepStarted {
+		t.Error("missing step.started event")
+	}
+	if !hasTextDelta {
+		t.Error("missing text.delta event")
+	}
+	if !hasStepCompleted {
+		t.Error("missing step.completed event")
+	}
+	if !hasTurnCompleted {
+		t.Error("missing turn.completed event")
+	}
+}
