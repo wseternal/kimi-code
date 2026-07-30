@@ -265,9 +265,8 @@ type tuiModel struct {
 	pendingApproval *permission.ApprovalRequest
 
 	// Cycle 5: Mid-turn interaction
-	cancelCh       chan struct{}
-	queuedMessages []string
-	steeringTool   *tools.SteeringTool
+	cancelCh     chan struct{}
+	steeringTool *tools.SteeringTool
 
 	// Cycle 6: Context management
 	contextMgr       *agentctx.ContextManager
@@ -1177,7 +1176,9 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 				if result.Output != "No steering messages." {
 					ch <- streamEvent{kind: "tool_start", toolName: "Steering", toolArgs: ""}
 					ch <- streamEvent{kind: "tool_result", toolName: "Steering", toolOut: result.Output}
-					m.history = append(m.history, kosong.CreateToolMessage("steering", result.Output))
+					// Inject as user message to satisfy LLM provider API contracts
+					// (tool messages must correspond to assistant-initiated tool calls)
+					m.history = append(m.history, kosong.CreateUserMessage("[Steering] "+result.Output))
 				}
 			}
 		}
@@ -1563,14 +1564,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.btwMode = false
 			}
 
-			// Drain queued messages (Cycle 5: mid-turn interaction)
-			if len(m.queuedMessages) > 0 {
-				// Also drain the steering tool to keep them in sync
-				if m.steeringTool != nil {
-					m.steeringTool.DrainAll()
+			// Drain queued steering messages for auto-pickup
+			if m.steeringTool != nil && m.steeringTool.HasMessages() {
+				msgs := m.steeringTool.DrainAll()
+				parts := make([]string, len(msgs))
+				for i, sm := range msgs {
+					parts[i] = sm.Content
 				}
-				nextPrompt := strings.Join(m.queuedMessages, "\n")
-				m.queuedMessages = nil
+				nextPrompt := strings.Join(parts, "\n")
 				m.messages = append(m.messages, chatMessage{"user", nextPrompt})
 				m.turnCount++
 				m.streaming = true
@@ -1856,8 +1857,7 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					close(m.cancelCh)
 				}
 			}
-			// Clear queued messages on cancel — user explicitly stopped
-			m.queuedMessages = nil
+			// Clear steering queue on cancel — user explicitly stopped
 			if m.steeringTool != nil {
 				m.steeringTool.DrainAll()
 			}
@@ -3218,13 +3218,16 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	default:
 		// If streaming, queue the message instead of starting a new turn
 		if m.streaming {
-			m.queuedMessages = append(m.queuedMessages, input)
 			if m.steeringTool != nil {
 				m.steeringTool.Enqueue(input, false)
 			}
 			m.messages = append(m.messages, chatMessage{"user", input})
+			qLen := 0
+			if m.steeringTool != nil {
+				qLen = m.steeringTool.Len()
+			}
 			m.messages = append(m.messages, chatMessage{"system",
-				fmt.Sprintf("📨 Queued (%d pending, Ctrl+S to steer agent)", len(m.queuedMessages))})
+				fmt.Sprintf("📨 Queued (%d pending, Ctrl+S to steer agent)", qLen)})
 			m.input = ""
 			m.cursor = 0
 			m.showSuggestions = false
@@ -3727,8 +3730,8 @@ func (m tuiModel) renderInput() string {
 
 	// Queue indicator when streaming with pending messages
 	var queueHint string
-	if m.streaming && len(m.queuedMessages) > 0 {
-		queueHint = mutedStyle.Render(fmt.Sprintf(" [%d queued, Ctrl+S to steer] ", len(m.queuedMessages)))
+	if m.streaming && m.steeringTool != nil && m.steeringTool.Len() > 0 {
+		queueHint = mutedStyle.Render(fmt.Sprintf(" [%d queued, Ctrl+S to steer] ", m.steeringTool.Len()))
 	}
 
 	return style.Width(boxW).Render(queueHint + prompt + inputWithCursor)
