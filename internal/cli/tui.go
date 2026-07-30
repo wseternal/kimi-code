@@ -1671,7 +1671,17 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// ── Submit ──
 	case msg.Code == tea.KeyEnter:
 		m.ctrlCPending = false
-		m.fileCandidates = nil // clear file completion state
+		if len(m.fileCandidates) > 0 && m.fileCycleIdx > 0 {
+			// Confirm current file candidate without submitting.
+			// Input already holds the absolute path (set by Tab);
+			// close the suggestion panel so the user can continue
+			// editing or press Enter again to submit.
+			m.fileCandidates = nil
+			m.fileCycleIdx = 0
+			m.showSuggestions = false
+			return m, nil
+		}
+		m.fileCandidates = nil // clear any stale file state
 		return m.handleSubmit()
 
 	// ── Open external editor (Ctrl+G) ──
@@ -1906,11 +1916,13 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// ── Space ──
 	case msg.Code == tea.KeySpace:
-		if len(m.fileCandidates) > 0 {
-			// Confirm current file completion candidate.
-			// Input already holds the absolute path (set by Tab); append
-			// a trailing space so the user can continue typing.
+		if len(m.fileCandidates) > 0 && m.fileCycleIdx > 0 {
+			// Confirm current file completion candidate (only after Tab
+			// has cycled at least once). Input already holds the absolute
+			// path set by Tab; append a trailing space so the user can
+			// continue typing.
 			m.fileCandidates = nil
+			m.fileCycleIdx = 0
 			m.showSuggestions = false
 			m.input += " "
 			m.cursor = utf8.RuneCountInString(m.input)
@@ -2411,6 +2423,7 @@ func (m *tuiModel) updateSuggestions() {
 		m.showSuggestions = len(candidates) > 0
 		m.selectedSuggest = 0
 	} else if strings.HasPrefix(m.input, "/") {
+		m.fileCandidates = nil // clear stale file completion state
 		filter := strings.ToLower(m.input[1:])
 		m.suggestions = nil
 		// Built-in commands always shown
@@ -2681,6 +2694,9 @@ func listFileCandidates(query, cwd string) []slashCommand {
 	includeHidden := strings.HasPrefix(filter, ".")
 
 	// First pass: collect matching directories and files separately.
+	// os.ReadDir has already read all entries into memory, so iterating
+	// is fast regardless of directory size. The final cap at
+	// maxFileCandidates (applied after sorting) limits the result set.
 	var dirs, files []slashCommand
 	for _, e := range entries {
 		name := e.Name()
@@ -2702,9 +2718,6 @@ func listFileCandidates(query, cwd string) []slashCommand {
 			dirs = append(dirs, entry)
 		} else {
 			files = append(files, entry)
-		}
-		if len(dirs)+len(files) >= maxFileCandidates*2 {
-			break // guard against huge directories
 		}
 	}
 	// Sort each group by name (case-insensitive).

@@ -1866,3 +1866,68 @@ func TestFileCompletion_SpaceConfirms(t *testing.T) {
 		t.Errorf("input = %q, should start with %q", m.input, expectedPath)
 	}
 }
+
+// TestFileCompletion_SpaceWithoutTabInsertsNormalSpace verifies that
+// pressing Space after '@src' without pressing Tab first inserts a
+// normal space character rather than confirming a file candidate.
+func TestFileCompletion_SpaceWithoutTabInsertsNormalSpace(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "src.txt"), []byte("x"), 0o644)
+
+	m := tuiModel{
+		input:  "@src",
+		cursor: 4, // cursor at end of input
+		cwd:    root,
+	}
+	m.updateSuggestions()
+	if len(m.fileCandidates) == 0 {
+		t.Fatal("fileCandidates should be populated")
+	}
+	if m.fileCycleIdx != 0 {
+		t.Fatalf("fileCycleIdx should be 0 (no Tab pressed), got %d", m.fileCycleIdx)
+	}
+
+	// Space without Tab: should insert a normal space, NOT confirm.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeySpace})
+	// Input should be "@src " (original text + space inserted at cursor).
+	if m.input != "@src " {
+		t.Errorf("input = %q, want %q (normal space insertion)", m.input, "@src ")
+	}
+}
+
+// TestFileCompletion_EnterConfirms verifies that Enter confirms the
+// current file candidate without submitting the message.
+func TestFileCompletion_EnterConfirms(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "alpha"), 0o755)
+	os.WriteFile(filepath.Join(root, "beta.txt"), []byte("x"), 0o644)
+
+	m := tuiModel{
+		input: "@",
+		cwd:   root,
+	}
+	m.updateSuggestions()
+
+	// Tab once to select first candidate.
+	m, _ = handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if len(m.fileCandidates) == 0 {
+		t.Fatal("fileCandidates should be populated")
+	}
+	expectedPath := m.fileCandidates[0].absPath
+
+	// Enter confirms: clears state, does NOT submit.
+	m, cmd := handleKeyHelper(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.fileCandidates != nil {
+		t.Error("fileCandidates should be nil after Enter confirmation")
+	}
+	if m.showSuggestions {
+		t.Error("showSuggestions should be false after Enter confirmation")
+	}
+	if !strings.HasPrefix(m.input, expectedPath) {
+		t.Errorf("input = %q, should start with %q", m.input, expectedPath)
+	}
+	// Enter should NOT produce a submit command (cmd should be nil).
+	if cmd != nil {
+		t.Error("Enter during file confirmation should not return a tea.Cmd (no submit)")
+	}
+}
