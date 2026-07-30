@@ -235,57 +235,7 @@ func formatFinishReasonHint(stream *StreamedMessage) string {
 // It merges compatible consecutive parts and collects tool calls.
 // Deprecated: Use GenerateCall for the high-level wrapper with validation.
 func Generate(ctx context.Context, stream *StreamedMessage) (*Message, error) {
-	var content []ContentPart
-	var toolCalls []ToolCall
-	var pending *StreamedMessagePart
-
-	for part := range stream.Parts {
-		// Check for cancellation
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		// Capture finish reason and usage metadata from stream parts
-		if part.Type == "finish" {
-			if part.FinishReason != nil {
-				rawFinish := *part.FinishReason
-				stream.RawFinishReason = &rawFinish
-			}
-			continue
-		}
-		if part.Type == "usage" && part.Usage != nil {
-			stream.Usage = part.Usage
-			continue
-		}
-
-		// Try to merge with pending part
-		if pending != nil {
-			if MergeInPlace(pending, &part) {
-				continue
-			}
-			// Flush pending
-			flushPart(pending, &content, &toolCalls)
-		}
-
-		// Set new pending
-		pending = &part
-	}
-
-	// Flush final pending
-	if pending != nil {
-		flushPart(pending, &content, &toolCalls)
-	}
-
-	// Build final message
-	msg := &Message{
-		Role:      RoleAssistant,
-		Content:   content,
-		ToolCalls: toolCalls,
-	}
-
-	return msg, nil
+	return generateWithCallbacks(ctx, stream, nil)
 }
 
 // flushPart converts a StreamedMessagePart to ContentPart or ToolCall and appends.
