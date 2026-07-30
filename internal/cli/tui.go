@@ -2648,7 +2648,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			if m.compactStrategy != nil {
 				m.compactStrategy.ResetForTurn()
 			}
-			m.goalTracker.Clear()
+			m.goalTracker.CancelGoal("user")
 			m.activeSkill = nil
 			m.resetDrawerState()
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("New session created: %s", newSess.ID)})
@@ -2675,7 +2675,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.history = nil
 		m.turnCount = 0
 		m.contextMgr.Reset()
-		m.goalTracker.Clear()
+		m.goalTracker.CancelGoal("user")
 		m.activeSkill = nil
 		m.resetDrawerState()
 		m.rebuildCollapsibles()
@@ -2890,7 +2890,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		info := fmt.Sprintf("Session:   %s\nModel:     %s\nProvider:  %s (%s)\nTurns:     %d\nContext:   %s\nYOLO:      %v\nPlan:      %v",
 			m.sessionID, m.model, provName, status, m.turnCount, m.contextMgr.UsageDisplay(), m.yoloMode, m.planMode)
 		if m.goalTracker.IsActive() {
-			info += "\nGoal:      " + m.goalTracker.Current().Text
+			info += "\nGoal:      " + m.goalTracker.Current().Objective
 		}
 		m.messages = append(m.messages, chatMessage{"system", info})
 		m.input = ""
@@ -3061,10 +3061,10 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		text, clear := goal.ParseGoalCommand(args)
 		m.messages = append(m.messages, chatMessage{"user", input})
 		if clear {
-			m.goalTracker.Clear()
+			m.goalTracker.CancelGoal("user")
 			m.messages = append(m.messages, chatMessage{"system", "Goal cleared."})
 		} else {
-			m.goalTracker.Set(text)
+			m.goalTracker.CreateGoal(text, "", goal.BudgetLimits{}, "user")
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal set: %s", text)})
 		}
 		m.input = ""
@@ -4472,7 +4472,7 @@ func (m *tuiModel) resumeSession(id string) {
 	if m.compactStrategy != nil {
 		m.compactStrategy.ResetForTurn()
 	}
-	m.goalTracker.Clear()
+	m.goalTracker.CancelGoal("user")
 	m.activeSkill = nil
 	m.resetDrawerState()
 	m.sessionUsage = kosong.TokenUsage{}
