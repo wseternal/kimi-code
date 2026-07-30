@@ -1660,7 +1660,9 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case msg.Code == tea.KeyEnter && (msg.Mod&tea.ModAlt != 0 || msg.Mod&tea.ModShift != 0),
 		msg.Code == 'j' && ctrl:
 		m.ctrlCPending = false
-		m.fileCandidates = nil // clear file completion state
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		runes := []rune(m.input)
 		runes = append(runes[:m.cursor], append([]rune{'\n'}, runes[m.cursor:]...)...)
 		m.input = string(runes)
@@ -1678,10 +1680,13 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// editing or press Enter again to submit.
 			m.fileCandidates = nil
 			m.fileCycleIdx = 0
+			m.filePrefix = ""
 			m.showSuggestions = false
 			return m, nil
 		}
-		m.fileCandidates = nil // clear any stale file state
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		return m.handleSubmit()
 
 	// ── Open external editor (Ctrl+G) ──
@@ -1912,6 +1917,8 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.showSuggestions = false
 		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		return m, nil
 
 	// ── Space ──
@@ -1923,6 +1930,7 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// continue typing.
 			m.fileCandidates = nil
 			m.fileCycleIdx = 0
+			m.filePrefix = ""
 			m.showSuggestions = false
 			m.input += " "
 			m.cursor = utf8.RuneCountInString(m.input)
@@ -2393,6 +2401,8 @@ func (m *tuiModel) updateSuggestions() {
 		// $ trigger (at start or after whitespace): skill-only lookup.
 		// Filter on the text following the '$'.
 		m.fileCandidates = nil // clear any stale file completion state
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		filter := strings.ToLower(m.input[idx+1:])
 		m.suggestions = nil
 		if m.skillCatalog != nil {
@@ -2424,6 +2434,8 @@ func (m *tuiModel) updateSuggestions() {
 		m.selectedSuggest = 0
 	} else if strings.HasPrefix(m.input, "/") {
 		m.fileCandidates = nil // clear stale file completion state
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		filter := strings.ToLower(m.input[1:])
 		m.suggestions = nil
 		// Built-in commands always shown
@@ -2453,6 +2465,8 @@ func (m *tuiModel) updateSuggestions() {
 		m.selectedSuggest = 0
 	} else {
 		m.fileCandidates = nil // clear stale file completion state
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.showSuggestions = false
 	}
 }
