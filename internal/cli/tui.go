@@ -270,8 +270,11 @@ type tuiModel struct {
 
 	// Cycle 6: Context management
 	contextMgr       *agentctx.ContextManager
+	compactStrategy  *agentctx.CompactionStrategy
 	turnUsage        kosong.TokenUsage // real API usage for current turn (live during streaming)
 	sessionUsage     kosong.TokenUsage // cumulative session token usage
+	lastPrompt       string            // last prompt sent (for overflow retry)
+	overflowRetries  int               // overflow retry attempts this turn
 	lastFinishReason *string           // raw finish_reason from last LLM step (for diagnostics)
 
 	// Cycle 8: Goal tracker
@@ -396,6 +399,13 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 		focusIndex:     -1,
 		prompter:       permission.NewPrompter(),
 		contextMgr:     agentctx.NewContextManager(maxCtx, app.Config.LoopControl.CompactionTriggerRatio, app.Config.LoopControl.ReservedContextSize),
+		compactStrategy: agentctx.NewCompactionStrategy(agentctx.CompactionConfig{
+			TriggerRatio:         app.Config.LoopControl.CompactionTriggerRatio,
+			BlockRatio:           app.Config.LoopControl.CompactionTriggerRatio,
+			ReservedContextSize:  app.Config.LoopControl.ReservedContextSize,
+			MaxCompactionPerTurn: 3,
+			MaxOverflowAttempts:  3,
+		}),
 		goalTracker:    goal.NewTracker(),
 		inputHistory:   inputHist,
 		auditWriter:    app.AuditWriter,
@@ -860,12 +870,25 @@ func diffStats(toolName, result string) string {
 	return fmt.Sprintf("+%d/-%d", added, removed)
 }
 
+// isContextOverflow returns true if the error text indicates a context
+// window overflow (HTTP 413, context length exceeded, etc.).
+func isContextOverflow(errText string) bool {
+	lower := strings.ToLower(errText)
+	return strings.Contains(lower, "context length") ||
+		strings.Contains(lower, "too many tokens") ||
+		strings.Contains(lower, "maximum context") ||
+		strings.Contains(lower, "context limit") ||
+		strings.Contains(lower, "413") ||
+		strings.Contains(lower, "token limit")
+}
+
 // runLLMStream is a bubbletea Cmd that streams the LLM response with tool calling.
 // It creates a channel of streamEvents and returns a listenStream command.
 func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 	ch := make(chan streamEvent, 64)
 	m.streamCh = ch
 	m.turnStartTime = time.Now()
+	m.lastPrompt = prompt // save for overflow retry
 
 	go func() {
 		defer close(ch)
@@ -1289,6 +1312,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Data:      map[string]any{"error": msg.text},
 				})
 			}
+			// Overflow error recovery: compact and retry if possible
+			if isContextOverflow(msg.text) && m.compactStrategy != nil &&
+				m.overflowRetries < m.compactStrategy.MaxOverflowAttempts() &&
+				m.compactStrategy.CanCompact() && m.lastPrompt != "" {
+				m.overflowRetries++
+				m.performCompaction(true)
+				m.messages = append(m.messages, chatMessage{"system",
+					fmt.Sprintf("Context overflow detected, compacted (attempt %d/%d). Retrying...",
+						m.overflowRetries, m.compactStrategy.MaxOverflowAttempts())})
+				m.streaming = true
+				m.streamToolGroups = nil
+				m.streamStep = 0
+				m.turnStartTime = time.Now()
+				m.cancelCh = make(chan struct{})
+				m.rebuildCollapsibles()
+				return m, m.runLLMStream(m.lastPrompt)
+			}
 			// /btw: reset side-query state so next prompt isn't affected
 			if m.btwMode {
 				m.history = m.history[:m.btwHistoryLen]
@@ -1378,6 +1418,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.contextMgr.AddTurnUsage(turnTokens)
 			}
 			m.turnUsage = kosong.TokenUsage{} // reset for next turn
+			m.overflowRetries = 0             // reset overflow retries for next turn
+
+			// Auto-compaction check: trigger if context is nearly full
+			if m.contextMgr.NeedsCompaction() && m.compactStrategy.ShouldCompact(m.contextMgr.CurrentUsage()) {
+				m.performCompaction(true)
+			}
 
 			// Cycle 1: Persist session history (skip for /btw side queries)
 			if !m.btwMode && m.app.SessionStore != nil {
@@ -1876,6 +1922,43 @@ func (m *tuiModel) resetDrawerState() {
 	m.drawerSkills = nil
 	if m.planTracker != nil {
 		m.planTracker.Clear()
+	}
+}
+
+// performCompaction runs naive truncation-based compaction on the conversation.
+// When auto is true, the compaction was triggered automatically by the strategy;
+// when false, it was triggered manually via /compact. This method will be
+// replaced with LLM-based compaction in a later phase.
+func (m *tuiModel) performCompaction(auto bool) {
+	if m.streaming {
+		m.messages = append(m.messages, chatMessage{"system", "Cannot compact while streaming is active."})
+		return
+	}
+	if len(m.completedTurns) <= 2 {
+		m.messages = append(m.messages, chatMessage{"system", "Not enough turns to compact (need > 2)."})
+		return
+	}
+	var compactMsgs []agentctx.CompactMessage
+	for _, msg := range m.messages {
+		if msg.role == "user" || msg.role == "assistant" {
+			compactMsgs = append(compactMsgs, agentctx.CompactMessage{Role: msg.role, Content: msg.content})
+		}
+	}
+	result, err := agentctx.CompactMessages(compactMsgs, 2)
+	if err != nil {
+		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Compaction failed: %s", err)})
+		return
+	}
+	prefix := ""
+	if auto {
+		prefix = "[auto] "
+	}
+	m.messages = append(m.messages, chatMessage{"system",
+		fmt.Sprintf("%sCompacted %d turns into summary (%d → %d tokens).\nKept %d recent turns.\n\n%s",
+			prefix, result.RemovedTurns, result.OriginalTokens, result.CompactTokens, result.KeptTurns, result.Summary)})
+	// Record compaction in strategy so we don't re-compact immediately
+	if m.compactStrategy != nil {
+		m.compactStrategy.RecordCompaction(m.contextMgr.CurrentUsage())
 	}
 }
 
@@ -2818,24 +2901,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	// Cycle 6: Context management
 	case input == "/compact":
 		m.messages = append(m.messages, chatMessage{"user", input})
-		if len(m.completedTurns) <= 2 {
-			m.messages = append(m.messages, chatMessage{"system", "Not enough turns to compact (need > 2)."})
-		} else {
-			var compactMsgs []agentctx.CompactMessage
-			for _, msg := range m.messages {
-				if msg.role == "user" || msg.role == "assistant" {
-					compactMsgs = append(compactMsgs, agentctx.CompactMessage{Role: msg.role, Content: msg.content})
-				}
-			}
-			result, err := agentctx.CompactMessages(compactMsgs, 2)
-			if err != nil {
-				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Compaction failed: %s", err)})
-			} else {
-				m.messages = append(m.messages, chatMessage{"system",
-					fmt.Sprintf("Compacted %d turns into summary (%d → %d tokens).\nKept %d recent turns.\n\n%s",
-						result.RemovedTurns, result.OriginalTokens, result.CompactTokens, result.KeptTurns, result.Summary)})
-			}
-		}
+		m.performCompaction(false)
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false
@@ -4227,6 +4293,9 @@ func (m *tuiModel) resumeSession(id string) {
 
 	// Reset usage and context state (mirrors /new and /init)
 	m.contextMgr.Reset()
+	if m.compactStrategy != nil {
+		m.compactStrategy.ResetForTurn()
+	}
 	m.goalTracker.Clear()
 	m.activeSkill = nil
 	m.resetDrawerState()
