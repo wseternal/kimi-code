@@ -8,7 +8,7 @@ Organized into 8 prioritized cycles based on dependency order and impact.
 | Cycle | Name | Gaps Covered | Status |
 |-------|------|-------------|--------|
 | 1 | Foundation Hardening | #11, #12, #3, #14, #49 | **Done** |
-| 2 | Core Agent Loop | #1, #2, #4, #5, #6, #7 | Pending |
+| 2 | Core Agent Loop | #1, #2, #4, #5, #6, #7 | **Done** |
 | 3 | Provider Adapters | #8, #9, #10, #42, #44, #45, #46 | Pending |
 | 4 | Permission & Safety | #29, #30, #31, #32, #40, #41 | Pending |
 | 5 | Protocol & Events | #23-#27, #71-#73 | Pending |
@@ -50,15 +50,16 @@ Cycle 1 (Foundation) ──→ Cycle 2 (Agent Loop) ──→ Cycle 3 (Providers
 **Goal**: Make the agent loop production-ready with proper message management.
 **Gaps**: #1, #2, #4, #5, #6, #7
 **Files**: ~15
+**Status**: Done
 
-| Gap | Description | Priority |
-|-----|-------------|----------|
-| #1 | Streaming integration in agent loop (incremental token events via event bus) | Critical |
-| #2 | ContextMemory — full message management (append, undo, import, clear, token counting) | Critical |
-| #4 | Compaction auto-trigger + overflow recovery | Critical |
-| #5 | Injection Manager (6 injectors: goal, plan-mode, permission-mode, todo-list, tools-diff, plugin-session-start) | Critical |
-| #6 | Full Goal lifecycle (active/paused/blocked/complete, budget tracking, persistence) | Critical |
-| #7 | Goal continuation driver (automatic multi-turn continuation with retry/backoff) | Critical |
+| Gap | Description | Status |
+|-----|-------------|--------|
+| #1 | Streaming integration in agent loop (incremental token events via event bus) | Done |
+| #2 | ContextMemory — full message management (append, undo, import, clear, token counting) | Done |
+| #4 | Compaction auto-trigger + overflow recovery | Done |
+| #5 | Injection Manager (7 injectors: goal, plan-mode, permission-mode, todo-list, tools-diff, plugin-session-start, background-tasks) | Done |
+| #6 | Full Goal lifecycle (active/paused/blocked/complete, budget tracking, persistence) | Done |
+| #7 | Goal continuation driver (automatic multi-turn continuation) | Done |
 
 ## Cycle 3: Provider Adapters (P1)
 

@@ -12,16 +12,16 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Critical
 - **TS Source**: `packages/agent-core/src/agent/index.ts` — incremental token events via event bus
 - **Description**: The agent loop emits incremental streaming events (token-by-token) via the event bus. The TUI subscribes to these events for real-time display.
-- **Go Status**: `loop.Service` sends full conversation each turn (goose pattern), no incremental streaming output. The TUI's `runLLMStream` works with a channel-based stream but the loop doesn't produce incremental events.
-- **Files Affected**: `internal/agentcore/agent/loop/service.go`, event bus wiring
+- **Go Status**: **IMPLEMENTED** in Cycle 2. `executeStep` uses `GenerateCall` with streaming callbacks. Emits `text.delta`, `thinking.delta`, `tool.call.delta`, and `tool.call` events via event bus.
+- **Files Affected**: `internal/agentcore/agent/loop/service.go`
 
 ### Gap #2: ContextMemory — Full Message Management
 - **Cycle**: 2
 - **Severity**: Critical
 - **TS Source**: `packages/agent-core/src/agent/context/` — append, undo, import, clear, token counting, projection
 - **Description**: Full conversation memory with message-level CRUD operations: append new messages, undo last N, import external messages, clear history, per-message token counting.
-- **Go Status**: `context/manager.go` has basic token tracking only — no message-level CRUD operations.
-- **Files Affected**: `internal/agentcore/agent/context/manager.go`
+- **Go Status**: **IMPLEMENTED** in Cycle 2. `ContextMemory` type with append, undo, clear, import, pop, token estimation, projector integration. `ContextMessage` extends `kosong.Message` with Origin, IsError, Note, TokenCost.
+- **Files Affected**: `internal/agentcore/agent/context/memory.go` (NEW)
 
 ### Gap #3: Message Projector
 - **Cycle**: 1 (Foundation)
@@ -36,32 +36,32 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Critical
 - **TS Source**: `packages/agent-core/src/agent/compaction/` — auto-compact when context exceeds threshold, handle `APIContextOverflowError` with shrink-and-retry
 - **Description**: Automatically triggers compaction when context token count exceeds a configurable threshold. When the provider returns `APIContextOverflowError`, shrinks the context and retries.
-- **Go Status**: Has `/compact` command only, no auto-trigger or overflow recovery.
-- **Files Affected**: `internal/agentcore/agent/context/manager.go`, loop service
+- **Go Status**: **IMPLEMENTED** in Cycle 2. Auto-trigger checks `ShouldCompactByRatio` before each step. Overflow recovery detects `APIContextOverflowError`, compacts, and retries.
+- **Files Affected**: `internal/agentcore/agent/loop/service.go`
 
 ### Gap #5: Injection Manager (6 Injectors)
 - **Cycle**: 2
 - **Severity**: Critical
 - **TS Source**: `packages/agent-core/src/agent/injection/` — goal, plan-mode, permission-mode, todo-list, tools-diff, plugin-session-start injectors
 - **Description**: Manages system-prompt injections from 6 independent injectors. Each injector provides context-aware content (goal status, plan mode, permission mode, todo reminders, tool set changes, plugin session start).
-- **Go Status**: Not present — model loses context after compaction or mode changes.
-- **Files Affected**: `internal/agentcore/agent/injection/` (NEW package)
+- **Go Status**: **IMPLEMENTED** in Cycle 2. Manager with 7 injectors (Goal, PlanMode, PermissionMode, TodoList, ToolsDiff, PluginSessionStart, BackgroundTasks). Thread-safe, with OnContextClear/OnContextCompacted hooks.
+- **Files Affected**: `internal/agentcore/agent/injection/manager.go` (NEW), `manager_test.go` (NEW)
 
 ### Gap #6: Full Goal Lifecycle
 - **Cycle**: 2
 - **Severity**: Critical
 - **TS Source**: `packages/agent-core/src/agent/goal/` + `tools/builtin/goal/` — active/paused/blocked/complete states, budget tracking, persistence, completion criterion
 - **Description**: Complete goal system with 4 lifecycle states, per-goal budget tracking (tokens, turns, wall-clock), persistence across sessions, completion criterion field.
-- **Go Status**: `goal.go` has basic status tracking only (active/complete).
-- **Files Affected**: `internal/agentcore/agent/goal/goal.go`, goal tools
+- **Go Status**: **IMPLEMENTED** in Cycle 2. Full state machine (active/paused/blocked/complete), BudgetLimits (token/turn/wall-clock), BudgetReport, RecordTokenUsage, IncrementTurn, wall-clock tracking with fold/resume.
+- **Files Affected**: `internal/agentcore/agent/goal/goal.go`
 
 ### Gap #7: Goal Continuation Driver
 - **Cycle**: 2
 - **Severity**: Critical
 - **TS Source**: `TurnFlow.driveGoal()` — automatic multi-turn continuation with retry/backoff
 - **Description**: When a goal is active and the agent finishes a turn, the continuation driver automatically starts the next turn with retry logic and exponential backoff for transient errors.
-- **Go Status**: Not present — requires manual re-prompting.
-- **Files Affected**: Loop service, goal package
+- **Go Status**: **IMPLEMENTED** in Cycle 2. `ContinuationDriver` checks goal status/budget after turn end, emits continuation prompts. Supports step-cap detection, max turns limit, budget blocking, double-enqueue prevention.
+- **Files Affected**: `internal/agentcore/agent/goal/continuation.go` (NEW)
 
 ### Gap #29: Permission Mode System
 - **Cycle**: 4 (Permission & Safety)
