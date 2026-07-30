@@ -2,10 +2,12 @@ package loop
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
 	"github.com/visdomtech/kimi-code/internal/agentcore/event"
 	"github.com/visdomtech/kimi-code/internal/kosong"
@@ -297,5 +299,158 @@ func TestStreamingEventsEmitted(t *testing.T) {
 	}
 	if !hasTurnCompleted {
 		t.Error("missing turn.completed event")
+	}
+}
+
+// TestAutoCompactionTrigger verifies that auto-compaction is triggered
+// when token usage exceeds the threshold.
+func TestAutoCompactionTrigger(t *testing.T) {
+	provider := &mockProvider{response: "compacted reply"}
+	toolReg := tools.NewRegistry()
+	eventBus := event.NewBus[Event]()
+
+	// Track compaction calls
+	var compactMu sync.Mutex
+	compactCalled := 0
+	compactFn := func(msgs []kosong.Message) ([]kosong.Message, error) {
+		compactMu.Lock()
+		compactCalled++
+		compactMu.Unlock()
+		// Return only the last 2 messages (simulate compaction)
+		if len(msgs) > 2 {
+			return msgs[len(msgs)-2:], nil
+		}
+		return msgs, nil
+	}
+
+	// Create a strategy with very low trigger ratio
+	strategy := agentctx.NewCompactionStrategy(agentctx.CompactionConfig{
+		TriggerRatio:         0.01, // trigger on any usage
+		BlockRatio:           0.99,
+		ReservedContextSize:  0,
+		MaxCompactionPerTurn: 3,
+		MaxOverflowAttempts:  3,
+	})
+	cm := agentctx.NewContextManager(100, 0.01, 0) // 100 token window
+
+	svc := NewService(provider, toolReg, eventBus, Config{
+		MaxTurns:        10,
+		MaxStepsPerTurn: 5,
+	}, WithCompaction(compactFn, strategy, cm))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	svc.Start(ctx)
+	defer svc.Stop()
+
+	turn, err := svc.SubmitTurn(ctx, "test-session", "hello world this is a long message")
+	if err != nil {
+		t.Fatalf("SubmitTurn failed: %v", err)
+	}
+	waitForTurn(t, turn, 3*time.Second)
+
+	compactMu.Lock()
+	calls := compactCalled
+	compactMu.Unlock()
+
+	if calls == 0 {
+		t.Error("expected compaction to be called at least once")
+	}
+}
+
+// TestOverflowRecovery verifies that context overflow errors trigger
+// compaction and retry.
+func TestOverflowRecovery(t *testing.T) {
+	// Provider that fails once with context overflow, then succeeds
+	callCount := 0
+	provider := &overflowMockProvider{
+		firstErr: kosong.NewAPIContextOverflowError(400, "context too long", nil, nil, nil),
+		response: "recovered reply",
+		onCall: func() {
+			callCount++
+		},
+	}
+	toolReg := tools.NewRegistry()
+	eventBus := event.NewBus[Event]()
+
+	compactFn := func(msgs []kosong.Message) ([]kosong.Message, error) {
+		if len(msgs) > 1 {
+			return msgs[len(msgs)-1:], nil
+		}
+		return msgs, nil
+	}
+
+	strategy := agentctx.NewCompactionStrategy(agentctx.DefaultCompactionConfig())
+	cm := agentctx.NewContextManager(1000, 0.85, 0)
+
+	svc := NewService(provider, toolReg, eventBus, Config{
+		MaxTurns:        10,
+		MaxStepsPerTurn: 5,
+	}, WithCompaction(compactFn, strategy, cm))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	svc.Start(ctx)
+	defer svc.Stop()
+
+	turn, err := svc.SubmitTurn(ctx, "test-session", "hello")
+	if err != nil {
+		t.Fatalf("SubmitTurn failed: %v", err)
+	}
+	waitForTurn(t, turn, 3*time.Second)
+
+	// Provider should have been called at least twice (first fail + retry)
+	if callCount < 2 {
+		t.Errorf("expected at least 2 provider calls (overflow + retry), got %d", callCount)
+	}
+}
+
+// overflowMockProvider fails with context overflow on first call, then succeeds.
+type overflowMockProvider struct {
+	firstErr error
+	response string
+	onCall   func()
+	called   bool
+}
+
+func (m *overflowMockProvider) Name() string                                      { return "mock" }
+func (m *overflowMockProvider) ModelName() string                                 { return "mock-model" }
+func (m *overflowMockProvider) ThinkingEffort() kosong.ThinkingEffort             { return kosong.ThinkingOff }
+func (m *overflowMockProvider) MaxCompletionTokens() int                          { return 0 }
+func (m *overflowMockProvider) WithThinking(kosong.ThinkingEffort) kosong.ChatProvider { return m }
+func (m *overflowMockProvider) WithMaxCompletionTokens(int, *kosong.MaxCompletionTokensOptions) kosong.ChatProvider {
+	return m
+}
+func (m *overflowMockProvider) UploadVideo(context.Context, interface{}, *kosong.GenerateOptions) (*kosong.VideoURLPart, error) {
+	return nil, nil
+}
+
+func (m *overflowMockProvider) Generate(
+	ctx context.Context,
+	systemPrompt string,
+	tools []kosong.Tool,
+	history []kosong.Message,
+	opts *kosong.GenerateOptions,
+) (*kosong.StreamedMessage, error) {
+	m.onCall()
+	if !m.called {
+		m.called = true
+		return nil, m.firstErr
+	}
+	ch := make(chan kosong.StreamedMessagePart, 1)
+	ch <- kosong.StreamedMessagePart{Type: "text", Text: m.response}
+	close(ch)
+	return &kosong.StreamedMessage{Parts: ch}, nil
+}
+
+// isContextOverflowError verifies our error detection works
+func TestIsContextOverflowError(t *testing.T) {
+	err := kosong.NewAPIContextOverflowError(400, "too long", nil, nil, nil)
+	svc := &Service{}
+	if !svc.isContextOverflow(err) {
+		t.Error("expected isContextOverflow to return true")
+	}
+	if svc.isContextOverflow(errors.New("random error")) {
+		t.Error("expected isContextOverflow to return false for generic error")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
 	"github.com/visdomtech/kimi-code/internal/agentcore/event"
 	"github.com/visdomtech/kimi-code/internal/kosong"
@@ -93,6 +94,10 @@ type Event struct {
 	Data      any       `json:"data"`
 }
 
+// CompactionFunc is called when auto-compaction is needed.
+// It receives the current messages and returns the compacted messages.
+type CompactionFunc func(messages []kosong.Message) ([]kosong.Message, error)
+
 // Service is the agent loop service that manages turns and steps.
 type Service struct {
 	provider     kosong.ChatProvider
@@ -114,6 +119,11 @@ type Service struct {
 	// on every turn, accumulating messages across turns.
 	sessions   map[string][]kosong.Message
 	sessionsMu sync.Mutex
+
+	// Compaction integration
+	compaction         CompactionFunc
+	compactionStrategy *agentctx.CompactionStrategy
+	contextManager     *agentctx.ContextManager
 }
 
 // Config holds loop service configuration.
@@ -123,12 +133,25 @@ type Config struct {
 	WorkDir         string // project working directory for tool execution
 }
 
+// Option is a functional option for NewService.
+type Option func(*Service)
+
+// WithCompaction sets the compaction hook and strategy.
+func WithCompaction(fn CompactionFunc, strategy *agentctx.CompactionStrategy, cm *agentctx.ContextManager) Option {
+	return func(s *Service) {
+		s.compaction = fn
+		s.compactionStrategy = strategy
+		s.contextManager = cm
+	}
+}
+
 // NewService creates a new loop service.
 func NewService(
 	provider kosong.ChatProvider,
 	toolRegistry *tools.Registry,
 	eventBus *event.Bus[Event],
 	cfg Config,
+	opts ...Option,
 ) *Service {
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = 100
@@ -136,7 +159,7 @@ func NewService(
 	if cfg.MaxStepsPerTurn <= 0 {
 		cfg.MaxStepsPerTurn = 50
 	}
-	return &Service{
+	svc := &Service{
 		provider:     provider,
 		toolRegistry: toolRegistry,
 		eventBus:     eventBus,
@@ -146,6 +169,10 @@ func NewService(
 		workDir:      cfg.WorkDir,
 		sessions:     make(map[string][]kosong.Message),
 	}
+	for _, opt := range opts {
+		opt(svc)
+	}
+	return svc
 }
 
 // Start begins processing turns from the queue.
@@ -363,6 +390,22 @@ func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message
 		})
 	}
 
+	// Auto-compaction check: trigger if usage exceeds threshold
+	currentMessages := messages
+	if s.shouldAutoCompact(currentMessages) {
+		compacted, err := s.runCompaction(currentMessages)
+		if err == nil {
+			currentMessages = compacted
+			s.eventBus.Publish(Event{
+				Type:      "compaction.completed",
+				TurnID:    turn.ID,
+				SessionID: turn.SessionID,
+				Timestamp: time.Now(),
+				Data:      map[string]any{"before": len(messages), "after": len(compacted)},
+			})
+		}
+	}
+
 	// Streaming callbacks: emit delta events for live UI updates
 	callbacks := &kosong.GenerateCallbacks{
 		OnMessagePart: func(part kosong.StreamedMessagePart) {
@@ -417,9 +460,30 @@ func (s *Service) executeStep(turn *TurnJob, step int, messages []kosong.Message
 		},
 	}
 
-	result, err := kosong.GenerateCall(turn.ctx, s.provider, "", kosongTools, messages, callbacks, nil)
+	result, err := kosong.GenerateCall(turn.ctx, s.provider, "", kosongTools, currentMessages, callbacks, nil)
 	if err != nil {
-		return nil, err
+		// Overflow recovery: if context overflow, compact and retry once
+		if s.isContextOverflow(err) && s.compaction != nil {
+			s.eventBus.Publish(Event{
+				Type:      "compaction.overflow",
+				TurnID:    turn.ID,
+				SessionID: turn.SessionID,
+				Timestamp: time.Now(),
+				Data:      map[string]any{"error": err.Error()},
+			})
+			compacted, compactErr := s.runCompaction(currentMessages)
+			if compactErr == nil {
+				currentMessages = compacted
+				result, err = kosong.GenerateCall(turn.ctx, s.provider, "", kosongTools, currentMessages, callbacks, nil)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
 	// Extract tool calls from the message
@@ -480,4 +544,32 @@ func (s *Service) executeToolCall(turn *TurnJob, tc kosong.ToolCall) (*tools.Res
 		SessionID: turn.SessionID,
 		WorkDir:   s.workDir,
 	})
+}
+
+// shouldAutoCompact checks if auto-compaction should be triggered.
+func (s *Service) shouldAutoCompact(messages []kosong.Message) bool {
+	if s.compactionStrategy == nil || s.contextManager == nil || s.compaction == nil {
+		return false
+	}
+	tokenCount := agentctx.EstimateTokensForMessages(messages)
+	return s.compactionStrategy.ShouldCompactByRatio(tokenCount, s.contextManager.MaxTokens())
+}
+
+// runCompaction invokes the compaction hook and records the result.
+func (s *Service) runCompaction(messages []kosong.Message) ([]kosong.Message, error) {
+	compacted, err := s.compaction(messages)
+	if err != nil {
+		return nil, err
+	}
+	if s.compactionStrategy != nil {
+		newCount := agentctx.EstimateTokensForMessages(compacted)
+		s.compactionStrategy.RecordCompaction(newCount)
+	}
+	return compacted, nil
+}
+
+// isContextOverflow checks if the error is a context overflow error.
+func (s *Service) isContextOverflow(err error) bool {
+	var overflowErr *kosong.APIContextOverflowError
+	return errors.As(err, &overflowErr)
 }
