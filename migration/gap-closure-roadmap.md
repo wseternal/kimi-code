@@ -7,7 +7,7 @@ Organized into 8 prioritized cycles based on dependency order and impact.
 
 | Cycle | Name | Gaps Covered | Status |
 |-------|------|-------------|--------|
-| 1 | Foundation Hardening | #11, #12, #3, #14, #49 | In Progress |
+| 1 | Foundation Hardening | #11, #12, #3, #14, #49 | **Done** |
 | 2 | Core Agent Loop | #1, #2, #4, #5, #6, #7 | Pending |
 | 3 | Provider Adapters | #8, #9, #10, #42, #44, #45, #46 | Pending |
 | 4 | Permission & Safety | #29, #30, #31, #32, #40, #41 | Pending |
@@ -35,14 +35,15 @@ Cycle 1 (Foundation) ──→ Cycle 2 (Agent Loop) ──→ Cycle 3 (Providers
 **Goal**: Lay the foundation that everything else depends on.
 **Gaps**: #11, #12, #3, #14, #49
 **Files**: ~10
+**Status**: Done
 
 | Gap | Description | Status |
 |-----|-------------|--------|
-| #11 | Typed Error Hierarchy for Kosong | In Progress |
-| #12 | Model Capability System | In Progress |
-| #3 | Message Projector | Pending |
-| #14 | Consecutive User Message Merging | Pending (part of #3) |
-| #49 | Generate() High-Level Wrapper | Pending |
+| #11 | Typed Error Hierarchy for Kosong | Done |
+| #12 | Model Capability System | Done |
+| #3 | Message Projector | Done |
+| #14 | Consecutive User Message Merging | Done (part of #3) |
+| #49 | Generate() High-Level Wrapper | Done |
 
 ## Cycle 2: Core Agent Loop (P0)
 

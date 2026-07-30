@@ -28,8 +28,8 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Critical
 - **TS Source**: `packages/agent-core/src/agent/context/projector.ts` — synthesize missing tool results, drop orphans, merge consecutive assistants
 - **Description**: Before sending to provider, repairs the message array: synthesizes placeholder tool results for orphaned tool_calls, drops orphan tool_results, merges consecutive same-role messages.
-- **Go Status**: Not present. Strict providers (Anthropic, Gemini) will reject without this.
-- **Files Affected**: `internal/agentcore/agent/context/projector.go` (NEW)
+- **Go Status**: **IMPLEMENTED** in Cycle 1. Full projector with adjacency repair, orphan drop, dedup, consecutive merge, leading non-user drop.
+- **Files Affected**: `internal/agentcore/agent/context/projector.go` (NEW), `projector_test.go` (NEW)
 
 ### Gap #4: Compaction Auto-Trigger + Overflow Recovery
 - **Cycle**: 2

@@ -2,6 +2,7 @@ package kosong
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -132,5 +133,148 @@ func TestIsToolDeclarationOnlyMessage(t *testing.T) {
 	msg.Content = []ContentPart{{Type: "text", Text: "hi"}}
 	if IsToolDeclarationOnlyMessage(msg) {
 		t.Fatal("expected false with content")
+	}
+}
+
+// ── mock provider for GenerateCall tests ──
+
+type mockProvider struct {
+	name      string
+	model     string
+	stream    *StreamedMessage
+	genErr    error
+}
+
+func (m *mockProvider) Name() string                                        { return m.name }
+func (m *mockProvider) ModelName() string                                   { return m.model }
+func (m *mockProvider) ThinkingEffort() ThinkingEffort                      { return "" }
+func (m *mockProvider) MaxCompletionTokens() int                            { return 0 }
+func (m *mockProvider) WithThinking(ThinkingEffort) ChatProvider            { return m }
+func (m *mockProvider) WithMaxCompletionTokens(int, *MaxCompletionTokensOptions) ChatProvider { return m }
+func (m *mockProvider) UploadVideo(context.Context, interface{}, *GenerateOptions) (*VideoURLPart, error) {
+	return nil, errors.New("not supported")
+}
+func (m *mockProvider) Generate(ctx context.Context, systemPrompt string, tools []Tool, history []Message, opts *GenerateOptions) (*StreamedMessage, error) {
+	if m.genErr != nil {
+		return nil, m.genErr
+	}
+	return m.stream, nil
+}
+
+func makeStream(parts ...StreamedMessagePart) *StreamedMessage {
+	ch := make(chan StreamedMessagePart, len(parts))
+	for _, p := range parts {
+		ch <- p
+	}
+	close(ch)
+	return &StreamedMessage{Parts: ch}
+}
+
+func TestGenerateCallSuccess(t *testing.T) {
+	stream := makeStream(
+		StreamedMessagePart{Type: "text", Text: "hello "},
+		StreamedMessagePart{Type: "text", Text: "world"},
+	)
+	prov := &mockProvider{name: "test", model: "test-model", stream: stream}
+
+	result, err := GenerateCall(context.Background(), prov, "sys", nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Message == nil {
+		t.Fatal("expected message")
+	}
+	text := ExtractText(result.Message, "")
+	if text != "hello world" {
+		t.Errorf("expected 'hello world', got %q", text)
+	}
+}
+
+func TestGenerateCallEmptyResponse(t *testing.T) {
+	stream := makeStream() // no parts
+	prov := &mockProvider{name: "test", model: "test-model", stream: stream}
+
+	_, err := GenerateCall(context.Background(), prov, "sys", nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for empty response")
+	}
+	var emptyErr *APIEmptyResponseError
+	if !errors.As(err, &emptyErr) {
+		t.Errorf("expected APIEmptyResponseError, got %T", err)
+	}
+}
+
+func TestGenerateCallThinkOnlyResponse(t *testing.T) {
+	stream := makeStream(
+		StreamedMessagePart{Type: "think", Think: "reasoning..."},
+	)
+	prov := &mockProvider{name: "test", model: "test-model", stream: stream}
+
+	_, err := GenerateCall(context.Background(), prov, "sys", nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for think-only response")
+	}
+	var emptyErr *APIEmptyResponseError
+	if !errors.As(err, &emptyErr) {
+		t.Errorf("expected APIEmptyResponseError, got %T", err)
+	}
+}
+
+func TestGenerateCallWithToolCalls(t *testing.T) {
+	args := `{"key":"value"}`
+	stream := makeStream(
+		StreamedMessagePart{Type: "function", ID: "call_1", Name: "read", Arguments: &args},
+	)
+	prov := &mockProvider{name: "test", model: "test-model", stream: stream}
+
+	var toolCallsFired int
+	result, err := GenerateCall(context.Background(), prov, "sys", nil, nil, &GenerateCallbacks{
+		OnToolCall: func(tc ToolCall) { toolCallsFired++ },
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Message.ToolCalls) != 1 {
+		t.Errorf("expected 1 tool call, got %d", len(result.Message.ToolCalls))
+	}
+	if toolCallsFired != 1 {
+		t.Errorf("expected OnToolCall fired once, got %d", toolCallsFired)
+	}
+}
+
+func TestGenerateCallProviderError(t *testing.T) {
+	prov := &mockProvider{name: "test", model: "m", genErr: errors.New("auth failed")}
+
+	_, err := GenerateCall(context.Background(), prov, "sys", nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err.Error() != "auth failed" {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestFilterDeferredTools(t *testing.T) {
+	tools := []Tool{
+		{Name: "read"},
+		{Name: "deferred_tool", Deferred: true},
+		{Name: "write"},
+	}
+	result := filterDeferredTools(tools)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(result))
+	}
+	for _, tool := range result {
+		if tool.Deferred {
+			t.Errorf("deferred tool should be filtered: %s", tool.Name)
+		}
+	}
+}
+
+func TestFilterDeferredToolsNoneDeferred(t *testing.T) {
+	tools := []Tool{{Name: "a"}, {Name: "b"}}
+	result := filterDeferredTools(tools)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 tools unchanged, got %d", len(result))
 	}
 }
