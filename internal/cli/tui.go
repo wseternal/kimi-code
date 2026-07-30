@@ -1925,11 +1925,17 @@ func (m *tuiModel) resetDrawerState() {
 	}
 }
 
-// performCompaction runs naive truncation-based compaction on the conversation.
+// performCompaction runs LLM-based compaction on the conversation when a
+// provider is available, falling back to naive truncation otherwise.
 // When auto is true, the compaction was triggered automatically by the strategy;
-// when false, it was triggered manually via /compact. This method will be
-// replaced with LLM-based compaction in a later phase.
+// when false, it was triggered manually via /compact.
 func (m *tuiModel) performCompaction(auto bool) {
+	m.performCompactionWithInstruction(auto, "")
+}
+
+// performCompactionWithInstruction is like performCompaction but accepts an
+// optional custom instruction to append to the compaction prompt.
+func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction string) {
 	if m.streaming {
 		m.messages = append(m.messages, chatMessage{"system", "Cannot compact while streaming is active."})
 		return
@@ -1938,28 +1944,114 @@ func (m *tuiModel) performCompaction(auto bool) {
 		m.messages = append(m.messages, chatMessage{"system", "Not enough turns to compact (need > 2)."})
 		return
 	}
+
+	// Build message list for compactor
 	var compactMsgs []agentctx.CompactMessage
 	for _, msg := range m.messages {
 		if msg.role == "user" || msg.role == "assistant" {
 			compactMsgs = append(compactMsgs, agentctx.CompactMessage{Role: msg.role, Content: msg.content})
 		}
 	}
-	result, err := agentctx.CompactMessages(compactMsgs, 2)
-	if err != nil {
-		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Compaction failed: %s", err)})
-		return
-	}
+
 	prefix := ""
 	if auto {
 		prefix = "[auto] "
 	}
+
+	// Try LLM-based compaction if provider is available
+	if m.provider != nil {
+		compactor := &agentctx.Compactor{}
+		generate := m.makeGenerateFunc()
+		result, err := compactor.Run(compactMsgs, generate, agentctx.CompactOptions{
+			KeepRecentTurns:   agentctx.DefaultKeepRecentTurns,
+			CustomInstruction: customInstruction,
+		})
+		if err == nil {
+			// Rewrite context with compacted messages
+			m.rewriteContext(result.RewrittenMessages)
+			m.messages = append(m.messages, chatMessage{"system",
+				fmt.Sprintf("%sCompacted %d turns into LLM summary (%d → %d tokens).\nKept %d recent turns.",
+					prefix, result.RemovedTurns, result.OriginalTokens, result.CompactTokens, result.KeptTurns)})
+			if m.compactStrategy != nil {
+				m.compactStrategy.RecordCompaction(result.CompactTokens)
+			}
+			return
+		}
+		// LLM compaction failed, fall through to naive
+		m.messages = append(m.messages, chatMessage{"system",
+			fmt.Sprintf("LLM compaction failed (%v), falling back to naive truncation.", err)})
+	}
+
+	// Naive compaction fallback
+	result, err := agentctx.CompactMessages(compactMsgs, agentctx.DefaultKeepRecentTurns)
+	if err != nil {
+		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Compaction failed: %s", err)})
+		return
+	}
 	m.messages = append(m.messages, chatMessage{"system",
 		fmt.Sprintf("%sCompacted %d turns into summary (%d → %d tokens).\nKept %d recent turns.\n\n%s",
 			prefix, result.RemovedTurns, result.OriginalTokens, result.CompactTokens, result.KeptTurns, result.Summary)})
-	// Record compaction in strategy so we don't re-compact immediately
 	if m.compactStrategy != nil {
 		m.compactStrategy.RecordCompaction(m.contextMgr.CurrentUsage())
 	}
+}
+
+// makeGenerateFunc creates a GenerateFunc that calls the LLM provider
+// synchronously for compaction summarization.
+func (m *tuiModel) makeGenerateFunc() agentctx.GenerateFunc {
+	return func(systemPrompt string, messages []agentctx.CompactMessage) (string, error) {
+		// Convert CompactMessages to kosong.Messages
+		var history []kosong.Message
+		for _, msg := range messages {
+			switch msg.Role {
+			case "user":
+				history = append(history, kosong.CreateUserMessage(msg.Content))
+			case "assistant":
+				history = append(history, kosong.CreateAssistantMessage(
+					[]kosong.ContentPart{kosong.NewTextPart(msg.Content)}, nil))
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		streamed, err := m.provider.Generate(ctx, systemPrompt, nil, history, nil)
+		if err != nil {
+			return "", fmt.Errorf("provider.Generate: %w", err)
+		}
+
+		// Collect streamed parts synchronously
+		var textBuf strings.Builder
+		for part := range streamed.Parts {
+			if part.Type == "text" {
+				textBuf.WriteString(part.Text)
+			}
+		}
+		return textBuf.String(), nil
+	}
+}
+
+// rewriteContext replaces the conversation messages with the compacted set
+// and resets the context manager to reflect the new token usage.
+func (m *tuiModel) rewriteContext(compactedMsgs []agentctx.CompactMessage) {
+	// Replace messages
+	m.messages = nil
+	for _, msg := range compactedMsgs {
+		m.messages = append(m.messages, chatMessage{role: msg.Role, content: msg.Content})
+	}
+
+	// Reset context manager and re-record usage from compacted messages
+	m.contextMgr.Reset()
+	compactTokens := 0
+	for _, msg := range compactedMsgs {
+		compactTokens += agentctx.TokenEstimate(msg.Content) + agentctx.TokenEstimate(msg.Role)
+	}
+	if compactTokens > 0 {
+		m.contextMgr.AddTurnUsage(compactTokens)
+	}
+
+	// Clear completed turns (they've been compacted)
+	m.completedTurns = nil
 }
 
 func (m *tuiModel) deleteWordBackward() {
@@ -2899,9 +2991,10 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Cycle 6: Context management
-	case input == "/compact":
+	case input == "/compact" || strings.HasPrefix(input, "/compact "):
 		m.messages = append(m.messages, chatMessage{"user", input})
-		m.performCompaction(false)
+		customInstruction := strings.TrimSpace(strings.TrimPrefix(input, "/compact"))
+		m.performCompactionWithInstruction(false, customInstruction)
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false
