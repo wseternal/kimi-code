@@ -67,6 +67,11 @@ func (s *Server) setupRoutes() {
 
 	// API v1 routes
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	s.mux.HandleFunc("GET /api/v1/meta", s.handleMeta)
+	s.mux.HandleFunc("GET /api/v1/config", s.handleConfig)
+	s.mux.HandleFunc("POST /api/v1/shutdown", s.handleShutdown)
+
+	// Session routes
 	s.mux.HandleFunc("GET /api/v1/sessions", s.handleListSessions)
 	s.mux.HandleFunc("POST /api/v1/sessions", s.handleCreateSession)
 	s.mux.HandleFunc("GET /api/v1/sessions/{id}", s.handleGetSession)
@@ -75,7 +80,14 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("GET /api/v1/sessions/{id}/messages", s.handleListMessages)
 	s.mux.HandleFunc("POST /api/v1/sessions/{id}/messages", s.handlePostMessage)
 	s.mux.HandleFunc("POST /api/v1/sessions/{id}/abort", s.handleAbortSession)
-	s.mux.HandleFunc("GET /api/v1/meta", s.handleMeta)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/status", s.handleSessionStatus)
+	s.mux.HandleFunc("POST /api/v1/sessions/{id}/prompts", s.handleSubmitPrompt)
+	s.mux.HandleFunc("POST /api/v1/sessions/{id}/compact", s.handleCompactSession)
+	s.mux.HandleFunc("POST /api/v1/sessions/{id}/undo", s.handleUndoSession)
+	s.mux.HandleFunc("POST /api/v1/sessions/{id}/archive", s.handleArchiveSession)
+	s.mux.HandleFunc("POST /api/v1/sessions/{id}/search", s.handleSearch)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/snapshot", s.handleSnapshot)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/export", s.handleSessionExport)
 }
 
 // Start starts the HTTP server.

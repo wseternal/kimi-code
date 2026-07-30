@@ -109,6 +109,13 @@ func (s *Session) ToProtocol() protocol.Session {
 	}
 }
 
+// IsBusy reports whether the session is currently running.
+func (s *Session) IsBusy() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Status == StatusRunning
+}
+
 // Dispose disposes the session and its scope.
 func (s *Session) Dispose() {
 	s.eventBus.Unsubscribe()

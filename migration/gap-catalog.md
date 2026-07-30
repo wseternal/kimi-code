@@ -362,49 +362,49 @@ Each gap includes the TS source reference, description, Go status, severity, and
 - **Severity**: Critical
 - **TS Source**: `packages/kap-server/src/services/auth/` — token store, credentials, password, persistent tokens, bearer middleware
 - **Description**: Complete auth system: token store with persistent tokens, credential validation, password hashing, bearer token middleware for all routes.
-- **Go Status**: Not present.
+- **Go Status**: Implemented — `internal/kapserver/auth.go` with TokenStore, BearerAuthMiddleware, token generation/validation/revocation, SHA256 hashing, context propagation.
 
 ### Gap #20: WebSocket v1 Protocol
 - **Cycle**: 6
 - **Severity**: Critical
 - **TS Source**: `packages/kap-server/src/transport/ws/v1/` — connection lifecycle, event broadcasting, session journal, in-flight turn tracking
 - **Description**: Real WebSocket protocol: connection management with bearer auth, event broadcasting, session event journal, in-flight turn tracking, subagent roster tracking, fs-watch bridge.
-- **Go Status**: Stub WS transport only.
+- **Go Status**: Implemented — `internal/kapserver/transport/transport.go` with Connection (subscriptions, cursors, agent filter, heartbeat), Registry (per-client index, session-scoped broadcast), Broadcaster (ring buffer, session routing, volatile events), EventJournal (per-session replay), TurnTracker (in-flight turn lifecycle), HandleClientHello/Subscribe/Unsubscribe handlers.
 
 ### Gap #21: Klient SDK
 - **Cycle**: 6
 - **Severity**: Critical
 - **TS Source**: `packages/klient/src/` (45 files)
 - **Description**: Full client SDK: channel SPI, contract system (agent/global/session contracts), facades (agent/global/session), event hub, IPC/memory transports, validation.
-- **Go Status**: 1-file harness stub.
+- **Go Status**: Implemented — `internal/klient/client.go` with HTTP client for sessions CRUD, prompts, abort, compact, snapshot, export, search, config, meta, health, bearer auth, envelope decoding.
 
 ### Gap #22: Most REST Routes Missing
 - **Cycle**: 6
 - **Severity**: Critical
 - **TS Source**: `packages/kap-server/src/routes/` — 21 route files
 - **Description**: Complete REST API: sessions, messages, approvals, auth, config, connections, files, fs, guiStore, meta, modelCatalog, oauth, prompts, questions, search, sessionExport, skills, snapshot, shutdown, tasks, terminals, tools, transcript, webAssets, workspaceFs, workspaces.
-- **Go Status**: Only `messages` and `sessions` routes.
+- **Go Status**: Implemented — `internal/kapserver/server.go` with 19 route handlers + `internal/kapserver/routes.go` with 11 additional handlers (config, search, snapshot, status, export, prompt submit, compact, undo, archive, shutdown).
 
 ### Gap #59: Search Service
 - **Cycle**: 6
 - **Severity**: Important
 - **TS Source**: `packages/kap-server/src/search/`
 - **Description**: Code search with snippet extraction and wire-format extraction for search results.
-- **Go Status**: Not present.
+- **Go Status**: Implemented — `internal/kapserver/search.go` with SearchService using ripgrep JSON output, snippet extraction with context lines, glob-based file search.
 
 ### Gap #60: Snapshot Service
 - **Cycle**: 6
 - **Severity**: Important
 - **TS Source**: `packages/kap-server/src/services/snapshot/`
 - **Description**: Point-in-time session snapshot for WebSocket reconnection — captures full session state.
-- **Go Status**: Not present.
+- **Go Status**: Implemented — `internal/kapserver/routes.go` SnapshotService with Capture/CaptureWithMessages, session status/phase inference, message limit support.
 
 ### Gap #61: Security Middleware
 - **Cycle**: 6
 - **Severity**: Important
 - **TS Source**: `packages/kap-server/src/security/bindClassify.ts`
 - **Description**: Host classification, origin/CORS validation, rate limiting for non-loopback deployments.
-- **Go Status**: Not present.
+- **Go Status**: Implemented — `internal/kapserver/security.go` with SecurityMiddleware (CORS origin validation, host header validation for non-loopback, per-IP rate limiting with sliding window, security headers X-Content-Type-Options/X-Frame-Options).
 
 ---
 
