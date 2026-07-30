@@ -1697,12 +1697,18 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// ── Readline: Ctrl+A (start of line) ──
 	case msg.Code == 'a' && ctrl:
 		m.ctrlCPending = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.cursor = 0
 		return m, nil
 
 	// ── Readline: Ctrl+E (end of line) ──
 	case msg.Code == 'e' && ctrl:
 		m.ctrlCPending = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.cursor = utf8.RuneCountInString(m.input)
 		return m, nil
 
@@ -1711,6 +1717,7 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.ctrlCPending = false
 		runes := []rune(m.input)
 		m.input = string(runes[:m.cursor])
+		m.updateSuggestions()
 		return m, nil
 
 	// ── Readline: Ctrl+U (kill to start) ──
@@ -1719,23 +1726,31 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		runes := []rune(m.input)
 		m.input = string(runes[m.cursor:])
 		m.cursor = 0
+		m.updateSuggestions()
 		return m, nil
 
 	// ── Readline: Ctrl+W (delete word backward) ──
 	case msg.Code == 'w' && ctrl:
 		m.ctrlCPending = false
 		m.deleteWordBackward()
+		m.updateSuggestions()
 		return m, nil
 
 	// ── Readline: Ctrl+B / Alt+B (word back) ──
 	case msg.Code == 'b' && ctrl, msg.Mod&tea.ModAlt != 0 && msg.Text == "b":
 		m.ctrlCPending = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.moveWordBackward()
 		return m, nil
 
 	// ── Readline: Ctrl+F / Alt+F (word forward) ──
 	case msg.Code == 'f' && ctrl, msg.Mod&tea.ModAlt != 0 && msg.Text == "f":
 		m.ctrlCPending = false
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		m.moveWordForward()
 		return m, nil
 
@@ -1765,6 +1780,9 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		return m, nil
 
 	// ── Right arrow ──
@@ -1773,6 +1791,9 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < runeCount {
 			m.cursor++
 		}
+		m.fileCandidates = nil
+		m.fileCycleIdx = 0
+		m.filePrefix = ""
 		return m, nil
 
 	// ── Up arrow ──
@@ -1796,6 +1817,7 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if prev, ok := m.inputHistory.Prev(); ok {
 				m.input = prev
 				m.cursor = utf8.RuneCountInString(m.input)
+				m.updateSuggestions()
 			}
 		}
 		return m, nil
@@ -1827,6 +1849,7 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.savedInput = ""
 				m.cursor = utf8.RuneCountInString(m.input)
 			}
+			m.updateSuggestions()
 		}
 		return m, nil
 
@@ -1954,6 +1977,10 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if !isPaste {
 			m.updateSuggestions()
+		} else {
+			m.fileCandidates = nil
+			m.fileCycleIdx = 0
+			m.filePrefix = ""
 		}
 		// Reset history navigation when typing
 		if m.inputHistory != nil {
@@ -2432,7 +2459,14 @@ func (m *tuiModel) updateSuggestions() {
 		m.suggestions = candidates
 		m.showSuggestions = len(candidates) > 0
 		m.selectedSuggest = 0
-	} else if strings.HasPrefix(m.input, "/") {
+	} else if strings.HasPrefix(m.input, "/") && func() bool {
+		// Don't trigger command completion when the leading '/' is part
+		// of a filesystem path (e.g. after @ file completion produces
+		// "/usr/local/bin"). A single '/' prefix without further path
+		// separators in the first word is treated as a command.
+		firstWord := strings.Fields(m.input)[0]
+		return strings.Count(firstWord, "/") <= 1
+	}() {
 		m.fileCandidates = nil // clear stale file completion state
 		m.fileCycleIdx = 0
 		m.filePrefix = ""
@@ -2702,7 +2736,7 @@ func listFileCandidates(query, cwd string) []slashCommand {
 	dir, filter := parseFileQuery(query, cwd)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return []slashCommand{{name: "[permission denied]", isFile: true, absPath: dir}}
 	}
 	lowerFilter := strings.ToLower(filter)
 	includeHidden := strings.HasPrefix(filter, ".")
@@ -2722,6 +2756,13 @@ func listFileCandidates(query, cwd string) []slashCommand {
 		}
 		absPath := filepath.Join(dir, name)
 		isDir := e.IsDir()
+		// Resolve symlinks: DirEntry.IsDir uses lstat, so symlinks to
+		// directories appear as non-dirs. Stat follows the symlink.
+		if !isDir {
+			if info, statErr := os.Stat(absPath); statErr == nil {
+				isDir = info.IsDir()
+			}
+		}
 		entry := slashCommand{
 			name:    name,
 			absPath: absPath,
