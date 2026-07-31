@@ -25,6 +25,13 @@ tasks:
       - go get -u ./...
       - go mod tidy -v
 
+  ci:
+    desc: Full CI pipeline (build, vet, test)
+    cmds:
+      - task: go:build
+      - task: go:vet
+      - task: go:test
+
   default:
     desc: Full CI pipeline (build, vet, test)
     cmds:
