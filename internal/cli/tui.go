@@ -896,6 +896,8 @@ func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 	branch := m.branch
 	skillCat := m.skillCatalog
 	activeSkill := m.activeSkill
+	permChain := m.permChain
+	toolReg := m.toolRegistry
 
 	go func() {
 		defer close(ch)
@@ -924,7 +926,7 @@ func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 
 		// Convert tool definitions
 		var kosongTools []kosong.Tool
-		for _, def := range m.toolRegistry.Definitions() {
+		for _, def := range toolReg.Definitions() {
 			kosongTools = append(kosongTools, kosong.Tool{
 				Name:        def.Name,
 				Description: def.Description,
@@ -1126,7 +1128,7 @@ func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 					})
 				}
 
-				tool, ok := m.toolRegistry.Get(tc.Name)
+				tool, ok := toolReg.Get(tc.Name)
 				if !ok {
 					ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: fmt.Sprintf("tool %q not found", tc.Name), toolErr: true}
 					m.svc.AppendMessages(kosong.CreateToolMessage(tc.ID, fmt.Sprintf("tool %q not found", tc.Name)))
@@ -1141,7 +1143,7 @@ func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 				}
 
 				// Permission check
-				permResult := m.permChain.Evaluate(tc.Name, input)
+				permResult := permChain.Evaluate(tc.Name, input)
 				if permResult.Decision == permission.DecisionDeny {
 					denyMsg := fmt.Sprintf("[Denied] %s", permResult.Reason)
 					ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: denyMsg, toolErr: true}
