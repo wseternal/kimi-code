@@ -747,6 +747,7 @@ type drawerToolEntry struct {
 	isError  bool
 	duration time.Duration
 	at       time.Time
+	tokens   int // estimated token count
 }
 
 // drawerSkillEntry records a skill invocation for the drawer's Skills section.
@@ -1219,6 +1220,9 @@ func (m tuiModel) Init() tea.Cmd {
 // cursorTickMsg is sent periodically to toggle cursor visibility.
 type cursorTickMsg struct{}
 
+// workingTickMsg is sent periodically to update the working indicator duration.
+type workingTickMsg struct{}
+
 // oauthLoginMsg carries the result of an async OAuth login flow.
 type oauthLoginMsg struct {
 	messages []chatMessage
@@ -1230,6 +1234,12 @@ type oauthLoginMsg struct {
 func (m tuiModel) tickCursor() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(_ time.Time) tea.Msg {
 		return cursorTickMsg{}
+	})
+}
+
+func (m tuiModel) tickWorking() tea.Cmd {
+	return tea.Tick(1*time.Second, func(_ time.Time) tea.Msg {
+		return workingTickMsg{}
 	})
 }
 
@@ -1260,6 +1270,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case cursorTickMsg:
 		m.cursorBlink = !m.cursorBlink
 		return m, m.tickCursor()
+
+	case workingTickMsg:
+		// Re-render to update the working indicator duration
+		if m.streaming {
+			return m, m.tickWorking()
+		}
+		return m, nil
 
 	case editorResultMsg:
 		if msg.err != nil {
@@ -1306,6 +1323,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Track for drawer (capped to avoid unbounded memory growth)
 			m.drawerToolLog = append(m.drawerToolLog, drawerToolEntry{
 				name: msg.toolName, args: toolArgSummary(msg.toolArgs), at: time.Now(),
+				tokens: agentctx.TokenEstimate(msg.toolArgs),
 			})
 			if len(m.drawerToolLog) > 500 {
 				m.drawerToolLog = m.drawerToolLog[len(m.drawerToolLog)-500:]
@@ -1327,6 +1345,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if dlast.name == msg.toolName {
 					dlast.isError = msg.toolErr
 					dlast.duration = msg.toolDur
+				}
+			}
+			// Auto-sync plan tracker: update task status based on tool result
+			if m.planTracker != nil {
+				keyword := msg.toolName
+				// Use tool name as keyword for matching task titles
+				if msg.toolErr {
+					m.planTracker.UpdateTaskByKeyword(keyword, plan.StatusFailed)
+				} else {
+					// Only auto-mark done if task is currently active (not already done/pending)
+					// This prevents overwriting explicit LLM updates
+					m.planTracker.UpdateTaskByKeyword(keyword, plan.StatusDone)
 				}
 			}
 			return m, listenStream(m.streamCh)
@@ -1358,7 +1388,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.turnStartTime = time.Now()
 					m.cancelCh = make(chan struct{})
 					m.rebuildCollapsibles()
-					return m, m.runLLMStream(m.lastPrompt)
+					return m, tea.Batch(m.runLLMStream(m.lastPrompt), m.tickWorking())
 				} // else: compaction failed, fall through to normal error handling
 			}
 			// /btw: reset side-query state so next prompt isn't affected
@@ -1597,7 +1627,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
 					m.cancelCh = make(chan struct{})
 					m.rebuildCollapsibles()
-					return m, m.runLLMStream(nextPrompt)
+					return m, tea.Batch(m.runLLMStream(nextPrompt), m.tickWorking())
 				}
 			}
 
@@ -2821,7 +2851,7 @@ func (m tuiModel) executeSkill(s *skill.Skill, skillArgs, displayInput string) (
 	m.turnStartTime = time.Now()
 	m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
 	m.rebuildCollapsibles()
-	return m, m.runLLMStream(prompt)
+	return m, tea.Batch(m.runLLMStream(prompt), m.tickWorking())
 }
 
 func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
@@ -3354,7 +3384,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				m.turnStartTime = time.Now()
 				m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
 				m.rebuildCollapsibles()
-				return m, m.runLLMStream(args)
+				return m, tea.Batch(m.runLLMStream(args), m.tickWorking())
 			}
 			m.messages = append(m.messages, chatMessage{"system", "No provider configured."})
 		}
@@ -3546,7 +3576,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.turnStartTime = time.Now()
 			m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
 			m.rebuildCollapsibles()
-			return m, m.runLLMStream(input)
+			return m, tea.Batch(m.runLLMStream(input), m.tickWorking())
 		}
 
 		// Fallback: no provider configured
@@ -3606,6 +3636,11 @@ func (m tuiModel) View() tea.View {
 	// ── Active streaming content ──
 	if m.streaming {
 		b.WriteString(m.renderStreaming())
+		// Working indicator with duration and interrupt hint
+		if indicator := m.renderWorkingIndicator(); indicator != "" {
+			b.WriteString(indicator)
+			b.WriteString("\n")
+		}
 	} else if m.streamThinking != "" || m.streamResponse != "" {
 		// Leftover streaming content before finalization
 		b.WriteString(m.renderStreaming())
@@ -3846,9 +3881,9 @@ func (m tuiModel) renderMessages() string {
 					b.WriteString(m.renderThinkingBlock(td.thinking, false, turnIdx-1))
 					b.WriteString("\n")
 				}
-				// Render tool groups
+				// Render tool groups (compact mode for completed turns)
 				if len(td.toolGroups) > 0 {
-					b.WriteString(m.renderToolGroupsBlock(td.toolGroups, turnIdx-1))
+					b.WriteString(m.renderToolGroupsBlock(td.toolGroups, turnIdx-1, true))
 					b.WriteString("\n")
 				}
 			}
@@ -4032,9 +4067,9 @@ func (m tuiModel) renderStreaming() string {
 		b.WriteString("\n")
 	}
 
-	// Tool groups
+	// Tool groups (full display during streaming)
 	if len(m.streamToolGroups) > 0 {
-		b.WriteString(m.renderToolGroupsBlock(m.streamToolGroups, streamTurnIdx))
+		b.WriteString(m.renderToolGroupsBlock(m.streamToolGroups, streamTurnIdx, false))
 		b.WriteString("\n")
 	}
 
@@ -4103,7 +4138,8 @@ func (m tuiModel) renderThinkingBlock(thinking string, streaming bool, turnIndex
 }
 
 // renderToolGroupsBlock renders collapsible tool invocation blocks.
-func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) string {
+// When compact=true and not expanded, renders a single summary line instead of listing tools.
+func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int, compact bool) string {
 	if len(groups) == 0 {
 		return ""
 	}
@@ -4113,6 +4149,11 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 	focusPrefix := "  "
 	if focused {
 		focusPrefix = primaryStyle.Render("❯ ")
+	}
+
+	// Compact mode: single summary line for completed turns
+	if compact && !expanded {
+		return focusPrefix + dimStyle.Render(fmt.Sprintf("▸ %d tool calls", len(groups))) + mutedStyle.Render(" (Tab to expand)")
 	}
 
 	var b strings.Builder
@@ -4182,6 +4223,16 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 	return b.String()
 }
 
+// renderWorkingIndicator renders a status line showing elapsed time and interrupt hint.
+func (m tuiModel) renderWorkingIndicator() string {
+	if !m.streaming {
+		return ""
+	}
+	elapsed := time.Since(m.turnStartTime)
+	duration := formatWorkingDuration(elapsed)
+	return dimStyle.Render(fmt.Sprintf("  Working (%s • esc to interrupt)", duration))
+}
+
 // wrapText wraps text to fit within maxWidth runes per line.
 // Existing newlines are preserved, and long lines are broken at word
 // boundaries. Words longer than maxWidth are broken at the boundary.
@@ -4235,6 +4286,38 @@ func indentText(text, prefix string) string {
 		lines[i] = prefix + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// formatRelativeTime returns a human-readable relative time string like "2m ago", "30s ago", "1h ago".
+func formatRelativeTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
+}
+
+// formatWorkingDuration formats a duration for the working indicator: "14s", "1m 14s", "1h 23m".
+func formatWorkingDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		mins := int(d.Minutes())
+		secs := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm %ds", mins, secs)
+	default:
+		hours := int(d.Hours())
+		mins := int(d.Minutes()) % 60
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
 }
 
 // formatToolMetaRaw returns a plain-text suffix showing execution duration and
@@ -4291,14 +4374,21 @@ func (m tuiModel) renderDrawer(width int) string {
 				icon = primaryStyle.Render("✓")
 			case plan.StatusActive:
 				icon = boldPrimary.Render("◉")
+			case plan.StatusFailed:
+				icon = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("✗")
 			default:
 				icon = dimStyle.Render("●")
 			}
 			title := truncateToWidth(task.Title, width-8)
 			b.WriteString(fmt.Sprintf("  %s %s\n", icon, textStyle.Render(title)))
 		}
-		pending, active, done := m.planTracker.Counts()
-		b.WriteString(dimStyle.Render(fmt.Sprintf("  %d/%d done", done, pending+active+done)))
+		pending, active, done, failed := m.planTracker.Counts()
+		total := pending + active + done + failed
+		summary := fmt.Sprintf("  %d/%d done", done, total)
+		if failed > 0 {
+			summary += fmt.Sprintf(" (%d failed)", failed)
+		}
+		b.WriteString(dimStyle.Render(summary))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -4312,7 +4402,7 @@ func (m tuiModel) renderDrawer(width int) string {
 		b.WriteString(dimStyle.Render("  No tool calls"))
 		b.WriteString("\n")
 	} else {
-		// Show last N tool calls that fit in the drawer
+		// Show last N tool calls that fit in the drawer (compact format)
 		maxShow := 10
 		start := 0
 		if len(m.drawerToolLog) > maxShow {
@@ -4323,13 +4413,14 @@ func (m tuiModel) renderDrawer(width int) string {
 			if entry.isError {
 				icon = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("✗")
 			}
-			args := truncateToWidth(entry.args, 20)
-			line := fmt.Sprintf("  %s %s", icon, textStyle.Render(entry.name))
-			if args != "" {
-				line += " " + dimStyle.Render(args)
-			}
+			// Compact format: [relative time] [tool name] [duration] [tokens]
+			relTime := formatRelativeTime(entry.at)
+			line := fmt.Sprintf("  %s %s %s", icon, dimStyle.Render(relTime), textStyle.Render(entry.name))
 			if entry.duration > 0 {
 				line += " " + dimStyle.Render(fmt.Sprintf("%.1fs", entry.duration.Seconds()))
+			}
+			if entry.tokens > 0 {
+				line += " " + dimStyle.Render(fmt.Sprintf("~%d tok", entry.tokens))
 			}
 			b.WriteString(line + "\n")
 		}
