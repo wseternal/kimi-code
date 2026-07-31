@@ -108,21 +108,17 @@ type responsesErrorBody struct {
 }
 
 // SSE streaming event types for Responses API
+// NOTE: In the real OpenAI Responses API streaming format, the "delta" field
+// is a plain string (e.g., {"type":"response.output_text.delta","delta":"Hello"}),
+// NOT a nested object. This differs from Chat Completions where delta is an object.
 type responsesStreamEvent struct {
-	Type     string              `json:"type"`
-	Response *responsesResponse  `json:"response,omitempty"`
-	Item     *responsesOutput    `json:"item,omitempty"`
-	Delta    *responsesDelta     `json:"delta,omitempty"`
-	Part     *responsesOutputContent `json:"part,omitempty"`
-	OutputIndex  *int            `json:"output_index,omitempty"`
-	ContentIndex *int            `json:"content_index,omitempty"`
-}
-
-type responsesDelta struct {
-	Type string `json:"type"` // "response.output_text.delta", "response.function_call_arguments.delta"
-	Text string `json:"text,omitempty"`
-	Delta string `json:"delta,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
+	Type         string                  `json:"type"`
+	Response     *responsesResponse      `json:"response,omitempty"`
+	Item         *responsesOutput        `json:"item,omitempty"`
+	Delta        string                  `json:"delta,omitempty"`
+	Part         *responsesOutputContent `json:"part,omitempty"`
+	OutputIndex  *int                    `json:"output_index,omitempty"`
+	ContentIndex *int                    `json:"content_index,omitempty"`
 }
 
 // ── OpenAIResponsesProvider ──
@@ -495,17 +491,17 @@ func (p *OpenAIResponsesProvider) consumeSSEStream(
 			}
 
 		case "response.output_text.delta":
-			if event.Delta != nil && event.Delta.Text != "" {
+			if event.Delta != "" {
 				select {
-				case partsCh <- kosong.StreamedMessagePart{Type: "text", Text: event.Delta.Text}:
+				case partsCh <- kosong.StreamedMessagePart{Type: "text", Text: event.Delta}:
 				case <-ctx.Done():
 					return
 				}
 			}
 
 		case "response.function_call_arguments.delta":
-			if event.Delta != nil && event.Delta.Delta != "" {
-				args := event.Delta.Delta
+			if event.Delta != "" {
+				args := event.Delta
 				select {
 				case partsCh <- kosong.StreamedMessagePart{
 					Type:          "tool_call_part",
@@ -517,10 +513,10 @@ func (p *OpenAIResponsesProvider) consumeSSEStream(
 				}
 			}
 
-		case "response.reasoning_summary.delta":
-			if event.Delta != nil && event.Delta.Text != "" {
+		case "response.reasoning_summary_text.delta":
+			if event.Delta != "" {
 				select {
-				case partsCh <- kosong.StreamedMessagePart{Type: "think", Think: event.Delta.Text}:
+				case partsCh <- kosong.StreamedMessagePart{Type: "think", Think: event.Delta}:
 				case <-ctx.Done():
 					return
 				}

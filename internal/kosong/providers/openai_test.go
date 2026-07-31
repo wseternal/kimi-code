@@ -779,8 +779,8 @@ func TestResponsesAPI_SSEStreamParsing(t *testing.T) {
 
 		events := []string{
 			`{"type":"response.created","response":{"id":"resp_1"}}`,
-			`{"type":"response.output_text.delta","delta":{"type":"response.output_text.delta","text":"Hello"}}`,
-			`{"type":"response.output_text.delta","delta":{"type":"response.output_text.delta","text":" world"}}`,
+			`{"type":"response.output_text.delta","delta":"Hello"}`,
+			`{"type":"response.output_text.delta","delta":" world"}`,
 			`{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":10,"output_tokens":5}}}`,
 		}
 		for _, ev := range events {
@@ -833,7 +833,7 @@ func TestResponsesAPI_FunctionCall(t *testing.T) {
 
 		events := []string{
 			`{"type":"response.output_item.added","item":{"type":"function_call","call_id":"fc_1","name":"read"},"output_index":0}`,
-			`{"type":"response.function_call_arguments.delta","delta":{"type":"response.function_call_arguments.delta","delta":"{\"path\":\"/tmp\"}"},"output_index":0}`,
+			`{"type":"response.function_call_arguments.delta","delta":"{\"path\":\"/tmp\"}","output_index":0}`,
 			`{"type":"response.output_item.done","item":{"type":"function_call","call_id":"fc_1","name":"read","arguments":"{\"path\":\"/tmp\"}"},"output_index":0}`,
 			`{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":20,"output_tokens":10}}}`,
 		}
