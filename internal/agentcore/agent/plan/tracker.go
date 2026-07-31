@@ -123,12 +123,23 @@ func (t *Tracker) Summary() string {
 	return summary
 }
 
-// UpdateTaskByKeyword updates tasks whose titles contain the given keyword (case-insensitive).
-// This enables auto-sync when tools complete: if a tool succeeds and its name/args correlate
-// with a plan task, mark it done; if it fails, mark it failed.
-// Only transitions active tasks to avoid overwriting explicit LLM updates.
+// UpdateTaskByKeyword attempts to auto-sync task status based on tool results.
+// It matches the keyword (typically a tool name) against active task titles using
+// case-insensitive substring matching.
+//
+// IMPORTANT: This is best-effort auto-sync, not exact correlation. Short/generic
+// tool names like "read", "write", "bash" may match unrelated tasks. To reduce
+// false positives:
+//   - Keywords shorter than 4 characters are skipped
+//   - Only active tasks are transitioned (pending/done/failed are ignored)
+//   - Only the first matching task is updated
+//
+// For reliable task updates, the LLM should explicitly call update_plan with
+// specific task IDs or titles.
 func (t *Tracker) UpdateTaskByKeyword(keyword string, status TaskStatus) {
-	if keyword == "" {
+	// Skip empty or very short keywords to avoid false-positive matches
+	// (e.g., "read" matching "Read and analyze config files")
+	if len(keyword) < 4 {
 		return
 	}
 	t.mu.Lock()

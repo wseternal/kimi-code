@@ -122,3 +122,145 @@ func TestTracker_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestTracker_UpdateTaskByKeyword(t *testing.T) {
+	tests := []struct {
+		name           string
+		initialTasks   []Task
+		keyword        string
+		status         TaskStatus
+		expectedStatus []TaskStatus
+	}{
+		{
+			name: "matches active task and transitions to done",
+			initialTasks: []Task{
+				{Title: "Read configuration files", Status: StatusActive},
+				{Title: "Write unit tests", Status: StatusPending},
+			},
+			keyword:        "configuration",
+			status:         StatusDone,
+			expectedStatus: []TaskStatus{StatusDone, StatusPending},
+		},
+		{
+			name: "matches active task and transitions to failed",
+			initialTasks: []Task{
+				{Title: "Build the project", Status: StatusActive},
+				{Title: "Deploy to staging", Status: StatusPending},
+			},
+			keyword:        "build",
+			status:         StatusFailed,
+			expectedStatus: []TaskStatus{StatusFailed, StatusPending},
+		},
+		{
+			name: "does not transition non-active tasks",
+			initialTasks: []Task{
+				{Title: "Read config", Status: StatusPending},
+				{Title: "Read config", Status: StatusDone},
+				{Title: "Read config", Status: StatusFailed},
+			},
+			keyword:        "read_config",
+			status:         StatusDone,
+			expectedStatus: []TaskStatus{StatusPending, StatusDone, StatusFailed},
+		},
+		{
+			name: "empty keyword returns early",
+			initialTasks: []Task{
+				{Title: "Active task", Status: StatusActive},
+			},
+			keyword:        "",
+			status:         StatusDone,
+			expectedStatus: []TaskStatus{StatusActive},
+		},
+		{
+			name: "short keyword (less than 4 chars) returns early",
+			initialTasks: []Task{
+				{Title: "Read files", Status: StatusActive},
+			},
+			keyword:        "abc",
+			status:         StatusDone,
+			expectedStatus: []TaskStatus{StatusActive},
+		},
+		{
+			name: "case-insensitive matching",
+			initialTasks: []Task{
+				{Title: "BUILD THE PROJECT", Status: StatusActive},
+			},
+			keyword:        "build",
+			status:         StatusDone,
+			expectedStatus: []TaskStatus{StatusDone},
+		},
+		{
+			name: "first-match-only behavior",
+			initialTasks: []Task{
+				{Title: "Build frontend", Status: StatusActive},
+				{Title: "Build backend", Status: StatusActive},
+				{Title: "Build tests", Status: StatusActive},
+			},
+			keyword:        "frontend",
+			status:         StatusDone,
+			expectedStatus: []TaskStatus{StatusDone, StatusActive, StatusActive},
+		},
+		{
+			name: "no matching keyword leaves tasks unchanged",
+			initialTasks: []Task{
+				{Title: "Deploy to production", Status: StatusActive},
+				{Title: "Run tests", Status: StatusActive},
+			},
+			keyword:        "documentation",
+			status:         StatusDone,
+			expectedStatus: []TaskStatus{StatusActive, StatusActive},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := NewTracker()
+			tr.SetTasks(tt.initialTasks)
+
+			tr.UpdateTaskByKeyword(tt.keyword, tt.status)
+
+			tasks := tr.Tasks()
+			if len(tasks) != len(tt.expectedStatus) {
+				t.Fatalf("expected %d tasks, got %d", len(tt.expectedStatus), len(tasks))
+			}
+			for i, task := range tasks {
+				if task.Status != tt.expectedStatus[i] {
+					t.Errorf("task[%d] status = %q, want %q", i, task.Status, tt.expectedStatus[i])
+				}
+			}
+		})
+	}
+}
+
+func TestTracker_UpdateTaskByKeyword_ConcurrentAccess(t *testing.T) {
+	tr := NewTracker()
+	tr.SetTasks([]Task{
+		{Title: "Task one active", Status: StatusActive},
+		{Title: "Task two active", Status: StatusActive},
+	})
+
+	var wg sync.WaitGroup
+
+	// Concurrent keyword updates
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			tr.UpdateTaskByKeyword("task_one", StatusDone)
+			tr.UpdateTaskByKeyword("task_two", StatusFailed)
+		}
+	}()
+
+	// Concurrent reads
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_ = tr.Tasks()
+			_ = tr.Summary()
+			tr.Counts()
+		}
+	}()
+
+	wg.Wait()
+}
