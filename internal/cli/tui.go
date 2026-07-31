@@ -1150,7 +1150,7 @@ func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 				}
 
 				toolStart := time.Now()
-				result, err := tool.Execute(ctx, input, tools.ExecContext{WorkDir: m.cwd})
+				result, err := tool.Execute(ctx, input, tools.ExecContext{WorkDir: cwd})
 				toolDur := time.Since(toolStart)
 				if err != nil {
 					result = &tools.Result{Output: err.Error(), IsError: true}
@@ -3097,7 +3097,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed last %d turn(s).", n)})
 			}
 		} else {
-			// In-memory undo: remove turns, history messages, and context
+			// In-memory undo: remove turns, history messages, display, and context
 			turns := m.svc.CompletedTurns()
 			removeN := n
 			if removeN > len(turns) {
@@ -3115,8 +3115,26 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 			m.svc.RemoveLastMessages(msgCount)
 			m.svc.ContextMgr().RemoveLastNTurns(removeN)
+			// Remove display messages for the undone turns.
+			// Each turn is a (user, assistant) pair; walk backwards to find boundaries.
+			turnBoundaryCount := 0
+			cutIdx := 0
+			for i := len(m.messages) - 1; i >= 0; i-- {
+				if m.messages[i].role == "user" {
+					turnBoundaryCount++
+					if turnBoundaryCount >= removeN {
+						cutIdx = i
+						break
+					}
+				}
+			}
+			if turnBoundaryCount >= removeN {
+				m.messages = m.messages[:cutIdx]
+			} else {
+				m.messages = nil
+			}
 			m.rebuildCollapsibles()
-			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed last %d turn(s) from display.", removeN)})
+			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed last %d turn(s).", removeN)})
 		}
 		m.input = ""
 		m.cursor = 0
