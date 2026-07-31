@@ -164,6 +164,18 @@ func (s *SessionService) ClearHistory() {
 	s.history = s.history[:0]
 }
 
+// RemoveLastMessages removes the last n messages from the history.
+// Used by /undo to remove messages corresponding to undone turns.
+func (s *SessionService) RemoveLastMessages(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n >= len(s.history) {
+		s.history = s.history[:0]
+	} else if n > 0 {
+		s.history = s.history[:len(s.history)-n]
+	}
+}
+
 // RewriteHistory replaces the entire history with new messages.
 // Used by compaction to install compacted context.
 func (s *SessionService) RewriteHistory(msgs []kosong.Message) {

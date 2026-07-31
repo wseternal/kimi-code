@@ -879,34 +879,48 @@ func isContextOverflow(errText string) bool {
 
 // runLLMStream is a bubbletea Cmd that streams the LLM response with tool calling.
 // It creates a channel of streamEvents and returns a listenStream command.
-func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
+// If isOverflowRetry is true, the user message is NOT appended to history
+// (it's already present from the failed attempt, preserved by rewriteContext).
+func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 	ch := make(chan streamEvent, 64)
 	m.streamCh = ch
 	m.turnStartTime = time.Now()
 	m.svc.SetLastPrompt(prompt) // save for overflow retry
 
+	// Snapshot fields read by the goroutine to avoid data races.
+	// The goroutine runs concurrently with the bubbletea Update loop,
+	// which may replace m.provider (via /model) or m.activeSkill.
+	provider := m.provider
+	model := m.model
+	cwd := m.cwd
+	branch := m.branch
+	skillCat := m.skillCatalog
+	activeSkill := m.activeSkill
+
 	go func() {
 		defer close(ch)
 
-		if m.provider == nil {
+		if provider == nil {
 			ch <- streamEvent{kind: "error", text: "no provider configured. Set API key in ~/.kimi-code/config.toml"}
 			return
 		}
 
-		// Add user message to history
-		m.svc.AppendMessages(kosong.CreateUserMessage(prompt))
+		// Add user message to history (skip on overflow retry — already present)
+		if !isOverflowRetry {
+			m.svc.AppendMessages(kosong.CreateUserMessage(prompt))
+		}
 
 		// Record audit: LLM request
 		if m.svc.AuditWriter() != nil {
 			m.svc.AuditWriter().Record(audit.AuditEvent{
 				SessionID: m.svc.ID(),
 				Type:      audit.EvtLLMRequest,
-				Data:      map[string]any{"prompt": prompt, "model": m.model},
+				Data:      map[string]any{"prompt": prompt, "model": model},
 			})
 		}
 
 		ctx := context.Background()
-		systemPrompt := buildSystemPrompt(m.cwd, m.branch, m.skillCatalog, m.activeSkill)
+		systemPrompt := buildSystemPrompt(cwd, branch, skillCat, activeSkill)
 
 		// Convert tool definitions
 		var kosongTools []kosong.Tool
@@ -950,7 +964,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 					},
 				}
 			}
-			stream, err := m.provider.Generate(ctx, systemPrompt, kosongTools, m.svc.History(), genOpts)
+			stream, err := provider.Generate(ctx, systemPrompt, kosongTools, m.svc.History(), genOpts)
 			if err != nil {
 				ch <- streamEvent{kind: "error", text: err.Error()}
 				return
@@ -1367,7 +1381,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.turnStartTime = time.Now()
 					m.cancelCh = make(chan struct{})
 					m.rebuildCollapsibles()
-					return m, tea.Batch(m.runLLMStream(m.svc.LastPrompt()), m.tickWorking())
+					return m, tea.Batch(m.runLLMStream(m.svc.LastPrompt(), true), m.tickWorking())
 				} // else: compaction failed, fall through to normal error handling
 			}
 			// /btw: reset side-query state so next prompt isn't affected
@@ -1459,6 +1473,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				turnTokens := agentctx.TokenEstimate(m.streamResponse) + agentctx.TokenEstimate(m.streamThinking)
 				m.svc.ContextMgr().AddTurnUsage(turnTokens)
+				m.svc.AddSessionUsage(kosong.TokenUsage{InputOther: turnTokens})
 			}
 			m.svc.ResetTurnUsage()   // reset for next turn
 			m.svc.ResetOverflow()     // reset overflow retries for next turn
@@ -1611,7 +1626,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
 					m.cancelCh = make(chan struct{})
 					m.rebuildCollapsibles()
-					return m, tea.Batch(m.runLLMStream(nextPrompt), m.tickWorking())
+					return m, tea.Batch(m.runLLMStream(nextPrompt, false), m.tickWorking())
 				}
 			}
 
@@ -2178,14 +2193,29 @@ func (m *tuiModel) makeGenerateFunc() agentctx.GenerateFunc {
 	}
 }
 
-// rewriteContext replaces the conversation messages with the compacted set
-// and resets the context manager to reflect the new token usage.
+// rewriteContext replaces the conversation messages with the compacted set,
+// rewrites the LLM history, and resets the context manager.
 func (m *tuiModel) rewriteContext(compactedMsgs []agentctx.CompactMessage) {
-	// Replace messages
+	// Replace display messages
 	m.messages = nil
 	for _, msg := range compactedMsgs {
 		m.messages = append(m.messages, chatMessage{role: msg.Role, content: msg.Content})
 	}
+
+	// Rewrite LLM conversation history to match compacted messages.
+	// This is critical: without this, the next LLM call still sends the
+	// full uncompacted history, defeating the purpose of compaction.
+	var kosongMsgs []kosong.Message
+	for _, msg := range compactedMsgs {
+		switch msg.Role {
+		case "user":
+			kosongMsgs = append(kosongMsgs, kosong.CreateUserMessage(msg.Content))
+		case "assistant":
+			kosongMsgs = append(kosongMsgs, kosong.CreateAssistantMessage(
+				[]kosong.ContentPart{kosong.NewTextPart(msg.Content)}, nil))
+		}
+	}
+	m.svc.RewriteHistory(kosongMsgs)
 
 	// Reset context manager and re-record usage from compacted messages
 	m.svc.ContextMgr().Reset()
@@ -2200,6 +2230,13 @@ func (m *tuiModel) rewriteContext(compactedMsgs []agentctx.CompactMessage) {
 	// Clear completed turns (they've been compacted)
 	m.svc.ClearTurns()
 	m.rebuildCollapsibles()
+}
+
+// turnHistoryCount returns the number of kosong.Message entries a completed
+// turn occupies in the LLM history (user + assistant + tool results).
+func turnHistoryCount(td turnData) int {
+	// user message + assistant message + one tool message per tool group
+	return 2 + len(td.toolGroups)
 }
 
 func (m *tuiModel) deleteWordBackward() {
@@ -2838,7 +2875,7 @@ func (m tuiModel) executeSkill(s *skill.Skill, skillArgs, displayInput string) (
 	m.turnStartTime = time.Now()
 	m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
 	m.rebuildCollapsibles()
-	return m, tea.Batch(m.runLLMStream(prompt), m.tickWorking())
+	return m, tea.Batch(m.runLLMStream(prompt, false), m.tickWorking())
 }
 
 func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
@@ -3060,16 +3097,26 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed last %d turn(s).", n)})
 			}
 		} else {
-			// In-memory undo
+			// In-memory undo: remove turns, history messages, and context
 			turns := m.svc.CompletedTurns()
-			if n >= len(turns) {
+			removeN := n
+			if removeN > len(turns) {
+				removeN = len(turns)
+			}
+			// Count history messages corresponding to the removed turns
+			msgCount := 0
+			for i := len(turns) - removeN; i < len(turns); i++ {
+				msgCount += turnHistoryCount(turns[i])
+			}
+			if removeN >= len(turns) {
 				m.svc.ClearTurns()
 			} else {
-				m.svc.RewriteTurns(turns[:len(turns)-n])
+				m.svc.RewriteTurns(turns[:len(turns)-removeN])
 			}
-			m.svc.ContextMgr().RemoveLastNTurns(n)
+			m.svc.RemoveLastMessages(msgCount)
+			m.svc.ContextMgr().RemoveLastNTurns(removeN)
 			m.rebuildCollapsibles()
-			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed last %d turn(s) from display.", n)})
+			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed last %d turn(s) from display.", removeN)})
 		}
 		m.input = ""
 		m.cursor = 0
@@ -3357,7 +3404,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				m.turnStartTime = time.Now()
 				m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
 				m.rebuildCollapsibles()
-				return m, tea.Batch(m.runLLMStream(args), m.tickWorking())
+				return m, tea.Batch(m.runLLMStream(args, false), m.tickWorking())
 			}
 			m.messages = append(m.messages, chatMessage{"system", "No provider configured."})
 		}
@@ -3550,7 +3597,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			m.turnStartTime = time.Now()
 			m.messages = append(m.messages, chatMessage{"system", "Thinking..."})
 			m.rebuildCollapsibles()
-			return m, tea.Batch(m.runLLMStream(input), m.tickWorking())
+			return m, tea.Batch(m.runLLMStream(input, false), m.tickWorking())
 		}
 
 		// Fallback: no provider configured
