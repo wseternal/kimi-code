@@ -5,6 +5,7 @@ package plan
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -125,17 +126,20 @@ func (t *Tracker) Summary() string {
 // UpdateTaskByKeyword updates tasks whose titles contain the given keyword (case-insensitive).
 // This enables auto-sync when tools complete: if a tool succeeds and its name/args correlate
 // with a plan task, mark it done; if it fails, mark it failed.
+// Only transitions active tasks to avoid overwriting explicit LLM updates.
 func (t *Tracker) UpdateTaskByKeyword(keyword string, status TaskStatus) {
 	if keyword == "" {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	keywordLower := fmt.Sprintf("%s", keyword)
 	for i, task := range t.tasks {
-		titleLower := fmt.Sprintf("%s", task.Title)
+		// Only transition active tasks to avoid overwriting LLM-set states
+		if task.Status != StatusActive {
+			continue
+		}
 		// Case-insensitive substring match
-		if containsIgnoreCase(titleLower, keywordLower) {
+		if containsIgnoreCase(task.Title, keyword) {
 			t.tasks[i].Status = status
 			t.tasks[i].At = time.Now()
 			// Only update the first matching task to avoid cascading updates
@@ -146,34 +150,5 @@ func (t *Tracker) UpdateTaskByKeyword(keyword string, status TaskStatus) {
 
 // containsIgnoreCase checks if s contains substr (case-insensitive).
 func containsIgnoreCase(s, substr string) bool {
-	if substr == "" {
-		return true
-	}
-	sLen := len(s)
-	subLen := len(substr)
-	if subLen > sLen {
-		return false
-	}
-	for i := 0; i <= sLen-subLen; i++ {
-		match := true
-		for j := 0; j < subLen; j++ {
-			sc := s[i+j]
-			subc := substr[j]
-			// Simple ASCII case-insensitive comparison
-			if sc >= 'A' && sc <= 'Z' {
-				sc += 32
-			}
-			if subc >= 'A' && subc <= 'Z' {
-				subc += 32
-			}
-			if sc != subc {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }

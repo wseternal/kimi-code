@@ -32,7 +32,7 @@ func (t *UpdatePlanTool) Definition() Definition {
 						"type": "object",
 						"properties": map[string]interface{}{
 							"title":  map[string]interface{}{"type": "string", "description": "Short task description"},
-							"status": map[string]interface{}{"type": "string", "description": "Task status: pending, active, or done"},
+							"status": map[string]interface{}{"type": "string", "description": "Task status: pending, active, done, or failed"},
 						},
 						"required": []string{"title", "status"},
 					},
@@ -58,6 +58,8 @@ func (t *UpdatePlanTool) Execute(_ context.Context, input json.RawMessage, _ Exe
 			req.Tasks[i].Status = plan.StatusActive
 		case "done", "complete", "completed":
 			req.Tasks[i].Status = plan.StatusDone
+		case "failed", "fail", "error":
+			req.Tasks[i].Status = plan.StatusFailed
 		default:
 			req.Tasks[i].Status = plan.StatusPending
 		}
