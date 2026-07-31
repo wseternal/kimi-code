@@ -4182,16 +4182,17 @@ func (m tuiModel) renderToolGroupsBlock(groups []toolGroup, turnIndex int) strin
 	return b.String()
 }
 
-// wrapText wraps text to fit within maxWidth characters per line.
+// wrapText wraps text to fit within maxWidth runes per line.
 // Existing newlines are preserved, and long lines are broken at word
 // boundaries. Words longer than maxWidth are broken at the boundary.
+// Uses rune count rather than byte length for correct CJK handling.
 func wrapText(text string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return text
 	}
 	var result []string
 	for _, line := range strings.Split(text, "\n") {
-		if len(line) <= maxWidth {
+		if utf8.RuneCountInString(line) <= maxWidth {
 			result = append(result, line)
 			continue
 		}
@@ -4204,7 +4205,7 @@ func wrapText(text string, maxWidth int) string {
 		}
 		current := words[0]
 		for _, word := range words[1:] {
-			if len(current)+1+len(word) <= maxWidth {
+			if utf8.RuneCountInString(current)+1+utf8.RuneCountInString(word) <= maxWidth {
 				current += " " + word
 			} else {
 				wrapped = append(wrapped, current)
@@ -4215,11 +4216,12 @@ func wrapText(text string, maxWidth int) string {
 		// Handle words that are themselves longer than maxWidth.
 		var finalLines []string
 		for _, wl := range wrapped {
-			for len(wl) > maxWidth {
-				finalLines = append(finalLines, wl[:maxWidth])
-				wl = wl[maxWidth:]
+			runes := []rune(wl)
+			for len(runes) > maxWidth {
+				finalLines = append(finalLines, string(runes[:maxWidth]))
+				runes = runes[maxWidth:]
 			}
-			finalLines = append(finalLines, wl)
+			finalLines = append(finalLines, string(runes))
 		}
 		result = append(result, finalLines...)
 	}

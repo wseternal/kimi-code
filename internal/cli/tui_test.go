@@ -2038,6 +2038,59 @@ func TestListFileCandidates_SymlinkedDirectory(t *testing.T) {
 
 // TestListFileCandidates_PermissionDenied verifies that listFileCandidates
 // returns a synthetic error indicator when the directory is unreadable.
+func TestWrapText(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		maxWidth int
+		want     string
+	}{
+		{"short line", "hello", 20, "hello"},
+		{"empty input", "", 20, ""},
+		{"zero width", "hello", 0, "hello"},
+		{"negative width", "hello", -1, "hello"},
+		{"exact width", "hello", 5, "hello"},
+		{
+			"long line wraps at word boundary",
+			"the quick brown fox jumps over the lazy dog",
+			15,
+			"the quick brown\nfox jumps over\nthe lazy dog",
+		},
+		{
+			"preserves existing newlines",
+			"line one\nline two\nline three",
+			20,
+			"line one\nline two\nline three",
+		},
+		{
+			"word longer than maxWidth breaks hard",
+			"abcdefghijklmnopqrstuvwxyz",
+			10,
+			"abcdefghij\nklmnopqrst\nuvwxyz",
+		},
+		{
+			"multi-byte runes counted correctly",
+			"你好世界 hello",
+			8,
+			"你好世界\nhello",
+		},
+		{
+			"blank line preserved",
+			"line one\n\nline three",
+			20,
+			"line one\n\nline three",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapText(tt.text, tt.maxWidth)
+			if got != tt.want {
+				t.Errorf("wrapText(%q, %d)\ngot:  %q\nwant: %q", tt.text, tt.maxWidth, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestListFileCandidates_PermissionDenied(t *testing.T) {
 	root := t.TempDir()
 	restricted := filepath.Join(root, "restricted")
