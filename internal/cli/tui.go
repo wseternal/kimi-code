@@ -657,7 +657,7 @@ func (m *tuiModel) replayHistory() {
 		if tokensIn > 0 {
 			m.svc.ContextMgr().Reset()
 			m.svc.ContextMgr().AddTurnUsage(tokensIn + tokensOut)
-		} else if len(m.svc.CompletedTurns()) > 0 {
+		} else if m.svc.CompletedTurnsLen() > 0 {
 			// Fallback for sessions persisted before real token tracking:
 			// use text-based estimates so the context bar isn't empty.
 			m.svc.ContextMgr().Reset()
@@ -1446,8 +1446,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Model produced thinking but no visible response.
 				// Build a diagnostic message including the finish reason if available.
 				diag := "⚠ The model produced extended reasoning but no visible response."
-				if m.svc.LastFinishReason() != nil {
-					diag += fmt.Sprintf(" (finish_reason: %s)", *m.svc.LastFinishReason())
+				if reason, ok := m.svc.LastFinishReason(); ok {
+					diag += fmt.Sprintf(" (finish_reason: %s)", reason)
 				}
 				tu := m.svc.TurnUsage()
 				if tu.ReasoningTokens > 0 {
@@ -1459,8 +1459,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Completely empty response — likely preceded by an error, but
 				// provide a diagnostic just in case.
 				diag := "⚠ The model produced no response."
-				if m.svc.LastFinishReason() != nil {
-					diag += fmt.Sprintf(" (finish_reason: %s)", *m.svc.LastFinishReason())
+				if reason, ok := m.svc.LastFinishReason(); ok {
+					diag += fmt.Sprintf(" (finish_reason: %s)", reason)
 				}
 				m.messages = append(m.messages, chatMessage{"assistant", diag})
 			} else {
@@ -1559,8 +1559,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				var finishReason string
-				if m.svc.LastFinishReason() != nil {
-					finishReason = *m.svc.LastFinishReason()
+				if reason, ok := m.svc.LastFinishReason(); ok {
+					finishReason = reason
 				}
 				sess := m.svc.Session()
 				m.svc.AuditWriter().Record(audit.AuditEvent{
@@ -2064,7 +2064,7 @@ func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction
 		m.messages = append(m.messages, chatMessage{"system", "Cannot compact while streaming is active."})
 		return false
 	}
-	if len(m.svc.CompletedTurns()) <= 2 {
+	if m.svc.CompletedTurnsLen() <= 2 {
 		m.messages = append(m.messages, chatMessage{"system", "Not enough turns to compact (need > 2)."})
 		return false
 	}
@@ -2937,6 +2937,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			home, _ := os.UserHomeDir()
 			if home != "" {
 				m.app.switchAuditStore(newSess.ID, home)
+				m.svc.SetAuditWriter(m.app.AuditWriter)
 			}
 			m.svc.SetSession(newSess)
 			m.svc.Reset()
@@ -4096,7 +4097,7 @@ func (m tuiModel) renderInput() string {
 // renderStreaming renders the active streaming content: thinking, tools, and response text.
 func (m tuiModel) renderStreaming() string {
 	var b strings.Builder
-	streamTurnIdx := len(m.svc.CompletedTurns())
+	streamTurnIdx := m.svc.CompletedTurnsLen()
 
 	// Thinking block (during streaming, show expanded by default)
 	if m.streamThinking != "" {
@@ -4897,6 +4898,7 @@ func (m *tuiModel) resumeSession(id string) {
 	home, _ := os.UserHomeDir()
 	if home != "" {
 		m.app.switchAuditStore(sess.ID, home)
+		m.svc.SetAuditWriter(m.app.AuditWriter)
 	}
 
 	// Swap to the resumed session

@@ -118,6 +118,13 @@ func (s *SessionService) AuditWriter() *audit.Writer {
 	return s.auditWriter
 }
 
+// SetAuditWriter updates the audit writer (call after session switch).
+func (s *SessionService) SetAuditWriter(w *audit.Writer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.auditWriter = w
+}
+
 // --- History (the critical hot path) ---
 
 // History returns a snapshot copy of the LLM conversation history.
@@ -193,6 +200,13 @@ func (s *SessionService) CompletedTurns() []turnData {
 	result := make([]turnData, len(s.completedTurns))
 	copy(result, s.completedTurns)
 	return result
+}
+
+// CompletedTurnsLen returns the number of completed turns without copying.
+func (s *SessionService) CompletedTurnsLen() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.completedTurns)
 }
 
 // AppendTurn adds a completed turn.
@@ -368,11 +382,15 @@ func (s *SessionService) ResetOverflow() {
 	s.overflowRetries = 0
 }
 
-// LastFinishReason returns the raw finish_reason from the last LLM step.
-func (s *SessionService) LastFinishReason() *string {
+// LastFinishReason returns the finish_reason from the last LLM step.
+// Returns ("", false) if no finish reason has been recorded.
+func (s *SessionService) LastFinishReason() (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.lastFinishReason
+	if s.lastFinishReason == nil {
+		return "", false
+	}
+	return *s.lastFinishReason, true
 }
 
 // SetFinishReason records the finish_reason from an LLM step.
