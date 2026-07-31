@@ -57,9 +57,9 @@ func TestTracker_Counts(t *testing.T) {
 		{Title: "A1", Status: StatusActive},
 		{Title: "D1", Status: StatusDone},
 	})
-	pending, active, done := tr.Counts()
-	if pending != 2 || active != 1 || done != 1 {
-		t.Errorf("Counts() = (%d, %d, %d), want (2, 1, 1)", pending, active, done)
+	pending, active, done, failed := tr.Counts()
+	if pending != 2 || active != 1 || done != 1 || failed != 0 {
+		t.Errorf("Counts() = (%d, %d, %d, %d), want (2, 1, 1, 0)", pending, active, done, failed)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestTracker_Summary(t *testing.T) {
 		{Title: "C", Status: StatusPending},
 	})
 	got := tr.Summary()
-	want := "1/3 done (1 active, 1 pending)"
+	want := "1/3 done, 1 active, 1 pending"
 	if got != want {
 		t.Errorf("Summary() = %q, want %q", got, want)
 	}

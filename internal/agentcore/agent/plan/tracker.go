@@ -16,6 +16,7 @@ const (
 	StatusPending TaskStatus = "pending"
 	StatusActive  TaskStatus = "active"
 	StatusDone    TaskStatus = "done"
+	StatusFailed  TaskStatus = "failed"
 )
 
 // Task is a single tracked item in the plan.
@@ -82,8 +83,8 @@ func (t *Tracker) Len() int {
 	return len(t.tasks)
 }
 
-// Counts returns (pending, active, done) counts.
-func (t *Tracker) Counts() (pending, active, done int) {
+// Counts returns (pending, active, done, failed) counts.
+func (t *Tracker) Counts() (pending, active, done, failed int) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	for _, task := range t.tasks {
@@ -94,6 +95,8 @@ func (t *Tracker) Counts() (pending, active, done int) {
 			active++
 		case StatusDone:
 			done++
+		case StatusFailed:
+			failed++
 		}
 	}
 	return
@@ -101,10 +104,76 @@ func (t *Tracker) Counts() (pending, active, done int) {
 
 // Summary returns a human-readable one-line summary.
 func (t *Tracker) Summary() string {
-	pending, active, done := t.Counts()
-	total := pending + active + done
+	pending, active, done, failed := t.Counts()
+	total := pending + active + done + failed
 	if total == 0 {
 		return "No tasks"
 	}
-	return fmt.Sprintf("%d/%d done (%d active, %d pending)", done, total, active, pending)
+	summary := fmt.Sprintf("%d/%d done", done, total)
+	if failed > 0 {
+		summary += fmt.Sprintf(" (%d failed)", failed)
+	}
+	if active > 0 {
+		summary += fmt.Sprintf(", %d active", active)
+	}
+	if pending > 0 {
+		summary += fmt.Sprintf(", %d pending", pending)
+	}
+	return summary
+}
+
+// UpdateTaskByKeyword updates tasks whose titles contain the given keyword (case-insensitive).
+// This enables auto-sync when tools complete: if a tool succeeds and its name/args correlate
+// with a plan task, mark it done; if it fails, mark it failed.
+func (t *Tracker) UpdateTaskByKeyword(keyword string, status TaskStatus) {
+	if keyword == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	keywordLower := fmt.Sprintf("%s", keyword)
+	for i, task := range t.tasks {
+		titleLower := fmt.Sprintf("%s", task.Title)
+		// Case-insensitive substring match
+		if containsIgnoreCase(titleLower, keywordLower) {
+			t.tasks[i].Status = status
+			t.tasks[i].At = time.Now()
+			// Only update the first matching task to avoid cascading updates
+			return
+		}
+	}
+}
+
+// containsIgnoreCase checks if s contains substr (case-insensitive).
+func containsIgnoreCase(s, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	sLen := len(s)
+	subLen := len(substr)
+	if subLen > sLen {
+		return false
+	}
+	for i := 0; i <= sLen-subLen; i++ {
+		match := true
+		for j := 0; j < subLen; j++ {
+			sc := s[i+j]
+			subc := substr[j]
+			// Simple ASCII case-insensitive comparison
+			if sc >= 'A' && sc <= 'Z' {
+				sc += 32
+			}
+			if subc >= 'A' && subc <= 'Z' {
+				subc += 32
+			}
+			if sc != subc {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }

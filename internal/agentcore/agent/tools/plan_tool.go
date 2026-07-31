@@ -75,9 +75,14 @@ func (t *UpdatePlanTool) Execute(_ context.Context, input json.RawMessage, _ Exe
 
 	t.Tracker.SetTasks(req.Tasks)
 
-	pending, active, done := t.Tracker.Counts()
-	total := pending + active + done
+	pending, active, done, failed := t.Tracker.Counts()
+	total := pending + active + done + failed
+	summary := fmt.Sprintf("Plan updated: %d tasks (%d done", total, done)
+	if failed > 0 {
+		summary += fmt.Sprintf(", %d failed", failed)
+	}
+	summary += fmt.Sprintf(", %d active, %d pending)", active, pending)
 	return &Result{
-		Output: fmt.Sprintf("Plan updated: %d tasks (%d done, %d active, %d pending)", total, done, active, pending),
+		Output: summary,
 	}, nil
 }
