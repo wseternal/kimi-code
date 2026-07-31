@@ -193,8 +193,10 @@ type activeSkillInfo struct {
 }
 
 type tuiModel struct {
+	// Session service (thread-safe, shared across goroutines)
+	svc *SessionService
+
 	// State
-	sessionID    string
 	version      string
 	cwd          string
 	model        string
@@ -204,18 +206,15 @@ type tuiModel struct {
 	cursor       int
 	width        int
 	height       int
-	turnCount    int
 	yoloMode     bool
 	planMode     bool
 	quitting     bool
 	ctrlCPending bool // true after first Ctrl+C; second press quits
 	streaming    bool
-	sess         *session.Session
 	app          *App
 
 	// LLM provider
 	provider kosong.ChatProvider
-	history  []kosong.Message // conversation history for multi-turn
 
 	// Agent tools
 	toolRegistry *tools.Registry
@@ -245,15 +244,10 @@ type tuiModel struct {
 	responseCursor   int // scroll offset in response view
 	scrollOffset     int // viewport scroll offset in lines (0 = anchored to bottom)
 
-	// Side query mode (/btw): when true, history is truncated after streaming
-	btwMode       bool
-	btwHistoryLen int
-
 	// Collapsible sections
-	collapsibles   []collapsible
-	focusIndex     int // -1 = none
-	completedTurns []turnData
-	turnStartTime  time.Time
+	collapsibles  []collapsible
+	focusIndex    int // -1 = none
+	turnStartTime time.Time
 
 	// Skills
 	skillCatalog *skill.Catalog
@@ -276,18 +270,6 @@ type tuiModel struct {
 	cancelCh     chan struct{}
 	steeringTool *tools.SteeringTool
 
-	// Cycle 6: Context management
-	contextMgr       *agentctx.ContextManager
-	compactStrategy  *agentctx.CompactionStrategy
-	turnUsage        kosong.TokenUsage // real API usage for current turn (live during streaming)
-	sessionUsage     kosong.TokenUsage // cumulative session token usage
-	lastPrompt       string            // last prompt sent (for overflow retry)
-	overflowRetries  int               // overflow retry attempts this turn
-	lastFinishReason *string           // raw finish_reason from last LLM step (for diagnostics)
-
-	// Cycle 8: Goal tracker
-	goalTracker *goal.Tracker
-
 	// TUI state
 	showSessionPicker bool
 	sessionPickerList []*session.SerializedSession
@@ -309,13 +291,9 @@ type tuiModel struct {
 	// OAuth login cancellation
 	oauthCancel context.CancelFunc
 
-	// Audit trail
-	auditWriter *audit.Writer
-
 	// Drawer (right-side panel)
 	showDrawer     bool
 	drawerWidthPct int // percentage of width for drawer (default 35)
-	planTracker    *plan.Tracker
 	drawerToolLog  []drawerToolEntry
 	drawerSkills   []drawerSkillEntry
 }
@@ -361,8 +339,23 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	bgMgr := background.NewManager()
 	tools.RegisterBackgroundTools(toolReg, bgMgr)
 
-	// Plan tracker for drawer progress section
-	planTrk := plan.NewTracker()
+	// Resolve the model's context window size from config so the status bar
+	// displays the correct total (e.g. "ctx: 0 / 128K tokens") instead of
+	// the hardcoded default.
+	var maxCtx int
+	if _, mc := app.Config.ResolveModel(); mc != nil {
+		maxCtx = mc.MaxContextSize
+	}
+
+	// Session service: single source of truth for all session data
+	svc := NewSessionService(sess, app, SessionServiceConfig{
+		MaxCtx:              maxCtx,
+		TriggerRatio:        app.Config.LoopControl.CompactionTriggerRatio,
+		ReservedContextSize: app.Config.LoopControl.ReservedContextSize,
+	})
+
+	// Plan tracker for drawer progress section (from session service)
+	planTrk := svc.PlanTracker()
 	toolReg.Register(&tools.UpdatePlanTool{Tracker: planTrk})
 
 	// Steering tool for mid-turn user input (not registered in tool registry;
@@ -378,14 +371,6 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 
 	permChain := permission.DefaultChain()
 
-	// Resolve the model's context window size from config so the status bar
-	// displays the correct total (e.g. "ctx: 0 / 128K tokens") instead of
-	// the hardcoded default.
-	var maxCtx int
-	if _, mc := app.Config.ResolveModel(); mc != nil {
-		maxCtx = mc.MaxContextSize
-	}
-
 	// Initialize input history
 	var inputHist *InputHistory
 	home, _ := os.UserHomeDir()
@@ -395,33 +380,20 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	}
 
 	return tuiModel{
-		sessionID:      sess.ID,
+		svc:            svc,
 		version:        version,
 		cwd:            cwd,
 		model:          modelName,
 		branch:         getGitBranch(skill.FindProjectRoot(cwd)),
-		sess:           sess,
 		app:            app,
 		provider:       provider,
-		history:        []kosong.Message{},
 		skillCatalog:   skillCat,
 		toolRegistry:   toolReg,
 		bgManager:      bgMgr,
 		permChain:      permChain,
 		focusIndex:     -1,
 		prompter:       permission.NewPrompter(),
-		contextMgr:     agentctx.NewContextManager(maxCtx, app.Config.LoopControl.CompactionTriggerRatio, app.Config.LoopControl.ReservedContextSize),
-		compactStrategy: agentctx.NewCompactionStrategy(agentctx.CompactionConfig{
-			TriggerRatio:         app.Config.LoopControl.CompactionTriggerRatio,
-			BlockRatio:           app.Config.LoopControl.CompactionTriggerRatio,
-			ReservedContextSize:  app.Config.LoopControl.ReservedContextSize,
-			MaxCompactionPerTurn: 3,
-			MaxOverflowAttempts:  3,
-		}),
-		goalTracker:    goal.NewTracker(),
 		inputHistory:   inputHist,
-		auditWriter:    app.AuditWriter,
-		planTracker:    planTrk,
 		steeringTool:   steering,
 		drawerWidthPct: 35,
 	}
@@ -441,7 +413,7 @@ func (m *tuiModel) recreateProvider() {
 	// Sync the context manager's max tokens with the current model config
 	// so the status bar reflects the correct context window size.
 	if _, mc := m.app.Config.ResolveModel(); mc != nil {
-		m.contextMgr.SetMaxTokens(mc.MaxContextSize)
+		m.svc.ContextMgr().SetMaxTokens(mc.MaxContextSize)
 	}
 }
 
@@ -505,7 +477,7 @@ func (m *tuiModel) runOAuthLogin() tea.Cmd {
 // replayFromAudit reconstructs TUI state from the BadgerDB audit trail.
 // Returns true if successful, false if no audit data was found.
 func (m *tuiModel) replayFromAudit() bool {
-	data, err := m.app.AuditFacade.LoadSession(m.sessionID)
+	data, err := m.app.AuditFacade.LoadSession(m.svc.ID())
 	if err != nil || data == nil {
 		return false
 	}
@@ -513,8 +485,8 @@ func (m *tuiModel) replayFromAudit() bool {
 	for _, tr := range data.Turns {
 		// User message
 		m.messages = append(m.messages, chatMessage{role: "user", content: tr.Prompt})
-		m.turnCount++
-		m.history = append(m.history, kosong.CreateUserMessage(tr.Prompt))
+		m.svc.IncrementTurn()
+		m.svc.AppendMessages(kosong.CreateUserMessage(tr.Prompt))
 
 		// Assistant turn data (for collapsibles)
 		td := turnData{
@@ -531,7 +503,7 @@ func (m *tuiModel) replayFromAudit() bool {
 				duration:  tc.Duration,
 			})
 		}
-		m.completedTurns = append(m.completedTurns, td)
+		m.svc.AppendTurn(td)
 		m.messages = append(m.messages, chatMessage{role: "assistant", content: tr.Response})
 
 		// LLM conversation history
@@ -547,33 +519,38 @@ func (m *tuiModel) replayFromAudit() bool {
 				Arguments: &tc.Arguments,
 			})
 		}
-		m.history = append(m.history, assistantMsg)
+		m.svc.AppendMessages(assistantMsg)
 		for _, tc := range tr.Tools {
-			m.history = append(m.history, kosong.CreateToolMessage(tc.ID, tc.Result))
+			m.svc.AppendMessages(kosong.CreateToolMessage(tc.ID, tc.Result))
 		}
 
 		// Accumulate usage
 		if tr.Usage != nil {
-			m.sessionUsage.InputOther += tr.Usage.InputOther
-			m.sessionUsage.Output += tr.Usage.Output
-			m.sessionUsage.InputCacheRead += tr.Usage.InputCacheRead
-			m.sessionUsage.InputCacheCreation += tr.Usage.InputCacheCreation
+			su := m.svc.SessionUsage()
+			su.InputOther += tr.Usage.InputOther
+			su.Output += tr.Usage.Output
+			su.InputCacheRead += tr.Usage.InputCacheRead
+			su.InputCacheCreation += tr.Usage.InputCacheCreation
+			m.svc.SetSessionUsage(su)
 		}
 	}
 
 	// Apply cache token correction (cache tokens are included in InputOther
 	// from the API but tracked separately; subtract to avoid double-counting).
-	m.sessionUsage.InputOther -= m.sessionUsage.InputCacheRead
-	m.sessionUsage.InputOther -= m.sessionUsage.InputCacheCreation
-	if m.sessionUsage.InputOther < 0 {
-		m.sessionUsage.InputOther = 0
+	su := m.svc.SessionUsage()
+	su.InputOther -= su.InputCacheRead
+	su.InputOther -= su.InputCacheCreation
+	if su.InputOther < 0 {
+		su.InputOther = 0
 	}
+	m.svc.SetSessionUsage(su)
 
 	// Seed context manager with accumulated usage
-	totalTokens := m.sessionUsage.InputTotal() + m.sessionUsage.Output
+	su = m.svc.SessionUsage()
+	totalTokens := su.InputTotal() + su.Output
 	if totalTokens > 0 {
-		m.contextMgr.Reset()
-		m.contextMgr.AddTurnUsage(totalTokens)
+		m.svc.ContextMgr().Reset()
+		m.svc.ContextMgr().AddTurnUsage(totalTokens)
 	}
 
 	m.rebuildCollapsibles()
@@ -593,7 +570,7 @@ func (m *tuiModel) replayHistory() {
 		return
 	}
 	ctx := context.Background()
-	if err := m.app.SessionStore.History().Load(ctx, m.sessionID); err != nil {
+	if err := m.app.SessionStore.History().Load(ctx, m.svc.ID()); err != nil {
 		return
 	}
 	msgs := m.app.SessionStore.History().Messages()
@@ -601,9 +578,9 @@ func (m *tuiModel) replayHistory() {
 		switch msg.Role {
 		case "user":
 			m.messages = append(m.messages, chatMessage{role: "user", content: msg.Content})
-			m.turnCount++
+			m.svc.IncrementTurn()
 			// Add user message to conversation history
-			m.history = append(m.history, kosong.CreateUserMessage(msg.Content))
+			m.svc.AppendMessages(kosong.CreateUserMessage(msg.Content))
 		case "assistant":
 			td := turnData{
 				thinking: msg.Thinking,
@@ -619,7 +596,7 @@ func (m *tuiModel) replayHistory() {
 					duration:  tc.Duration,
 				})
 			}
-			m.completedTurns = append(m.completedTurns, td)
+			m.svc.AppendTurn(td)
 			m.messages = append(m.messages, chatMessage{role: "assistant", content: msg.Content})
 			// Add assistant response to conversation history
 			assistantMsg := kosong.Message{
@@ -636,11 +613,11 @@ func (m *tuiModel) replayHistory() {
 					})
 				}
 			}
-			m.history = append(m.history, assistantMsg)
+			m.svc.AppendMessages(assistantMsg)
 			// Add tool result messages so the LLM has complete
 			// tool call / result pairs when resuming a session.
 			for _, tc := range msg.ToolCalls {
-				m.history = append(m.history, kosong.CreateToolMessage(tc.ID, tc.Result))
+				m.svc.AppendMessages(kosong.CreateToolMessage(tc.ID, tc.Result))
 			}
 		}
 	}
@@ -648,42 +625,44 @@ func (m *tuiModel) replayHistory() {
 	// Use the real API token counts (persisted as tokens_in/tokens_out)
 	// for the context manager instead of text-based estimates, which
 	// drastically undercount the actual context window usage.
-	if m.sess.Metadata != nil {
+	if m.svc.Session().Metadata != nil {
 		var tokensIn, tokensOut int
-		if v, ok := metaInt(m.sess.Metadata, "tokens_in"); ok {
+		su := m.svc.SessionUsage()
+		if v, ok := metaInt(m.svc.Session().Metadata, "tokens_in"); ok {
 			tokensIn = v
-			m.sessionUsage.InputOther = v
+			su.InputOther = v
 		}
-		if v, ok := metaInt(m.sess.Metadata, "tokens_out"); ok {
+		if v, ok := metaInt(m.svc.Session().Metadata, "tokens_out"); ok {
 			tokensOut = v
-			m.sessionUsage.Output = v
+			su.Output = v
 		}
-		if v, ok := metaInt(m.sess.Metadata, "cache_read"); ok {
-			m.sessionUsage.InputCacheRead = v
+		if v, ok := metaInt(m.svc.Session().Metadata, "cache_read"); ok {
+			su.InputCacheRead = v
 			// Move cache tokens from InputOther to InputCacheRead
 			// so InputTotal() stays correct.
-			m.sessionUsage.InputOther -= v
+			su.InputOther -= v
 		}
-		if v, ok := metaInt(m.sess.Metadata, "cache_creation"); ok {
-			m.sessionUsage.InputCacheCreation = v
-			m.sessionUsage.InputOther -= v
+		if v, ok := metaInt(m.svc.Session().Metadata, "cache_creation"); ok {
+			su.InputCacheCreation = v
+			su.InputOther -= v
 		}
 		// Guard against negative InputOther from corrupted metadata.
-		if m.sessionUsage.InputOther < 0 {
-			m.sessionUsage.InputOther = 0
+		if su.InputOther < 0 {
+			su.InputOther = 0
 		}
+		m.svc.SetSessionUsage(su)
 		// Use persisted real token counts for context window display.
 		// tokens_in is the cumulative API input across all turns;
 		// this matches what the live session showed before exit.
 		if tokensIn > 0 {
-			m.contextMgr.Reset()
-			m.contextMgr.AddTurnUsage(tokensIn + tokensOut)
-		} else if len(m.completedTurns) > 0 {
+			m.svc.ContextMgr().Reset()
+			m.svc.ContextMgr().AddTurnUsage(tokensIn + tokensOut)
+		} else if len(m.svc.CompletedTurns()) > 0 {
 			// Fallback for sessions persisted before real token tracking:
 			// use text-based estimates so the context bar isn't empty.
-			m.contextMgr.Reset()
-			for _, td := range m.completedTurns {
-				m.contextMgr.AddTurnUsage(agentctx.TurnEstimate(td.text))
+			m.svc.ContextMgr().Reset()
+			for _, td := range m.svc.CompletedTurns() {
+				m.svc.ContextMgr().AddTurnUsage(agentctx.TurnEstimate(td.text))
 			}
 		}
 	}
@@ -904,7 +883,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 	ch := make(chan streamEvent, 64)
 	m.streamCh = ch
 	m.turnStartTime = time.Now()
-	m.lastPrompt = prompt // save for overflow retry
+	m.svc.SetLastPrompt(prompt) // save for overflow retry
 
 	go func() {
 		defer close(ch)
@@ -915,12 +894,12 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 		}
 
 		// Add user message to history
-		m.history = append(m.history, kosong.CreateUserMessage(prompt))
+		m.svc.AppendMessages(kosong.CreateUserMessage(prompt))
 
 		// Record audit: LLM request
-		if m.auditWriter != nil {
-			m.auditWriter.Record(audit.AuditEvent{
-				SessionID: m.sessionID,
+		if m.svc.AuditWriter() != nil {
+			m.svc.AuditWriter().Record(audit.AuditEvent{
+				SessionID: m.svc.ID(),
 				Type:      audit.EvtLLMRequest,
 				Data:      map[string]any{"prompt": prompt, "model": m.model},
 			})
@@ -948,11 +927,11 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 			}
 			// Build GenerateOptions with raw payload capture for audit
 			var genOpts *kosong.GenerateOptions
-			if m.auditWriter != nil {
+			if m.svc.AuditWriter() != nil {
 				genOpts = &kosong.GenerateOptions{
 					OnRawRequest: func(body []byte) {
-						m.auditWriter.Record(audit.AuditEvent{
-							SessionID: m.sessionID,
+						m.svc.AuditWriter().Record(audit.AuditEvent{
+							SessionID: m.svc.ID(),
 							Type:      audit.EvtLLMRawRequest,
 							Data:      map[string]any{"step": step, "body": string(body)},
 						})
@@ -963,15 +942,15 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 						if err != nil {
 							return
 						}
-						m.auditWriter.Record(audit.AuditEvent{
-							SessionID: m.sessionID,
+						m.svc.AuditWriter().Record(audit.AuditEvent{
+							SessionID: m.svc.ID(),
 							Type:      audit.EvtLLMRawResponse,
 							Data:      map[string]any{"step": step, "raw": string(data)},
 						})
 					},
 				}
 			}
-			stream, err := m.provider.Generate(ctx, systemPrompt, kosongTools, m.history, genOpts)
+			stream, err := m.provider.Generate(ctx, systemPrompt, kosongTools, m.svc.History(), genOpts)
 			if err != nil {
 				ch <- streamEvent{kind: "error", text: err.Error()}
 				return
@@ -991,9 +970,9 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 			batchFlush := func() {
 				if batchThink != "" {
 					ch <- streamEvent{kind: "think", text: batchThink}
-					if m.auditWriter != nil {
-						m.auditWriter.Record(audit.AuditEvent{
-							SessionID: m.sessionID,
+					if m.svc.AuditWriter() != nil {
+						m.svc.AuditWriter().Record(audit.AuditEvent{
+							SessionID: m.svc.ID(),
 							Type:      audit.EvtLLMDeltaThink,
 							Data:      map[string]any{"text": batchThink},
 						})
@@ -1002,9 +981,9 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 				}
 				if batchText != "" {
 					ch <- streamEvent{kind: "text", text: batchText}
-					if m.auditWriter != nil {
-						m.auditWriter.Record(audit.AuditEvent{
-							SessionID: m.sessionID,
+					if m.svc.AuditWriter() != nil {
+						m.svc.AuditWriter().Record(audit.AuditEvent{
+							SessionID: m.svc.ID(),
 							Type:      audit.EvtLLMDeltaText,
 							Data:      map[string]any{"text": batchText},
 						})
@@ -1097,13 +1076,13 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 			}
 
 			ch <- streamEvent{kind: "step_done", step: step}
-			if m.auditWriter != nil {
+			if m.svc.AuditWriter() != nil {
 				stepData := map[string]any{"step": step, "tool_calls": len(msg.ToolCalls)}
 				if stepFinishReason != nil {
 					stepData["finish_reason"] = *stepFinishReason
 				}
-				m.auditWriter.Record(audit.AuditEvent{
-					SessionID: m.sessionID,
+				m.svc.AuditWriter().Record(audit.AuditEvent{
+					SessionID: m.svc.ID(),
 					Type:      audit.EvtLLMStepDone,
 					Data:      stepData,
 				})
@@ -1111,12 +1090,12 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 
 			// If no tool calls, we're done
 			if len(msg.ToolCalls) == 0 {
-				m.history = append(m.history, *msg)
+				m.svc.AppendMessages(*msg)
 				ch <- streamEvent{kind: "done"}
 				return
 			}
 
-			m.history = append(m.history, *msg)
+			m.svc.AppendMessages(*msg)
 
 			// Execute each tool call
 			for _, tc := range msg.ToolCalls {
@@ -1125,9 +1104,9 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 					argsStr = *tc.Arguments
 				}
 				ch <- streamEvent{kind: "tool_start", toolName: tc.Name, toolArgs: argsStr}
-				if m.auditWriter != nil {
-					m.auditWriter.Record(audit.AuditEvent{
-						SessionID: m.sessionID,
+				if m.svc.AuditWriter() != nil {
+					m.svc.AuditWriter().Record(audit.AuditEvent{
+						SessionID: m.svc.ID(),
 						Type:      audit.EvtLLMToolCall,
 						Data:      map[string]any{"id": tc.ID, "name": tc.Name, "arguments": argsStr},
 					})
@@ -1136,7 +1115,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 				tool, ok := m.toolRegistry.Get(tc.Name)
 				if !ok {
 					ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: fmt.Sprintf("tool %q not found", tc.Name), toolErr: true}
-					m.history = append(m.history, kosong.CreateToolMessage(tc.ID, fmt.Sprintf("tool %q not found", tc.Name)))
+					m.svc.AppendMessages(kosong.CreateToolMessage(tc.ID, fmt.Sprintf("tool %q not found", tc.Name)))
 					continue
 				}
 
@@ -1152,7 +1131,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 				if permResult.Decision == permission.DecisionDeny {
 					denyMsg := fmt.Sprintf("[Denied] %s", permResult.Reason)
 					ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: denyMsg, toolErr: true}
-					m.history = append(m.history, kosong.CreateToolMessage(tc.ID, fmt.Sprintf("Permission denied: %s", permResult.Reason)))
+					m.svc.AppendMessages(kosong.CreateToolMessage(tc.ID, fmt.Sprintf("Permission denied: %s", permResult.Reason)))
 					continue
 				}
 
@@ -1164,9 +1143,9 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 				}
 
 				ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: truncateOutput(result.Output), toolErr: result.IsError, toolDur: toolDur}
-				if m.auditWriter != nil {
-					m.auditWriter.Record(audit.AuditEvent{
-						SessionID: m.sessionID,
+				if m.svc.AuditWriter() != nil {
+					m.svc.AuditWriter().Record(audit.AuditEvent{
+						SessionID: m.svc.ID(),
 						Type:      audit.EvtLLMToolResult,
 						Data: map[string]any{
 							"name":     tc.Name,
@@ -1176,7 +1155,7 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 						},
 					})
 				}
-				m.history = append(m.history, kosong.CreateToolMessage(tc.ID, result.Output))
+				m.svc.AppendMessages(kosong.CreateToolMessage(tc.ID, result.Output))
 			}
 
 			// Check for steering messages between steps.
@@ -1190,16 +1169,16 @@ func (m *tuiModel) runLLMStream(prompt string) tea.Cmd {
 						ch <- streamEvent{kind: "tool_result", toolName: "Steering", toolOut: result}
 						// Inject as user message to satisfy LLM provider API contracts
 						// (tool messages must correspond to assistant-initiated tool calls)
-						m.history = append(m.history, kosong.CreateUserMessage("[Steering] "+result))
+						m.svc.AppendMessages(kosong.CreateUserMessage("[Steering] " + result))
 					}
 				}
 			}
 		}
 
 		ch <- streamEvent{kind: "done"}
-		if m.auditWriter != nil {
-			m.auditWriter.Record(audit.AuditEvent{
-				SessionID: m.sessionID,
+		if m.svc.AuditWriter() != nil {
+			m.svc.AuditWriter().Record(audit.AuditEvent{
+				SessionID: m.svc.ID(),
 				Type:      audit.EvtLLMDone,
 			})
 		}
@@ -1348,15 +1327,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Auto-sync plan tracker: update task status based on tool result
-			if m.planTracker != nil {
+			if m.svc.PlanTracker() != nil {
 				keyword := msg.toolName
 				// Use tool name as keyword for matching task titles
 				if msg.toolErr {
-					m.planTracker.UpdateTaskByKeyword(keyword, plan.StatusFailed)
+					m.svc.PlanTracker().UpdateTaskByKeyword(keyword, plan.StatusFailed)
 				} else {
 					// Only auto-mark done if task is currently active (not already done/pending)
 					// This prevents overwriting explicit LLM updates
-					m.planTracker.UpdateTaskByKeyword(keyword, plan.StatusDone)
+					m.svc.PlanTracker().UpdateTaskByKeyword(keyword, plan.StatusDone)
 				}
 			}
 			return m, listenStream(m.streamCh)
@@ -1366,35 +1345,35 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "error":
 			m.streaming = false
 			// Record audit: LLM error
-			if m.auditWriter != nil {
-				m.auditWriter.Record(audit.AuditEvent{
-					SessionID: m.sessionID,
+			if m.svc.AuditWriter() != nil {
+				m.svc.AuditWriter().Record(audit.AuditEvent{
+					SessionID: m.svc.ID(),
 					Type:      audit.EvtLLMError,
 					Data:      map[string]any{"error": msg.text},
 				})
 			}
 			// Overflow error recovery: compact and retry if possible
-			if isContextOverflow(msg.text) && m.compactStrategy != nil &&
-				m.overflowRetries < m.compactStrategy.MaxOverflowAttempts() &&
-				m.compactStrategy.CanCompact() && m.lastPrompt != "" {
-				m.overflowRetries++
+			if isContextOverflow(msg.text) && m.svc.CompactStrategy() != nil &&
+				m.svc.OverflowRetries() < m.svc.CompactStrategy().MaxOverflowAttempts() &&
+				m.svc.CompactStrategy().CanCompact() && m.svc.LastPrompt() != "" {
+				m.svc.IncrementOverflow()
 				if m.performCompaction(true) {
 					m.messages = append(m.messages, chatMessage{"system",
 						fmt.Sprintf("Context overflow detected, compacted (attempt %d/%d). Retrying...",
-							m.overflowRetries, m.compactStrategy.MaxOverflowAttempts())})
+							m.svc.OverflowRetries(), m.svc.CompactStrategy().MaxOverflowAttempts())})
 					m.streaming = true
 					m.streamToolGroups = nil
 					m.streamStep = 0
 					m.turnStartTime = time.Now()
 					m.cancelCh = make(chan struct{})
 					m.rebuildCollapsibles()
-					return m, tea.Batch(m.runLLMStream(m.lastPrompt), m.tickWorking())
+					return m, tea.Batch(m.runLLMStream(m.svc.LastPrompt()), m.tickWorking())
 				} // else: compaction failed, fall through to normal error handling
 			}
 			// /btw: reset side-query state so next prompt isn't affected
-			if m.btwMode {
-				m.history = m.history[:m.btwHistoryLen]
-				m.btwMode = false
+			if m.svc.BtwMode() {
+				m.svc.TruncateHistory(m.svc.BtwHistoryLen())
+				m.svc.SetBtwMode(false)
 			}
 			// Remove the "Thinking..." placeholder
 			if len(m.messages) > 0 && m.messages[len(m.messages)-1].role == "system" && m.messages[len(m.messages)-1].content == "Thinking..." {
@@ -1404,11 +1383,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "usage":
 			if msg.usage != nil {
-				m.turnUsage = kosong.AddUsage(m.turnUsage, *msg.usage)
+				m.svc.AddTurnUsage(*msg.usage)
 				// Update pending estimate for live context bar display
-				m.contextMgr.SetPendingEstimate(m.turnUsage.InputTotal() + m.turnUsage.Output)
+				tu := m.svc.TurnUsage()
+				m.svc.ContextMgr().SetPendingEstimate(tu.InputTotal() + tu.Output)
 				// Record audit: usage event
-				if m.auditWriter != nil {
+				if m.svc.AuditWriter() != nil {
 					usageData := map[string]any{
 						"input":          msg.usage.InputTotal(),
 						"output":         msg.usage.Output,
@@ -1418,8 +1398,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if msg.usage.ReasoningTokens > 0 {
 						usageData["reasoning_tokens"] = msg.usage.ReasoningTokens
 					}
-					m.auditWriter.Record(audit.AuditEvent{
-						SessionID: m.sessionID,
+					m.svc.AuditWriter().Record(audit.AuditEvent{
+						SessionID: m.svc.ID(),
 						Type:      audit.EvtLLMUsage,
 						Data:      usageData,
 					})
@@ -1427,7 +1407,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, listenStream(m.streamCh)
 		case "finish":
-			m.lastFinishReason = msg.finishReason
+			m.svc.SetFinishReason(msg.finishReason)
 			return m, listenStream(m.streamCh)
 		case "done":
 			m.streaming = false
@@ -1443,18 +1423,19 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text:       m.streamResponse,
 				toolGroups: m.streamToolGroups,
 			}
-			m.completedTurns = append(m.completedTurns, td)
+			m.svc.AppendTurn(td)
 
 			// Append assistant response to messages so it stays visible after streaming
 			if m.streamResponse == "" && m.streamThinking != "" {
 				// Model produced thinking but no visible response.
 				// Build a diagnostic message including the finish reason if available.
 				diag := "⚠ The model produced extended reasoning but no visible response."
-				if m.lastFinishReason != nil {
-					diag += fmt.Sprintf(" (finish_reason: %s)", *m.lastFinishReason)
+				if m.svc.LastFinishReason() != nil {
+					diag += fmt.Sprintf(" (finish_reason: %s)", *m.svc.LastFinishReason())
 				}
-				if m.turnUsage.ReasoningTokens > 0 {
-					diag += fmt.Sprintf(" [reasoning tokens: %d/%d output]", m.turnUsage.ReasoningTokens, m.turnUsage.Output)
+				tu := m.svc.TurnUsage()
+				if tu.ReasoningTokens > 0 {
+					diag += fmt.Sprintf(" [reasoning tokens: %d/%d output]", tu.ReasoningTokens, tu.Output)
 				}
 				diag += " The thinking budget may have been exhausted. Try rephrasing or reducing thinking effort."
 				m.messages = append(m.messages, chatMessage{"assistant", diag})
@@ -1462,8 +1443,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Completely empty response — likely preceded by an error, but
 				// provide a diagnostic just in case.
 				diag := "⚠ The model produced no response."
-				if m.lastFinishReason != nil {
-					diag += fmt.Sprintf(" (finish_reason: %s)", *m.lastFinishReason)
+				if m.svc.LastFinishReason() != nil {
+					diag += fmt.Sprintf(" (finish_reason: %s)", *m.svc.LastFinishReason())
 				}
 				m.messages = append(m.messages, chatMessage{"assistant", diag})
 			} else {
@@ -1471,24 +1452,24 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			// Track token usage: prefer real API usage, fall back to estimation
-			savedTurnUsage := m.turnUsage
+			savedTurnUsage := m.svc.TurnUsage()
 			if savedTurnUsage.GrandTotal() > 0 {
-				m.contextMgr.AddTurnUsage(savedTurnUsage.InputTotal() + savedTurnUsage.Output)
-				m.sessionUsage = kosong.AddUsage(m.sessionUsage, savedTurnUsage)
+				m.svc.ContextMgr().AddTurnUsage(savedTurnUsage.InputTotal() + savedTurnUsage.Output)
+				m.svc.AddSessionUsage(savedTurnUsage)
 			} else {
 				turnTokens := agentctx.TokenEstimate(m.streamResponse) + agentctx.TokenEstimate(m.streamThinking)
-				m.contextMgr.AddTurnUsage(turnTokens)
+				m.svc.ContextMgr().AddTurnUsage(turnTokens)
 			}
-			m.turnUsage = kosong.TokenUsage{} // reset for next turn
-			m.overflowRetries = 0             // reset overflow retries for next turn
+			m.svc.ResetTurnUsage()   // reset for next turn
+			m.svc.ResetOverflow()     // reset overflow retries for next turn
 
 			// Auto-compaction check: trigger if context is nearly full
-			if m.contextMgr.NeedsCompaction() && m.compactStrategy.ShouldCompact(m.contextMgr.CurrentUsage()) {
+			if m.svc.ContextMgr().NeedsCompaction() && m.svc.CompactStrategy().ShouldCompact(m.svc.ContextMgr().CurrentUsage()) {
 				m.performCompaction(true)
 			}
 
 			// Cycle 1: Persist session history (skip for /btw side queries)
-			if !m.btwMode && m.app.SessionStore != nil {
+			if !m.svc.BtwMode() && m.app.SessionStore != nil {
 				var toolCalls []session.ToolCall
 				for _, tg := range m.streamToolGroups {
 					toolCalls = append(toolCalls, session.ToolCall{
@@ -1509,28 +1490,30 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						break
 					}
 				}
-				_ = m.app.SessionStore.History().AddTurn(context.Background(), m.sessionID,
+				_ = m.app.SessionStore.History().AddTurn(context.Background(), m.svc.ID(),
 					lastUserContent,
 					m.streamResponse, m.streamThinking, toolCalls)
-				m.sess.SetStatus(session.StatusIdle)
+				m.svc.Session().SetStatus(session.StatusIdle)
 				// Persist session summary metadata for /sessions listing
-				if m.sess.Metadata == nil {
-					m.sess.Metadata = make(map[string]any)
+				sess := m.svc.Session()
+				su := m.svc.SessionUsage()
+				if sess.Metadata == nil {
+					sess.Metadata = make(map[string]any)
 				}
-				m.sess.Metadata["turns"] = m.turnCount
-				m.sess.Metadata["tokens_in"] = m.sessionUsage.InputTotal()
-				m.sess.Metadata["tokens_out"] = m.sessionUsage.Output
-				if m.sessionUsage.InputCacheRead > 0 {
-					m.sess.Metadata["cache_read"] = m.sessionUsage.InputCacheRead
+				sess.Metadata["turns"] = m.svc.TurnCount()
+				sess.Metadata["tokens_in"] = su.InputTotal()
+				sess.Metadata["tokens_out"] = su.Output
+				if su.InputCacheRead > 0 {
+					sess.Metadata["cache_read"] = su.InputCacheRead
 				}
-				if m.sessionUsage.InputCacheCreation > 0 {
-					m.sess.Metadata["cache_creation"] = m.sessionUsage.InputCacheCreation
+				if su.InputCacheCreation > 0 {
+					sess.Metadata["cache_creation"] = su.InputCacheCreation
 				}
-				_ = m.app.SessionStore.Save(context.Background(), m.sess)
+				_ = m.app.SessionStore.Save(context.Background(), sess)
 			}
 
 			// Record audit: turn completed
-			if m.auditWriter != nil {
+			if m.svc.AuditWriter() != nil {
 				var lastUserContent string
 				for i := len(m.messages) - 1; i >= 0; i-- {
 					if m.messages[i].role == "user" {
@@ -1559,11 +1542,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				var finishReason string
-				if m.lastFinishReason != nil {
-					finishReason = *m.lastFinishReason
+				if m.svc.LastFinishReason() != nil {
+					finishReason = *m.svc.LastFinishReason()
 				}
-				m.auditWriter.Record(audit.AuditEvent{
-					SessionID: m.sessionID,
+				sess := m.svc.Session()
+				m.svc.AuditWriter().Record(audit.AuditEvent{
+					SessionID: m.svc.ID(),
 					Type:      audit.EvtTurnCompleted,
 					Data: audit.TurnRecord{
 						Prompt:       lastUserContent,
@@ -1575,13 +1559,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					},
 				})
 				// Also persist session metadata to audit store
-				if err := m.auditWriter.SaveSession(audit.SessionRecord{
-					ID:        m.sessionID,
-					Title:     m.sess.Title,
-					Status:    string(m.sess.Status),
-					CreatedAt: m.sess.CreatedAt,
+				if err := m.svc.AuditWriter().SaveSession(audit.SessionRecord{
+					ID:        m.svc.ID(),
+					Title:     sess.Title,
+					Status:    string(sess.Status),
+					CreatedAt: sess.CreatedAt,
 					UpdatedAt: time.Now(),
-					Metadata:  m.sess.Metadata,
+					Metadata:  sess.Metadata,
 				}); err != nil {
 					slog.Debug("audit save session", "error", err)
 				}
@@ -1595,15 +1579,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamStep = 0
 			m.streamCh = nil
 			m.cancelCh = nil
-			m.lastFinishReason = nil // reset for next turn
+			m.svc.SetFinishReason(nil) // reset for next turn
 			m.scrollOffset = 0       // auto-scroll to bottom on new content
 			m.rebuildCollapsibles()
 
 			// /btw mode: discard all messages added to history during streaming
 			// so the side query doesn't affect the main conversation context.
-			if m.btwMode {
-				m.history = m.history[:m.btwHistoryLen]
-				m.btwMode = false
+			if m.svc.BtwMode() {
+				m.svc.TruncateHistory(m.svc.BtwHistoryLen())
+				m.svc.SetBtwMode(false)
 			}
 
 			// Drain queued steering messages for auto-pickup (single atomic drain)
@@ -1616,7 +1600,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					nextPrompt := strings.Join(parts, "\n")
 					m.messages = append(m.messages, chatMessage{"user", nextPrompt})
-					m.turnCount++
+					m.svc.IncrementTurn()
 					m.streaming = true
 					m.streamThinking = ""
 					m.streamResponse = ""
@@ -1963,8 +1947,8 @@ func (m tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 						fmt.Sprintf("🗑️ %d queued steering message(s) discarded", len(discarded))})
 				}
 			}
-			if m.auditWriter != nil {
-				m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserCancel})
+			if m.svc.AuditWriter() != nil {
+				m.svc.AuditWriter().Record(audit.AuditEvent{SessionID: m.svc.ID(), Type: audit.EvtUserCancel})
 			}
 			return m, nil
 		}
@@ -2041,8 +2025,8 @@ func (m *tuiModel) clampCursor() {
 func (m *tuiModel) resetDrawerState() {
 	m.drawerToolLog = nil
 	m.drawerSkills = nil
-	if m.planTracker != nil {
-		m.planTracker.Clear()
+	if m.svc.PlanTracker() != nil {
+		m.svc.PlanTracker().Clear()
 	}
 }
 
@@ -2063,7 +2047,7 @@ func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction
 		m.messages = append(m.messages, chatMessage{"system", "Cannot compact while streaming is active."})
 		return false
 	}
-	if len(m.completedTurns) <= 2 {
+	if len(m.svc.CompletedTurns()) <= 2 {
 		m.messages = append(m.messages, chatMessage{"system", "Not enough turns to compact (need > 2)."})
 		return false
 	}
@@ -2095,8 +2079,8 @@ func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction
 			m.messages = append(m.messages, chatMessage{"system",
 				fmt.Sprintf("%sCompacted %d turns into LLM summary (%d → %d tokens).\nKept %d recent turns.",
 					prefix, result.RemovedTurns, result.OriginalTokens, result.CompactTokens, result.KeptTurns)})
-			if m.compactStrategy != nil {
-				m.compactStrategy.RecordCompaction(result.CompactTokens)
+			if m.svc.CompactStrategy() != nil {
+				m.svc.CompactStrategy().RecordCompaction(result.CompactTokens)
 			}
 			return true
 		}
@@ -2153,8 +2137,8 @@ func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction
 	m.messages = append(m.messages, chatMessage{"system",
 		fmt.Sprintf("%sCompacted %d turns into summary (%d → %d tokens).\nKept %d recent turns.\n\n%s",
 			prefix, result.RemovedTurns, result.OriginalTokens, result.CompactTokens, result.KeptTurns, result.Summary)})
-	if m.compactStrategy != nil {
-		m.compactStrategy.RecordCompaction(m.contextMgr.CurrentUsage())
+	if m.svc.CompactStrategy() != nil {
+		m.svc.CompactStrategy().RecordCompaction(m.svc.ContextMgr().CurrentUsage())
 	}
 	return true
 }
@@ -2204,17 +2188,17 @@ func (m *tuiModel) rewriteContext(compactedMsgs []agentctx.CompactMessage) {
 	}
 
 	// Reset context manager and re-record usage from compacted messages
-	m.contextMgr.Reset()
+	m.svc.ContextMgr().Reset()
 	compactTokens := 0
 	for _, msg := range compactedMsgs {
 		compactTokens += agentctx.TokenEstimate(msg.Content) + agentctx.TokenEstimate(msg.Role)
 	}
 	if compactTokens > 0 {
-		m.contextMgr.AddTurnUsage(compactTokens)
+		m.svc.ContextMgr().AddTurnUsage(compactTokens)
 	}
 
 	// Clear completed turns (they've been compacted)
-	m.completedTurns = nil
+	m.svc.ClearTurns()
 	m.rebuildCollapsibles()
 }
 
@@ -2364,8 +2348,9 @@ func (m *tuiModel) rebuildCollapsibles() {
 	m.collapsibles = nil
 
 	// Completed turns
-	for ti := range m.completedTurns {
-		td := &m.completedTurns[ti]
+	completedTurns := m.svc.CompletedTurns()
+	for ti := range completedTurns {
+		td := &completedTurns[ti]
 		if td.thinking != "" {
 			key := fmt.Sprintf("%d:thinking", ti)
 			expanded := oldExpanded[key] // default false
@@ -2380,7 +2365,7 @@ func (m *tuiModel) rebuildCollapsibles() {
 
 	// Active streaming turn (turnIndex = len(completedTurns))
 	if m.streaming || m.streamThinking != "" || m.streamResponse != "" || len(m.streamToolGroups) > 0 {
-		ti := len(m.completedTurns)
+		ti := len(completedTurns)
 		if m.streamThinking != "" {
 			key := fmt.Sprintf("%d:thinking", ti)
 			expanded := true // default expanded during streaming
@@ -2436,7 +2421,8 @@ func (m *tuiModel) toggleFocusedCollapse() {
 	c.expanded = !c.expanded
 
 	ti := c.turnIndex
-	isStreaming := ti >= len(m.completedTurns)
+	completedTurns := m.svc.CompletedTurns()
+	isStreaming := ti >= len(completedTurns)
 
 	switch c.kind {
 	case "tools":
@@ -2445,10 +2431,11 @@ func (m *tuiModel) toggleFocusedCollapse() {
 			for i := range m.streamToolGroups {
 				m.streamToolGroups[i].collapsed = !c.expanded
 			}
-		} else if ti < len(m.completedTurns) {
-			for i := range m.completedTurns[ti].toolGroups {
-				m.completedTurns[ti].toolGroups[i].collapsed = !c.expanded
+		} else if ti < len(completedTurns) {
+			for i := range completedTurns[ti].toolGroups {
+				completedTurns[ti].toolGroups[i].collapsed = !c.expanded
 			}
+			m.svc.RewriteTurns(completedTurns)
 		}
 	}
 }
@@ -2840,7 +2827,7 @@ func (m tuiModel) executeSkill(s *skill.Skill, skillArgs, displayInput string) (
 	if skillArgs != "" {
 		prompt = s.Body + "\n\n---\n\n" + skillArgs
 	}
-	m.turnCount++
+	m.svc.IncrementTurn()
 	m.cancelCh = make(chan struct{})
 	m.streaming = true
 	m.streamThinking = ""
@@ -2882,8 +2869,8 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 	// Audit: record slash command
 	if strings.HasPrefix(input, "/") {
-		if m.auditWriter != nil {
-			m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserCommand, Data: map[string]any{"command": input}})
+		if m.svc.AuditWriter() != nil {
+			m.svc.AuditWriter().Record(audit.AuditEvent{SessionID: m.svc.ID(), Type: audit.EvtUserCommand, Data: map[string]any{"command": input}})
 		}
 	}
 
@@ -2905,25 +2892,16 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		newSess, err := m.app.SessionManager.Create(nil, fmt.Sprintf("session_%d", os.Getpid()), "Interactive Session")
 		if err == nil {
 			// Audit: record session switch and switch BadgerDB
-			if m.auditWriter != nil {
-				m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserSessionSwitch, Data: map[string]any{"from": m.sessionID, "to": newSess.ID, "reason": "/new"}})
+			if m.svc.AuditWriter() != nil {
+				m.svc.AuditWriter().Record(audit.AuditEvent{SessionID: m.svc.ID(), Type: audit.EvtUserSessionSwitch, Data: map[string]any{"from": m.svc.ID(), "to": newSess.ID, "reason": "/new"}})
 			}
 			home, _ := os.UserHomeDir()
 			if home != "" {
 				m.app.switchAuditStore(newSess.ID, home)
-				m.auditWriter = m.app.AuditWriter
 			}
-			m.sess = newSess
-			m.sessionID = newSess.ID
+			m.svc.SetSession(newSess)
+			m.svc.Reset()
 			m.messages = nil
-			m.completedTurns = nil
-			m.turnCount = 0
-			m.history = nil
-			m.contextMgr.Reset()
-			if m.compactStrategy != nil {
-				m.compactStrategy.ResetForTurn()
-			}
-			m.goalTracker.CancelGoal("user")
 			m.activeSkill = nil
 			m.resetDrawerState()
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("New session created: %s", newSess.ID)})
@@ -2946,11 +2924,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 	case input == "/init":
 		m.messages = nil
-		m.completedTurns = nil
-		m.history = nil
-		m.turnCount = 0
-		m.contextMgr.Reset()
-		m.goalTracker.CancelGoal("user")
+		m.svc.Reset()
 		m.activeSkill = nil
 		m.resetDrawerState()
 		m.rebuildCollapsibles()
@@ -3033,12 +3007,11 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	case input == "/fork":
 		m.messages = append(m.messages, chatMessage{"user", input})
 		if m.app.SessionStore != nil {
-			forked, err := m.app.SessionStore.Fork(context.Background(), m.sessionID, "", m.app.SessionManager)
+			forked, err := m.app.SessionStore.Fork(context.Background(), m.svc.ID(), "", m.app.SessionManager)
 			if err != nil {
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Fork failed: %s", err)})
 			} else {
-				m.sess = forked
-				m.sessionID = forked.ID
+				m.svc.SetSession(forked)
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Forked session: %s", forked.ID)})
 			}
 		} else {
@@ -3052,13 +3025,13 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	case strings.HasPrefix(input, "/title"):
 		args := strings.TrimSpace(strings.TrimPrefix(input, "/title"))
 		if args == "" {
-			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Current title: %s", m.sess.Title)})
+			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Current title: %s", m.svc.Session().Title)})
 		} else {
-			m.sess.SetTitle(args)
+			m.svc.Session().SetTitle(args)
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Title set to: %s", args)})
 			// Persist
 			if m.app.SessionStore != nil {
-				_ = m.app.SessionStore.Save(context.Background(), m.sess)
+				_ = m.app.SessionStore.Save(context.Background(), m.svc.Session())
 			}
 		}
 		m.input = ""
@@ -3075,25 +3048,26 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.app.SessionStore != nil {
-			if err := m.app.SessionStore.History().RemoveLastTurns(context.Background(), m.sessionID, n); err != nil {
+			if err := m.app.SessionStore.History().RemoveLastTurns(context.Background(), m.svc.ID(), n); err != nil {
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Undo failed: %s", err)})
 			} else {
 				// Rebuild display
 				m.messages = nil
-				m.completedTurns = nil
-				m.history = nil
-				m.contextMgr.Reset()
+				m.svc.ClearTurns()
+				m.svc.ClearHistory()
+				m.svc.ContextMgr().Reset()
 				m.replayHistory()
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed last %d turn(s).", n)})
 			}
 		} else {
 			// In-memory undo
-			if n >= len(m.completedTurns) {
-				m.completedTurns = nil
+			turns := m.svc.CompletedTurns()
+			if n >= len(turns) {
+				m.svc.ClearTurns()
 			} else {
-				m.completedTurns = m.completedTurns[:len(m.completedTurns)-n]
+				m.svc.RewriteTurns(turns[:len(turns)-n])
 			}
-			m.contextMgr.RemoveLastNTurns(n)
+			m.svc.ContextMgr().RemoveLastNTurns(n)
 			m.rebuildCollapsibles()
 			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed last %d turn(s) from display.", n)})
 		}
@@ -3105,7 +3079,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	case input == "/export-md":
 		m.messages = append(m.messages, chatMessage{"user", input})
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("# %s\n\n", m.sess.Title))
+		sb.WriteString(fmt.Sprintf("# %s\n\n", m.svc.Session().Title))
 		for _, msg := range m.messages {
 			switch msg.role {
 			case "user":
@@ -3163,9 +3137,9 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			status = "configured"
 		}
 		info := fmt.Sprintf("Session:   %s\nModel:     %s\nProvider:  %s (%s)\nTurns:     %d\nContext:   %s\nYOLO:      %v\nPlan:      %v",
-			m.sessionID, m.model, provName, status, m.turnCount, m.contextMgr.UsageDisplay(), m.yoloMode, m.planMode)
-		if m.goalTracker.IsActive() {
-			if snap := m.goalTracker.Current(); snap != nil {
+			m.svc.ID(), m.model, provName, status, m.svc.TurnCount(), m.svc.ContextMgr().UsageDisplay(), m.yoloMode, m.planMode)
+		if m.svc.GoalTracker().IsActive() {
+			if snap := m.svc.GoalTracker().Current(); snap != nil {
 				info += "\nGoal:      " + snap.Objective
 			}
 		}
@@ -3177,7 +3151,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 	case input == "/usage":
 		m.messages = append(m.messages, chatMessage{"user", input})
-		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Context usage: %s\nTurns: %d", m.contextMgr.UsageDisplay(), m.turnCount)})
+		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Context usage: %s\nTurns: %d", m.svc.ContextMgr().UsageDisplay(), m.svc.TurnCount())})
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false
@@ -3338,13 +3312,13 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		text, clear := goal.ParseGoalCommand(args)
 		m.messages = append(m.messages, chatMessage{"user", input})
 		if clear {
-			if _, _, err := m.goalTracker.CancelGoal("user"); err != nil {
+			if _, _, err := m.svc.GoalTracker().CancelGoal("user"); err != nil {
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error clearing goal: %s", err)})
 			} else {
 				m.messages = append(m.messages, chatMessage{"system", "Goal cleared."})
 			}
 		} else {
-			if _, _, err := m.goalTracker.CreateGoal(text, "", goal.BudgetLimits{}, "user"); err != nil {
+			if _, _, err := m.svc.GoalTracker().CreateGoal(text, "", goal.BudgetLimits{}, "user"); err != nil {
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error setting goal: %s", err)})
 			} else {
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal set: %s", text)})
@@ -3373,8 +3347,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			// Route to LLM without adding to history — save current
 			// history length so we can truncate after streaming completes.
 			if m.provider != nil {
-				m.btwMode = true
-				m.btwHistoryLen = len(m.history)
+				m.svc.SetBtwMode(true)
 				m.streaming = true
 				m.streamThinking = ""
 				m.streamResponse = ""
@@ -3530,8 +3503,8 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		// Regular prompt — route through LLM provider
 		m.activeSkill = nil // clear active skill on regular user input
 		// Reset per-turn compaction counter for the new turn
-		if m.compactStrategy != nil {
-			m.compactStrategy.ResetForTurn()
+		if m.svc.CompactStrategy() != nil {
+			m.svc.CompactStrategy().ResetForTurn()
 		}
 		// Save to input history
 		if m.inputHistory != nil {
@@ -3539,20 +3512,21 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 			_ = m.inputHistory.Save()
 		}
 		m.messages = append(m.messages, chatMessage{"user", input})
-		m.turnCount++
+		m.svc.IncrementTurn()
 		// Auto-title session from first user prompt
-		if m.sess.Title == "Interactive Session" {
+		if m.svc.Session().Title == "Interactive Session" {
 			title := input
 			runes := []rune(title)
 			if len(runes) > 50 {
 				title = string(runes[:47]) + "..."
 			}
-			m.sess.SetTitle(title)
+			m.svc.Session().SetTitle(title)
 			// Persist first prompt for session list display
-			if m.sess.Metadata == nil {
-				m.sess.Metadata = make(map[string]any)
+			sess := m.svc.Session()
+			if sess.Metadata == nil {
+				sess.Metadata = make(map[string]any)
 			}
-			m.sess.Metadata["first_prompt"] = title
+			sess.Metadata["first_prompt"] = title
 		}
 		m.input = ""
 		m.cursor = 0
@@ -3562,8 +3536,8 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.cancelCh = make(chan struct{})
 
 		// Audit: record user input
-		if m.auditWriter != nil {
-			m.auditWriter.Record(audit.AuditEvent{SessionID: m.sessionID, Type: audit.EvtUserInput, Data: map[string]any{"prompt": input, "model": m.model}})
+		if m.svc.AuditWriter() != nil {
+			m.svc.AuditWriter().Record(audit.AuditEvent{SessionID: m.svc.ID(), Type: audit.EvtUserInput, Data: map[string]any{"prompt": input, "model": m.model}})
 		}
 
 		if m.provider != nil {
@@ -3834,7 +3808,7 @@ func (m tuiModel) renderWelcome() string {
 
 	infoLines := []string{
 		labelStyle.Render("Directory: ") + textStyle.Render(m.cwd),
-		labelStyle.Render("Session:   ") + textStyle.Render(m.sessionID),
+		labelStyle.Render("Session:   ") + textStyle.Render(m.svc.ID()),
 		labelStyle.Render("Model:     ") + textStyle.Render(modelLine),
 		labelStyle.Render("Version:   ") + textStyle.Render(m.version),
 	}
@@ -3871,8 +3845,9 @@ func (m tuiModel) renderMessages() string {
 		case "assistant":
 			// Find the corresponding completed turn
 			var td *turnData
-			if turnIdx < len(m.completedTurns) {
-				td = &m.completedTurns[turnIdx]
+			completedTurns := m.svc.CompletedTurns()
+			if turnIdx < len(completedTurns) {
+				td = &completedTurns[turnIdx]
 			}
 			turnIdx++
 			if td != nil {
@@ -4054,7 +4029,7 @@ func (m tuiModel) renderInput() string {
 // renderStreaming renders the active streaming content: thinking, tools, and response text.
 func (m tuiModel) renderStreaming() string {
 	var b strings.Builder
-	streamTurnIdx := len(m.completedTurns)
+	streamTurnIdx := len(m.svc.CompletedTurns())
 
 	// Thinking block (during streaming, show expanded by default)
 	if m.streamThinking != "" {
@@ -4349,7 +4324,7 @@ func formatToolMetaRaw(tg toolGroup) string {
 
 // renderDrawer renders the right-side drawer with Progress, Tools, and Skills sections.
 func (m tuiModel) renderDrawer(width int) string {
-	if m.planTracker == nil {
+	if m.svc.PlanTracker() == nil {
 		return ""
 	}
 	if width < 20 {
@@ -4362,7 +4337,7 @@ func (m tuiModel) renderDrawer(width int) string {
 	b.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-14))))
 	b.WriteString("\n")
 
-	tasks := m.planTracker.Tasks()
+	tasks := m.svc.PlanTracker().Tasks()
 	if len(tasks) == 0 {
 		b.WriteString(dimStyle.Render("  No tasks"))
 		b.WriteString("\n")
@@ -4382,7 +4357,7 @@ func (m tuiModel) renderDrawer(width int) string {
 			title := truncateToWidth(task.Title, width-8)
 			b.WriteString(fmt.Sprintf("  %s %s\n", icon, textStyle.Render(title)))
 		}
-		pending, active, done, failed := m.planTracker.Counts()
+		pending, active, done, failed := m.svc.PlanTracker().Counts()
 		total := pending + active + done + failed
 		summary := fmt.Sprintf("  %d/%d done", done, total)
 		if failed > 0 {
@@ -4533,7 +4508,7 @@ func (m tuiModel) renderStatusBar() string {
 	if m.planMode {
 		left = append(left, primaryStyle.Render("plan"))
 	}
-	if m.goalTracker.IsActive() {
+	if m.svc.GoalTracker().IsActive() {
 		left = append(left, successStyle.Render("goal"))
 	}
 	leftStr := strings.Join(left, " ")
@@ -4578,15 +4553,16 @@ func (m tuiModel) renderStatusBar() string {
 // renderTokenStatus returns the right side of the status bar with token breakdown.
 func (m tuiModel) renderTokenStatus() string {
 	dot := mutedStyle.Render(" · ")
-	isLive := m.streaming && m.turnUsage.GrandTotal() > 0
+	tu := m.svc.TurnUsage()
+	isLive := m.streaming && tu.GrandTotal() > 0
 
 	// Pending estimate is already tracked via SetPendingEstimate in CurrentUsage(),
 	// so UsageDisplay() without extra args shows the correct live total.
-	ctxStr := m.contextMgr.UsageDisplay()
+	ctxStr := m.svc.ContextMgr().UsageDisplay()
 
 	// During streaming, show live current-turn usage
 	if isLive {
-		u := m.turnUsage
+		u := tu
 		parts := []string{"ctx: " + ctxStr}
 		parts = append(parts, fmt.Sprintf("in: %s", agentctx.FormatTokenCount(u.InputTotal())))
 		parts = append(parts, fmt.Sprintf("out: %s", agentctx.FormatTokenCount(u.Output)))
@@ -4597,10 +4573,11 @@ func (m tuiModel) renderTokenStatus() string {
 	}
 
 	// Idle: show cumulative session usage
-	if m.sessionUsage.GrandTotal() > 0 {
-		u := m.sessionUsage
+	su := m.svc.SessionUsage()
+	if su.GrandTotal() > 0 {
+		u := su
 		parts := []string{"ctx: " + ctxStr}
-		parts = append(parts, fmt.Sprintf("turns: %d", m.turnCount))
+		parts = append(parts, fmt.Sprintf("turns: %d", m.svc.TurnCount()))
 		parts = append(parts, fmt.Sprintf("in: %s", agentctx.FormatTokenCount(u.InputTotal())))
 		parts = append(parts, fmt.Sprintf("out: %s", agentctx.FormatTokenCount(u.Output)))
 		if u.InputCacheRead > 0 {
@@ -4840,11 +4817,11 @@ func (m *tuiModel) resumeSession(id string) {
 		m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Failed to resume session: %s", err)})
 		return
 	}
-	// Audit: record session switch BEFORE updating m.sessionID
+	// Audit: record session switch BEFORE updating session identity
 	// so the event goes to the old session's audit DB.
-	oldSessionID := m.sessionID
-	if m.auditWriter != nil {
-		m.auditWriter.Record(audit.AuditEvent{
+	oldSessionID := m.svc.ID()
+	if m.svc.AuditWriter() != nil {
+		m.svc.AuditWriter().Record(audit.AuditEvent{
 			SessionID: oldSessionID,
 			Type:      audit.EvtUserSessionSwitch,
 			Data:      map[string]any{"from": oldSessionID, "to": sess.ID, "reason": "resume"},
@@ -4853,40 +4830,28 @@ func (m *tuiModel) resumeSession(id string) {
 	home, _ := os.UserHomeDir()
 	if home != "" {
 		m.app.switchAuditStore(sess.ID, home)
-		m.auditWriter = m.app.AuditWriter
 	}
 
 	// Swap to the resumed session
-	m.sess = sess
-	m.sessionID = sess.ID
+	m.svc.SetSession(sess)
+	m.svc.Reset()
 	sess.SetStatus(session.StatusIdle)
 
 	// Reset display state
 	m.messages = nil
-	m.completedTurns = nil
 	m.collapsibles = nil
 	m.streamToolGroups = nil
 	m.streamResponse = ""
 	m.streamThinking = ""
 	m.streaming = false
-	m.history = nil
-	m.turnCount = 0
 	m.scrollOffset = 0
 	m.focusIndex = -1
 	m.input = ""
 	m.cursor = 0
 	m.cancelCh = nil
 
-	// Reset usage and context state (mirrors /new and /init)
-	m.contextMgr.Reset()
-	if m.compactStrategy != nil {
-		m.compactStrategy.ResetForTurn()
-	}
-	m.goalTracker.CancelGoal("user")
 	m.activeSkill = nil
 	m.resetDrawerState()
-	m.sessionUsage = kosong.TokenUsage{}
-	m.turnUsage = kosong.TokenUsage{}
 
 	// Replay history into the clean state
 	m.replayHistory()

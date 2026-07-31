@@ -11,12 +11,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/plan"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/agentcore/di"
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
+	"github.com/visdomtech/kimi-code/internal/kosong"
 	"github.com/visdomtech/kimi-code/internal/persistence"
 )
 
@@ -263,6 +263,7 @@ func TestHandleSubmit_DollarSkillRoutesThroughLLM(t *testing.T) {
 	})
 
 	m := tuiModel{
+		svc:          &SessionService{},
 		input:        "$test-skill do something useful",
 		cursor:       40,
 		skillCatalog: cat,
@@ -277,8 +278,8 @@ func TestHandleSubmit_DollarSkillRoutesThroughLLM(t *testing.T) {
 	if cmd == nil {
 		t.Error("expected non-nil tea.Cmd (should route through runLLMStream)")
 	}
-	if rm.turnCount != 1 {
-		t.Errorf("turnCount = %d, want 1", rm.turnCount)
+	if rm.svc.TurnCount() != 1 {
+		t.Errorf("turnCount = %d, want 1", rm.svc.TurnCount())
 	}
 }
 
@@ -290,6 +291,7 @@ func TestHandleSubmit_DollarAloneShowsUsage(t *testing.T) {
 	})
 
 	m := tuiModel{
+		svc:          &SessionService{},
 		input:        "$",
 		cursor:       1,
 		skillCatalog: cat,
@@ -331,6 +333,7 @@ func TestHandleSubmit_DollarAfterWhitespaceRoutesThroughLLM(t *testing.T) {
 	})
 
 	m := tuiModel{
+		svc:          &SessionService{},
 		input:        "try $test-skill do something useful",
 		cursor:       50,
 		skillCatalog: cat,
@@ -345,8 +348,8 @@ func TestHandleSubmit_DollarAfterWhitespaceRoutesThroughLLM(t *testing.T) {
 	if cmd == nil {
 		t.Error("expected non-nil tea.Cmd (should route through runLLMStream)")
 	}
-	if rm.turnCount != 1 {
-		t.Errorf("turnCount = %d, want 1", rm.turnCount)
+	if rm.svc.TurnCount() != 1 {
+		t.Errorf("turnCount = %d, want 1", rm.svc.TurnCount())
 	}
 	// The user message should preserve the original input verbatim.
 	if len(rm.messages) < 1 || rm.messages[0].content != "try $test-skill do something useful" {
@@ -368,6 +371,7 @@ func TestHandleSubmit_SlashUnknownWithDollarDoesNotInvokeSkill(t *testing.T) {
 	})
 
 	m := tuiModel{
+		svc:          &SessionService{},
 		input:        "/foobar $test-skill",
 		cursor:       30,
 		skillCatalog: cat,
@@ -517,6 +521,7 @@ func TestHandleSubmit_SkillRoutesThroughLLM(t *testing.T) {
 	})
 
 	m := tuiModel{
+		svc:          &SessionService{},
 		input:        "/skill:test-skill do something useful",
 		cursor:       40,
 		skillCatalog: cat,
@@ -531,8 +536,8 @@ func TestHandleSubmit_SkillRoutesThroughLLM(t *testing.T) {
 	if cmd == nil {
 		t.Error("expected non-nil tea.Cmd (should route through runLLMStream)")
 	}
-	if rm.turnCount != 1 {
-		t.Errorf("turnCount = %d, want 1", rm.turnCount)
+	if rm.svc.TurnCount() != 1 {
+		t.Errorf("turnCount = %d, want 1", rm.svc.TurnCount())
 	}
 	// Verify a "Skill loaded" system message was added
 	found := false
@@ -753,6 +758,7 @@ func TestHandleSubmit_SubSkillRoutesThroughLLM(t *testing.T) {
 	})
 
 	m := tuiModel{
+		svc:          &SessionService{},
 		input:        "/review.slop check this code",
 		cursor:       30,
 		skillCatalog: cat,
@@ -1444,24 +1450,26 @@ func TestReplayHistory_RestoresContextUsage(t *testing.T) {
 	_ = sessStore.History().AddMessage(ctx, sessID, session.Message{Role: "assistant", Content: "Hi there"})
 
 	// Create a tuiModel and replay history
+	app := &App{SessionStore: sessStore}
+	svc := NewSessionService(sess, app, SessionServiceConfig{
+		MaxCtx: 262144,
+	})
 	m := tuiModel{
-		sessionID:  sessID,
-		sess:       sess,
-		app:        &App{SessionStore: sessStore},
-		contextMgr: agentctx.NewContextManager(262144, 0, 0),
+		svc: svc,
+		app: app,
 	}
 	m.replayHistory()
 
 	// Context manager should use persisted real tokens, not text estimates.
 	// Expected: tokens_in + tokens_out = 196800 + 6300 = 203100
-	got := m.contextMgr.CurrentUsage()
+	got := m.svc.ContextMgr().CurrentUsage()
 	want := 196800 + 6300
 	if got != want {
 		t.Errorf("contextMgr.CurrentUsage() = %d, want %d", got, want)
 	}
 
 	// Verify display format shows ~203.1K, not ~2.4K
-	display := m.contextMgr.UsageDisplay()
+	display := m.svc.ContextMgr().UsageDisplay()
 	if !strings.Contains(display, "203.1K") {
 		t.Errorf("UsageDisplay() = %q, want to contain '203.1K'", display)
 	}
@@ -1478,7 +1486,7 @@ func TestRenderDrawer_ContainsAllSections(t *testing.T) {
 	})
 
 	m := tuiModel{
-		planTracker: tracker,
+		svc: &SessionService{planTracker: tracker},
 		drawerToolLog: []drawerToolEntry{
 			{name: "read_file", args: `/src/foo.go`, at: time.Now(), duration: 200 * time.Millisecond},
 			{name: "bash", args: `go test ./...`, at: time.Now(), duration: 1 * time.Second},
@@ -1516,7 +1524,7 @@ func TestRenderDrawer_ContainsAllSections(t *testing.T) {
 func TestRenderDrawer_EmptyState(t *testing.T) {
 	tracker := plan.NewTracker()
 	m := tuiModel{
-		planTracker: tracker,
+		svc: &SessionService{planTracker: tracker},
 	}
 
 	out := m.renderDrawer(30)
@@ -2107,5 +2115,180 @@ func TestListFileCandidates_PermissionDenied(t *testing.T) {
 	}
 	if !candidates[0].isFile {
 		t.Error("error indicator should have isFile=true")
+	}
+}
+
+// ── SessionService tests ──
+
+func TestSessionService_HistoryOperations(t *testing.T) {
+	svc := &SessionService{}
+
+	// Empty history
+	if svc.HistoryLen() != 0 {
+		t.Errorf("initial history len = %d, want 0", svc.HistoryLen())
+	}
+
+	// Append
+	svc.AppendMessages(kosong.CreateUserMessage("hello"))
+	svc.AppendMessages(kosong.CreateUserMessage("world"))
+	if svc.HistoryLen() != 2 {
+		t.Errorf("after 2 appends, len = %d, want 2", svc.HistoryLen())
+	}
+
+	// History returns a copy
+	h := svc.History()
+	if len(h) != 2 {
+		t.Errorf("History() len = %d, want 2", len(h))
+	}
+	h = append(h, kosong.CreateUserMessage("extra"))
+	if svc.HistoryLen() != 2 {
+		t.Error("modifying History() copy should not affect service")
+	}
+
+	// Truncate
+	svc.TruncateHistory(1)
+	if svc.HistoryLen() != 1 {
+		t.Errorf("after truncate(1), len = %d, want 1", svc.HistoryLen())
+	}
+
+	// Clear
+	svc.ClearHistory()
+	if svc.HistoryLen() != 0 {
+		t.Errorf("after clear, len = %d, want 0", svc.HistoryLen())
+	}
+
+	// Rewrite
+	svc.RewriteHistory([]kosong.Message{kosong.CreateUserMessage("a"), kosong.CreateUserMessage("b")})
+	if svc.HistoryLen() != 2 {
+		t.Errorf("after rewrite, len = %d, want 2", svc.HistoryLen())
+	}
+}
+
+func TestSessionService_TurnAndUsage(t *testing.T) {
+	svc := &SessionService{}
+
+	svc.IncrementTurn()
+	svc.IncrementTurn()
+	if svc.TurnCount() != 2 {
+		t.Errorf("turnCount = %d, want 2", svc.TurnCount())
+	}
+
+	svc.AddTurnUsage(kosong.TokenUsage{InputOther: 100, Output: 50})
+	tu := svc.TurnUsage()
+	if tu.InputOther != 100 || tu.Output != 50 {
+		t.Errorf("turnUsage = %+v, want {InputOther:100, Output:50}", tu)
+	}
+
+	svc.AddSessionUsage(kosong.TokenUsage{InputOther: 200, Output: 100})
+	su := svc.SessionUsage()
+	if su.InputOther != 200 || su.Output != 100 {
+		t.Errorf("sessionUsage = %+v, want {InputOther:200, Output:100}", su)
+	}
+
+	svc.ResetTurnUsage()
+	if svc.TurnUsage() != (kosong.TokenUsage{}) {
+		t.Error("ResetTurnUsage should zero out turn usage")
+	}
+}
+
+func TestSessionService_Reset(t *testing.T) {
+	sess, _ := session.NewSession("test", "Test", di.NewAppScope("test"))
+	app := &App{Config: config.DefaultConfig()}
+	svc := NewSessionService(sess, app, SessionServiceConfig{MaxCtx: 262144})
+
+	svc.AppendMessages(kosong.CreateUserMessage("hello"))
+	svc.IncrementTurn()
+	svc.AppendTurn(turnData{text: "response"})
+	svc.AddSessionUsage(kosong.TokenUsage{InputOther: 100})
+	svc.SetLastPrompt("hello")
+	svc.IncrementOverflow()
+
+	svc.Reset()
+
+	if svc.HistoryLen() != 0 {
+		t.Error("Reset should clear history")
+	}
+	if svc.TurnCount() != 0 {
+		t.Error("Reset should clear turn count")
+	}
+	if len(svc.CompletedTurns()) != 0 {
+		t.Error("Reset should clear completed turns")
+	}
+	if svc.SessionUsage() != (kosong.TokenUsage{}) {
+		t.Error("Reset should clear session usage")
+	}
+	if svc.LastPrompt() != "" {
+		t.Error("Reset should clear last prompt")
+	}
+	if svc.OverflowRetries() != 0 {
+		t.Error("Reset should clear overflow retries")
+	}
+}
+
+func TestSessionService_ConcurrentAccess(t *testing.T) {
+	svc := &SessionService{}
+	const N = 100
+
+	// Concurrent appends from multiple goroutines
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < N; i++ {
+			svc.AppendMessages(kosong.CreateUserMessage(fmt.Sprintf("msg-%d", i)))
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		for i := 0; i < N; i++ {
+			svc.IncrementTurn()
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		for i := 0; i < N; i++ {
+			_ = svc.History()
+			_ = svc.TurnCount()
+		}
+		done <- struct{}{}
+	}()
+
+	<-done
+	<-done
+	<-done
+
+	if svc.HistoryLen() != N {
+		t.Errorf("concurrent appends: history len = %d, want %d", svc.HistoryLen(), N)
+	}
+	if svc.TurnCount() != N {
+		t.Errorf("concurrent increments: turnCount = %d, want %d", svc.TurnCount(), N)
+	}
+}
+
+func TestSessionService_BtwMode(t *testing.T) {
+	svc := &SessionService{}
+	svc.AppendMessages(kosong.CreateUserMessage("a"), kosong.CreateUserMessage("b"))
+
+	svc.SetBtwMode(true)
+	if !svc.BtwMode() {
+		t.Error("BtwMode should be true")
+	}
+	if svc.BtwHistoryLen() != 2 {
+		t.Errorf("BtwHistoryLen = %d, want 2", svc.BtwHistoryLen())
+	}
+
+	// Append more during btw mode
+	svc.AppendMessages(kosong.CreateUserMessage("btw-question"))
+	if svc.HistoryLen() != 3 {
+		t.Errorf("history len = %d, want 3", svc.HistoryLen())
+	}
+
+	// Truncate back to btw snapshot
+	svc.TruncateHistory(svc.BtwHistoryLen())
+	if svc.HistoryLen() != 2 {
+		t.Errorf("after truncate, history len = %d, want 2", svc.HistoryLen())
+	}
+
+	svc.SetBtwMode(false)
+	if svc.BtwMode() {
+		t.Error("BtwMode should be false")
 	}
 }

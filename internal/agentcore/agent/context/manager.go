@@ -5,6 +5,7 @@ package context
 import (
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // PerTurnOverhead is the estimated token cost of system prompt + tool
@@ -28,7 +29,9 @@ type turnRecord struct {
 // ContextManager tracks context window usage using a two-tier model:
 // measured (confirmed by API responses) and pending (estimated for in-flight turns).
 // It also stores compaction thresholds from config.
+// Thread-safe: all public methods acquire mu.
 type ContextManager struct {
+	mu              sync.RWMutex
 	maxTokens       int
 	measuredTotal   int // confirmed by API usage responses
 	pendingEstimate int // estimated tokens for in-flight turn (transient)
@@ -61,6 +64,8 @@ func NewContextManager(maxTokens int, triggerRatio float64, reservedContext int)
 // AddTurnUsage records measured token usage for a completed turn.
 // This clears the pending estimate and promotes it to measured.
 func (cm *ContextManager) AddTurnUsage(tokens int) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	cm.turnRecords = append(cm.turnRecords, turnRecord{tokens: tokens, measured: true})
 	cm.measuredTotal += tokens
 	cm.pendingEstimate = 0
@@ -69,16 +74,22 @@ func (cm *ContextManager) AddTurnUsage(tokens int) {
 // SetPendingEstimate sets the transient token estimate for the current
 // in-flight turn (e.g. during streaming). This does not affect measuredTotal.
 func (cm *ContextManager) SetPendingEstimate(tokens int) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	cm.pendingEstimate = tokens
 }
 
 // CurrentUsage returns measured total plus any pending estimate.
 func (cm *ContextManager) CurrentUsage() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
 	return cm.measuredTotal + cm.pendingEstimate
 }
 
 // MaxTokens returns the context window size.
 func (cm *ContextManager) MaxTokens() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
 	return cm.maxTokens
 }
 
@@ -86,6 +97,8 @@ func (cm *ContextManager) MaxTokens() int {
 // default (262144). This is called when the model is changed at runtime (e.g.
 // via /model) so the status bar reflects the correct limit.
 func (cm *ContextManager) SetMaxTokens(n int) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	if n <= 0 {
 		n = 262144 // default 256K
 	}
@@ -94,17 +107,21 @@ func (cm *ContextManager) SetMaxTokens(n int) {
 
 // UsagePercent returns the percentage of context window used.
 func (cm *ContextManager) UsagePercent() float64 {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
 	if cm.maxTokens == 0 {
 		return 0
 	}
-	return float64(cm.CurrentUsage()) / float64(cm.maxTokens) * 100
+	return float64(cm.measuredTotal+cm.pendingEstimate) / float64(cm.maxTokens) * 100
 }
 
 // UsageDisplay returns a formatted string like "12.3K / 128K tokens (9.6%)".
 // If currentTurn > 0, those tokens are added to the used count (for live
 // streaming display where the current turn hasn't been committed yet).
 func (cm *ContextManager) UsageDisplay(currentTurn ...int) string {
-	used := cm.CurrentUsage()
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	used := cm.measuredTotal + cm.pendingEstimate
 	for _, t := range currentTurn {
 		used += t
 	}
@@ -121,16 +138,19 @@ func (cm *ContextManager) UsageDisplay(currentTurn ...int) string {
 
 // RemoveLastNTurns removes the last N turn records and recalculates measured total.
 func (cm *ContextManager) RemoveLastNTurns(n int) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	if n >= len(cm.turnRecords) {
 		cm.turnRecords = nil
 	} else {
 		cm.turnRecords = cm.turnRecords[:len(cm.turnRecords)-n]
 	}
-	cm.recalculate()
+	cm.recalculateLocked()
 }
 
-// recalculate recomputes measuredTotal from turn records.
-func (cm *ContextManager) recalculate() {
+// recalculateLocked recomputes measuredTotal from turn records.
+// Caller must hold cm.mu.
+func (cm *ContextManager) recalculateLocked() {
 	cm.measuredTotal = 0
 	for _, r := range cm.turnRecords {
 		cm.measuredTotal += r.tokens
@@ -139,6 +159,8 @@ func (cm *ContextManager) recalculate() {
 
 // Reset clears all usage tracking.
 func (cm *ContextManager) Reset() {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	cm.turnRecords = nil
 	cm.measuredTotal = 0
 	cm.pendingEstimate = 0
@@ -147,10 +169,12 @@ func (cm *ContextManager) Reset() {
 // NeedsCompaction returns true if context usage exceeds the configured
 // trigger ratio or if usage plus reserved context would exhaust the window.
 func (cm *ContextManager) NeedsCompaction() bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
 	if cm.maxTokens <= 0 {
 		return false
 	}
-	used := cm.CurrentUsage()
+	used := cm.measuredTotal + cm.pendingEstimate
 	// Trigger if usage exceeds ratio threshold
 	if float64(used) >= float64(cm.maxTokens)*cm.triggerRatio {
 		return true
@@ -166,11 +190,15 @@ func (cm *ContextManager) NeedsCompaction() bool {
 
 // TriggerRatio returns the configured compaction trigger ratio.
 func (cm *ContextManager) TriggerRatio() float64 {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
 	return cm.triggerRatio
 }
 
 // ReservedContext returns the configured reserved context size.
 func (cm *ContextManager) ReservedContext() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
 	return cm.reservedContext
 }
 
