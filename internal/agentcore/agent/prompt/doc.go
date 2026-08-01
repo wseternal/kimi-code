@@ -1,2 +1,2 @@
-// Package prompt — stub, will be implemented in a later phase.
+// Package prompt provides system prompt construction and AGENTS.md loading.
 package prompt

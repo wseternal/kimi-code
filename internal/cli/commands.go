@@ -106,6 +106,8 @@ func (r *CommandRegistry) registerDefaults() {
 	// Config commands
 	r.Register(SlashCommandDef{Name: "provider", Desc: "Show/switch provider", Usage: "/provider [name]", Group: "config"})
 	r.Register(SlashCommandDef{Name: "model", Desc: "Switch LLM model", Group: "config"})
+	r.Register(SlashCommandDef{Name: "models", Desc: "List models from provider", Group: "config"})
+	r.Register(SlashCommandDef{Name: "secondary_model", Desc: "Set secondary/fallback model", Usage: "/secondary_model [model]", Group: "config"})
 	r.Register(SlashCommandDef{Name: "experiments", Desc: "List experimental flags", Group: "config"})
 	r.Register(SlashCommandDef{Name: "reload", Desc: "Reload config.toml", Group: "config"})
 	r.Register(SlashCommandDef{Name: "auto", Desc: "Toggle YOLO mode", Group: "config"})

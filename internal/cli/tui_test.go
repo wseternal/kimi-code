@@ -1052,14 +1052,14 @@ func TestBuildSystemPrompt_ActiveSkill(t *testing.T) {
 	cat := skill.NewCatalog(nil)
 
 	// Without active skill: no "Active Skill" section
-	prompt := buildSystemPrompt("/tmp", "main", cat, nil)
+	prompt := buildSystemPrompt("/tmp", "main", cat, nil, "", "")
 	if strings.Contains(prompt, "Active Skill") {
 		t.Error("system prompt should not contain 'Active Skill' section when no skill is active")
 	}
 
 	// With active skill: section present with name and args
 	active := &activeSkillInfo{name: "pr-review", args: "COMMITS=abc123"}
-	prompt = buildSystemPrompt("/tmp", "main", cat, active)
+	prompt = buildSystemPrompt("/tmp", "main", cat, active, "", "")
 	if !strings.Contains(prompt, "## Active Skill: pr-review") {
 		t.Error("system prompt should contain '## Active Skill: pr-review' section")
 	}
@@ -1074,7 +1074,7 @@ func TestBuildSystemPrompt_ActiveSkill(t *testing.T) {
 func TestBuildSystemPrompt_ActiveSkillNoArgs(t *testing.T) {
 	cat := skill.NewCatalog(nil)
 	active := &activeSkillInfo{name: "dev-cycle", args: ""}
-	prompt := buildSystemPrompt("/tmp", "main", cat, active)
+	prompt := buildSystemPrompt("/tmp", "main", cat, active, "", "")
 	if !strings.Contains(prompt, "## Active Skill: dev-cycle") {
 		t.Error("system prompt should contain the active skill section")
 	}
@@ -1623,7 +1623,7 @@ func TestToolArgSummary_MultiByteUTF8(t *testing.T) {
 // includes the update_plan tool hint.
 func TestBuildSystemPrompt_UpdatePlanHint(t *testing.T) {
 	cat := skill.NewCatalog(nil)
-	prompt := buildSystemPrompt("/tmp", "main", cat, nil)
+	prompt := buildSystemPrompt("/tmp", "main", cat, nil, "", "")
 
 	if !strings.Contains(prompt, "update_plan") {
 		t.Error("system prompt should mention update_plan tool")

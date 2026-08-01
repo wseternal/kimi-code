@@ -23,9 +23,11 @@ import (
 	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/cron"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/goal"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/hooks"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/injection"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/permission"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/plan"
+	promptpkg "github.com/visdomtech/kimi-code/internal/agentcore/agent/prompt"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/swarm"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
@@ -225,6 +227,8 @@ type tuiModel struct {
 	permChain    *permission.Chain
 	cronManager  *cron.CronManager
 	swarmRoster  *swarm.Roster
+	hookEngine   *hooks.Engine
+	injectionMgr *injection.Manager
 
 	// Autocomplete
 	suggestions     []slashCommand
@@ -395,6 +399,12 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	goalTrk := svc.GoalTracker()
 	tools.RegisterGoalTools(toolReg, goalTrk)
 
+	// Injection manager for system reminders (goal, plan mode)
+	injectionMgr := injection.NewManager(
+		injection.NewGoalInjector(goalTrk),
+		planInjector,
+	)
+
 	// Steering tool for mid-turn user input (not registered in tool registry;
 	// the streaming loop invokes it directly at step boundaries).
 	steering := tools.NewSteeringTool()
@@ -404,6 +414,12 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 		runner := tools.NewGoGraphRunner()
 		tools.RegisterGoGraphTools(toolReg, runner)
 		toolReg.RegisterHook("Grep", tools.NewGoGraphHook(runner))
+	}
+
+	// Create hook engine from config
+	var hookEngine *hooks.Engine
+	if len(app.Config.Hooks) > 0 {
+		hookEngine = hooks.NewEngine(app.Config.Hooks)
 	}
 
 	permChain := permission.DefaultChain()
@@ -429,6 +445,8 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 		permChain:      permChain,
 		cronManager:    cronMgr,
 		swarmRoster:    roster,
+		hookEngine:     hookEngine,
+		injectionMgr:   injectionMgr,
 		focusIndex:     -1,
 		prompter:       permission.NewPrompter(),
 		inputHistory:   inputHist,
@@ -936,6 +954,9 @@ func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 	activeSkill := m.activeSkill
 	permChain := m.permChain
 	toolReg := m.toolRegistry
+	hookEng := m.hookEngine
+	injectionMgr := m.injectionMgr
+	homeDir, _ := os.UserHomeDir()
 
 	go func() {
 		defer close(ch)
@@ -960,7 +981,12 @@ func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 		}
 
 		ctx := context.Background()
-		systemPrompt := buildSystemPrompt(cwd, branch, skillCat, activeSkill)
+		agentsMd, _ := promptpkg.LoadAgentsMd(cwd, homeDir)
+		systemReminders := ""
+		if injectionMgr != nil {
+			systemReminders = injectionMgr.InjectAll()
+		}
+		systemPrompt := buildSystemPrompt(cwd, branch, skillCat, activeSkill, agentsMd, systemReminders)
 
 		// Convert tool definitions
 		var kosongTools []kosong.Tool
@@ -1189,11 +1215,39 @@ func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 					continue
 				}
 
+				// PreToolUse hook (blocking)
+				if hookEng != nil {
+					hookInput := hooks.HookInput{
+						Tool:    &hooks.HookToolInput{Name: tc.Name, Input: string(input)},
+						Session: &hooks.HookSession{ID: m.svc.ID(), WorkDir: cwd},
+					}
+					decision := hookEng.TriggerBlock(ctx, hooks.PreToolUse, hookInput)
+					if decision.Blocked {
+						blockMsg := fmt.Sprintf("[Blocked by hook] %s", decision.Reason)
+						ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: blockMsg, toolErr: true}
+						m.svc.AppendMessages(kosong.CreateToolMessage(tc.ID, blockMsg))
+						continue
+					}
+				}
+
 				toolStart := time.Now()
 				result, err := tool.Execute(ctx, input, tools.ExecContext{WorkDir: cwd})
 				toolDur := time.Since(toolStart)
 				if err != nil {
 					result = &tools.Result{Output: err.Error(), IsError: true}
+				}
+
+				// PostToolUse hook (fire-and-forget)
+				if hookEng != nil {
+					postEvent := hooks.PostToolUse
+					if result.IsError {
+						postEvent = hooks.PostToolUseFailure
+					}
+					hookInput := hooks.HookInput{
+						Tool:    &hooks.HookToolInput{Name: tc.Name, Input: string(input), Output: result.Output},
+						Session: &hooks.HookSession{ID: m.svc.ID(), WorkDir: cwd},
+					}
+					hookEng.FireAndForget(ctx, postEvent, hookInput)
 				}
 
 				ch <- streamEvent{kind: "tool_result", toolName: tc.Name, toolOut: truncateOutput(result.Output), toolErr: result.IsError, toolDur: toolDur}
@@ -1264,6 +1318,11 @@ type oauthLoginMsg struct {
 	baseURL  string            // resolved base URL
 }
 
+// modelsResultMsg carries the result of a /models discovery request.
+type modelsResultMsg struct {
+	text string
+}
+
 func (m tuiModel) tickCursor() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(_ time.Time) tea.Msg {
 		return cursorTickMsg{}
@@ -1321,6 +1380,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = utf8.RuneCountInString(m.input)
 			m.messages = append(m.messages, chatMessage{"system", "Editor content loaded. Press Enter to submit."})
 		}
+		return m, nil
+
+	case modelsResultMsg:
+		m.messages = append(m.messages, chatMessage{"system", msg.text})
 		return m, nil
 
 	case oauthLoginMsg:
@@ -1412,6 +1475,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.svc.CompactStrategy().CanCompact() && m.svc.LastPrompt() != "" {
 				m.svc.IncrementOverflow()
 				if m.performCompaction(true) {
+					// Also strip media from history to further reduce payload on 413
+					if stripped := m.stripMediaFromHistory(); stripped > 0 {
+						m.messages = append(m.messages, chatMessage{"system",
+							fmt.Sprintf("Stripped %d media parts from history to reduce payload.", stripped)})
+					}
 					m.messages = append(m.messages, chatMessage{"system",
 						fmt.Sprintf("Context overflow detected, compacted (attempt %d/%d). Retrying...",
 							m.svc.OverflowRetries(), m.svc.CompactStrategy().MaxOverflowAttempts())})
@@ -2107,6 +2175,9 @@ func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction
 		return false
 	}
 
+	// Fire PreCompact hook
+	m.fireCompactionHooks(true)
+
 	// Build message list for compactor
 	var compactMsgs []agentctx.CompactMessage
 	for _, msg := range m.messages {
@@ -2137,6 +2208,8 @@ func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction
 			if m.svc.CompactStrategy() != nil {
 				m.svc.CompactStrategy().RecordCompaction(result.CompactTokens)
 			}
+			// Fire PostCompact hook
+			m.fireCompactionHooks(false)
 			return true
 		}
 		// LLM compaction failed, fall through to naive
@@ -2195,6 +2268,8 @@ func (m *tuiModel) performCompactionWithInstruction(auto bool, customInstruction
 	if m.svc.CompactStrategy() != nil {
 		m.svc.CompactStrategy().RecordCompaction(m.svc.ContextMgr().CurrentUsage())
 	}
+	// Fire PostCompact hook
+	m.fireCompactionHooks(false)
 	return true
 }
 
@@ -2270,6 +2345,50 @@ func (m *tuiModel) rewriteContext(compactedMsgs []agentctx.CompactMessage) {
 	// Clear completed turns (they've been compacted)
 	m.svc.ClearTurns()
 	m.rebuildCollapsibles()
+}
+
+// stripMediaFromHistory removes image_url, audio_url, and video_url content
+// parts from all messages in the LLM history. This is used as a last resort
+// when 413 overflow persists after compaction (media payloads can be very large).
+// Returns the number of media parts stripped.
+func (m *tuiModel) stripMediaFromHistory() int {
+	history := m.svc.History()
+	stripped := 0
+	for i, msg := range history {
+		if len(msg.Content) == 0 {
+			continue
+		}
+		var filtered []kosong.ContentPart
+		for _, part := range msg.Content {
+			if part.Type == "image_url" || part.Type == "audio_url" || part.Type == "video_url" {
+				stripped++
+				continue
+			}
+			filtered = append(filtered, part)
+		}
+		if stripped > 0 && len(filtered) != len(msg.Content) {
+			history[i].Content = filtered
+		}
+	}
+	if stripped > 0 {
+		m.svc.RewriteHistory(history)
+	}
+	return stripped
+}
+
+// fireCompactionHooks fires PreCompact or PostCompact hooks.
+func (m *tuiModel) fireCompactionHooks(pre bool) {
+	if m.hookEngine == nil {
+		return
+	}
+	event := hooks.PostCompact
+	if pre {
+		event = hooks.PreCompact
+	}
+	hookInput := hooks.HookInput{
+		Session: &hooks.HookSession{ID: m.svc.ID(), WorkDir: m.cwd},
+	}
+	m.hookEngine.FireAndForget(context.Background(), event, hookInput)
 }
 
 // turnHistoryCount returns the number of kosong.Message entries a completed
@@ -3012,6 +3131,34 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.showSuggestions = false
 		return m, nil
 
+	case input == "/models":
+		m.messages = append(m.messages, chatMessage{"user", input})
+		m.messages = append(m.messages, chatMessage{"system", "Fetching models from provider..."})
+		m.input = ""
+		m.cursor = 0
+		m.showSuggestions = false
+		cfg := m.app.Config
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			models, err := providers.ListProviderModels(ctx, cfg)
+			if err != nil {
+				return modelsResultMsg{text: fmt.Sprintf("Failed to list models: %s", err)}
+			}
+			if len(models) == 0 {
+				return modelsResultMsg{text: "No models discovered from provider."}
+			}
+			var lines []string
+			for _, m := range models {
+				line := m.ID
+				if m.OwnedBy != "" {
+					line += fmt.Sprintf(" (by %s)", m.OwnedBy)
+				}
+				lines = append(lines, "  "+line)
+			}
+			return modelsResultMsg{text: fmt.Sprintf("Discovered %d models:\n%s", len(models), strings.Join(lines, "\n"))}
+		}
+
 	case input == "/yolo" || input == "/auto":
 		m.yoloMode = !m.yoloMode
 		if m.yoloMode {
@@ -3041,6 +3188,30 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	case input == "/model":
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.openModelPicker()
+		m.input = ""
+		m.cursor = 0
+		m.showSuggestions = false
+		return m, nil
+
+	case strings.HasPrefix(input, "/secondary_model"):
+		m.messages = append(m.messages, chatMessage{"user", input})
+		args := strings.TrimSpace(strings.TrimPrefix(input, "/secondary_model"))
+		if args == "" {
+			// Show current secondary model
+			if m.app.Config.SecondaryModel != nil && m.app.Config.SecondaryModel.Model != "" {
+				m.messages = append(m.messages, chatMessage{"system",
+					fmt.Sprintf("Secondary model: %s (effort: %s)", m.app.Config.SecondaryModel.Model, m.app.Config.SecondaryModel.DefaultEffort)})
+			} else {
+				m.messages = append(m.messages, chatMessage{"system", "No secondary model configured. Use /secondary_model <model> to set one."})
+			}
+		} else {
+			// Set secondary model
+			if m.app.Config.SecondaryModel == nil {
+				m.app.Config.SecondaryModel = &config.SecondaryModelConfig{}
+			}
+			m.app.Config.SecondaryModel.Model = args
+			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Secondary model set to: %s", args)})
+		}
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false
@@ -4721,7 +4892,7 @@ func getGitBranch(cwd string) string {
 // comes first so the API prefix cache hits across turns and sessions.
 // Dynamic env info (cwd, branch, OS) is appended at the tail so that changes
 // to those values don't invalidate the cacheable prefix.
-func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog, active *activeSkillInfo) string {
+func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog, active *activeSkillInfo, agentsMd string, systemReminders string) string {
 	osName := runtime.GOOS
 	arch := runtime.GOARCH
 
@@ -4779,6 +4950,18 @@ func buildSystemPrompt(cwd, branch string, skillCat *skill.Catalog, active *acti
 			sb.WriteString(active.args)
 			sb.WriteString("\n")
 		}
+	}
+
+	// ── AGENTS.md prompt injection ──
+	if agentsMd != "" {
+		sb.WriteString("\n\n## Project Instructions (AGENTS.md)\n")
+		sb.WriteString(agentsMd)
+	}
+
+	// ── System reminders (dynamic injections: goal, plan mode, etc.) ──
+	if systemReminders != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(systemReminders)
 	}
 
 	return sb.String()
@@ -5511,6 +5694,12 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 
 	permChain := permission.DefaultChain()
 
+	// Create hook engine from config
+	var simpleHookEng *hooks.Engine
+	if len(a.Config.Hooks) > 0 {
+		simpleHookEng = hooks.NewEngine(a.Config.Hooks)
+	}
+
 	branch := getGitBranch(skill.FindProjectRoot(cwd))
 	// Discover skills for simple mode
 	var skillCat *skill.Catalog
@@ -5521,7 +5710,13 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	if skillCat != nil {
 		toolReg.Register(tools.NewSkillTool(skillCat, nil))
 	}
-	systemPrompt := buildSystemPrompt(cwd, branch, skillCat, nil)
+	systemPrompt := buildSystemPrompt(cwd, branch, skillCat, nil, func() string {
+		if simpleHome == "" {
+			return ""
+		}
+		content, _ := promptpkg.LoadAgentsMd(cwd, simpleHome)
+		return content
+	}(), "")
 
 	scanner := bufio.NewScanner(os.Stdin)
 	var history []kosong.Message
@@ -5644,10 +5839,37 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 							history = append(history, kosong.CreateToolMessage(tc.ID, fmt.Sprintf("Permission denied: %s", permResult.Reason)))
 							continue
 						}
-
+						
+						// PreToolUse hook (blocking)
+						if simpleHookEng != nil {
+							hookInput := hooks.HookInput{
+								Tool:    &hooks.HookToolInput{Name: tc.Name, Input: string(toolInput)},
+								Session: &hooks.HookSession{WorkDir: cwd},
+							}
+							decision := simpleHookEng.TriggerBlock(ctx, hooks.PreToolUse, hookInput)
+							if decision.Blocked {
+								fmt.Printf("[%s] Blocked by hook: %s\n", tc.Name, decision.Reason)
+								history = append(history, kosong.CreateToolMessage(tc.ID, fmt.Sprintf("[Blocked by hook] %s", decision.Reason)))
+								continue
+							}
+						}
+						
 						result, err := tool.Execute(ctx, toolInput, tools.ExecContext{WorkDir: cwd})
 						if err != nil {
 							result = &tools.Result{Output: err.Error(), IsError: true}
+						}
+						
+						// PostToolUse hook (fire-and-forget)
+						if simpleHookEng != nil {
+							postEvent := hooks.PostToolUse
+							if result.IsError {
+								postEvent = hooks.PostToolUseFailure
+							}
+							hookInput := hooks.HookInput{
+								Tool:    &hooks.HookToolInput{Name: tc.Name, Input: string(toolInput), Output: result.Output},
+								Session: &hooks.HookSession{WorkDir: cwd},
+							}
+							simpleHookEng.FireAndForget(ctx, postEvent, hookInput)
 						}
 
 						fmt.Printf("[%s] %s\n", tc.Name, truncateOutput(result.Output))
