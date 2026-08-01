@@ -1,6 +1,9 @@
 package transcript
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // TurnGroup represents a group of consecutive turns sharing a common context.
 type TurnGroup struct {
@@ -144,7 +147,7 @@ func groupLabel(group TurnGroup) string {
 		}
 		return "Single turn"
 	}
-	return group.Turns[0].CreatedAt.Format("15:04") + " — " +
+	return group.Turns[0].CreatedAt.Format("15:04") + " \u2014 " +
 		group.Turns[len(group.Turns)-1].CreatedAt.Format("15:04") +
-		" (" + time.Duration(len(group.Turns)).String() + " turns)"
+		fmt.Sprintf(" (%d turns)", len(group.Turns))
 }

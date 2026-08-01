@@ -15,6 +15,9 @@ type Page struct {
 // pageSize is the number of turns per page. pageNumber is 0-based.
 // Returns turns in reverse chronological order (newest first).
 func Paginate(state *Snapshot, pageNumber, pageSize int) Page {
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	if state == nil || len(state.Turns) == 0 {
 		return Page{
 			Turns:    nil,
@@ -45,7 +48,8 @@ func Paginate(state *Snapshot, pageNumber, pageSize int) Page {
 		end = total
 	}
 
-	turns := state.Turns[start:end]
+	turns := make([]TranscriptTurn, end-start)
+	copy(turns, state.Turns[start:end])
 
 	// Collect frames belonging to these turns
 	stepIDs := make(map[StepID]bool)
@@ -99,7 +103,8 @@ func PaginateByCursor(state *Snapshot, cursor TurnID, limit int) Page {
 		endIdx = len(state.Turns)
 	}
 
-	turns := state.Turns[startIdx:endIdx]
+	turns := make([]TranscriptTurn, endIdx-startIdx)
+	copy(turns, state.Turns[startIdx:endIdx])
 	hasMore := endIdx < len(state.Turns)
 
 	nextCursor := ""

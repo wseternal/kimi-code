@@ -89,6 +89,13 @@ func (t *AgentTool) Execute(ctx context.Context, input json.RawMessage, exec Exe
 		workDir = params.WorkDir
 	}
 
+	// Background spawns must outlive the caller's context, otherwise the
+	// sub-agent is aborted as soon as this turn ends.
+	spawnCtx := ctx
+	if params.RunInBackground {
+		spawnCtx = context.Background()
+	}
+
 	cfg := swarm.SubagentConfig{
 		Prompt:     params.Prompt,
 		Model:      params.Model,
@@ -101,7 +108,7 @@ func (t *AgentTool) Execute(ctx context.Context, input json.RawMessage, exec Exe
 		},
 	}
 
-	id := t.Roster.Spawn(ctx, cfg)
+	id := t.Roster.Spawn(spawnCtx, cfg)
 
 	if params.RunInBackground {
 		return &Result{Output: fmt.Sprintf("Sub-agent %s spawned in background. Use AgentSwarm roster to check status.", id)}, nil

@@ -5567,6 +5567,7 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 			fmt.Println("History cleared.")
 		case "/new":
 			history = nil
+			goalTrk.CancelGoal("user")
 			fmt.Println("New session started.")
 		case "/yolo":
 			yoloMode = !yoloMode

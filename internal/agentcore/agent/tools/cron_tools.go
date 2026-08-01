@@ -167,10 +167,11 @@ func (t *CronListTool) Execute(_ context.Context, _ json.RawMessage, _ ExecConte
 }
 
 func truncateStr(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxLen]) + "..."
 }
 
 // RegisterCronTools registers all cron management tools.

@@ -3,6 +3,7 @@ package transcript
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -74,8 +75,8 @@ func (s *Store) Persist() error {
 	if s.dir == "" || s.sessionID == "" {
 		return nil
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	dir := filepath.Join(s.dir, "transcripts", s.sessionID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -108,10 +109,14 @@ func (s *Store) load() {
 	snapPath := filepath.Join(dir, "snapshot.json")
 	data, err := os.ReadFile(snapPath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("transcript: failed to read snapshot: %v", err)
+		}
 		return
 	}
 	var snap Snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
+		log.Printf("transcript: failed to parse snapshot: %v", err)
 		return
 	}
 	s.state = &snap
@@ -119,10 +124,14 @@ func (s *Store) load() {
 	opsPath := filepath.Join(dir, "operations.json")
 	opsData, err := os.ReadFile(opsPath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("transcript: failed to read operations: %v", err)
+		}
 		return
 	}
 	var ops []Operation
 	if err := json.Unmarshal(opsData, &ops); err != nil {
+		log.Printf("transcript: failed to parse operations: %v", err)
 		return
 	}
 	s.ops = ops

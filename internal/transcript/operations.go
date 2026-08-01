@@ -383,12 +383,14 @@ func applyMetaMerge(state *Snapshot, op Operation) ApplyResult {
 		meta.Provider = op.MetaPatch.Provider
 	}
 	if op.MetaPatch.Custom != nil {
-		if meta.Custom == nil {
-			meta.Custom = make(map[string]any)
+		newCustom := make(map[string]any, len(meta.Custom)+len(op.MetaPatch.Custom))
+		for k, v := range meta.Custom {
+			newCustom[k] = v
 		}
 		for k, v := range op.MetaPatch.Custom {
-			meta.Custom[k] = v
+			newCustom[k] = v
 		}
+		meta.Custom = newCustom
 	}
 	s := copySnapshot(state)
 	s.Meta = meta
@@ -429,6 +431,11 @@ func copySnapshot(state *Snapshot) *Snapshot {
 		Meta:         state.Meta,
 	}
 	copy(s.Turns, state.Turns)
+	// Deep-copy each turn's Steps slice to avoid sharing backing arrays.
+	for i := range s.Turns {
+		s.Turns[i].Steps = make([]TranscriptStep, len(state.Turns[i].Steps))
+		copy(s.Turns[i].Steps, state.Turns[i].Steps)
+	}
 	copy(s.Frames, state.Frames)
 	copy(s.Interactions, state.Interactions)
 	copy(s.Attachments, state.Attachments)
