@@ -21,10 +21,13 @@ import (
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/background"
 	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/cron"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/goal"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/injection"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/permission"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/plan"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/swarm"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
@@ -220,6 +223,8 @@ type tuiModel struct {
 	toolRegistry *tools.Registry
 	bgManager    *background.Manager
 	permChain    *permission.Chain
+	cronManager  *cron.CronManager
+	swarmRoster  *swarm.Roster
 
 	// Autocomplete
 	suggestions     []slashCommand
@@ -339,6 +344,34 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	bgMgr := background.NewManager()
 	tools.RegisterBackgroundTools(toolReg, bgMgr)
 
+	// Plan mode tools (EnterPlanMode / ExitPlanMode)
+	planInjector := injection.NewPlanModeInjector()
+	planCtrl := tools.NewPlanModeController(planInjector)
+	toolReg.Register(tools.NewEnterPlanModeTool(planCtrl))
+	toolReg.Register(tools.NewExitPlanModeTool(planCtrl))
+
+	// SelectTools (progressive tool disclosure)
+	selectTools := tools.NewSelectToolsTool(toolReg)
+	toolReg.Register(selectTools)
+
+	// SkillTool (model-invoked skill activation)
+	if skillCat != nil {
+		toolReg.Register(tools.NewSkillTool(skillCat, nil))
+	}
+
+	// Cron management tools
+	home, _ := os.UserHomeDir()
+	cronDir := ""
+	if home != "" {
+		cronDir = filepath.Join(home, ".kimi-code")
+	}
+	cronMgr := cron.NewCronManager(cron.NewStore(cronDir), nil)
+	tools.RegisterCronTools(toolReg, cronMgr)
+
+	// Swarm roster and individual Agent tool
+	roster := swarm.NewRoster(nil)
+	tools.RegisterAgentTool(toolReg, roster)
+
 	// Resolve the model's context window size from config so the status bar
 	// displays the correct total (e.g. "ctx: 0 / 128K tokens") instead of
 	// the hardcoded default.
@@ -358,6 +391,10 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	planTrk := svc.PlanTracker()
 	toolReg.Register(&tools.UpdatePlanTool{Tracker: planTrk})
 
+	// Goal management tools (from session service)
+	goalTrk := svc.GoalTracker()
+	tools.RegisterGoalTools(toolReg, goalTrk)
+
 	// Steering tool for mid-turn user input (not registered in tool registry;
 	// the streaming loop invokes it directly at step boundaries).
 	steering := tools.NewSteeringTool()
@@ -373,7 +410,6 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 
 	// Initialize input history
 	var inputHist *InputHistory
-	home, _ := os.UserHomeDir()
 	if home != "" {
 		inputHist = NewInputHistory(filepath.Join(home, ".kimi-code"))
 		_ = inputHist.Load()
@@ -391,6 +427,8 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 		toolRegistry:   toolReg,
 		bgManager:      bgMgr,
 		permChain:      permChain,
+		cronManager:    cronMgr,
+		swarmRoster:    roster,
 		focusIndex:     -1,
 		prompter:       permission.NewPrompter(),
 		inputHistory:   inputHist,
@@ -5437,6 +5475,33 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	bgMgr := background.NewManager()
 	tools.RegisterBackgroundTools(toolReg, bgMgr)
 
+	// Plan mode tools
+	planInjector := injection.NewPlanModeInjector()
+	planCtrl := tools.NewPlanModeController(planInjector)
+	toolReg.Register(tools.NewEnterPlanModeTool(planCtrl))
+	toolReg.Register(tools.NewExitPlanModeTool(planCtrl))
+
+	// SelectTools
+	selectTools := tools.NewSelectToolsTool(toolReg)
+	toolReg.Register(selectTools)
+
+	// Cron tools
+	simpleHome, _ := os.UserHomeDir()
+	simpleCronDir := ""
+	if simpleHome != "" {
+		simpleCronDir = filepath.Join(simpleHome, ".kimi-code")
+	}
+	cronMgr := cron.NewCronManager(cron.NewStore(simpleCronDir), nil)
+	tools.RegisterCronTools(toolReg, cronMgr)
+
+	// Swarm roster and Agent tool
+	roster := swarm.NewRoster(nil)
+	tools.RegisterAgentTool(toolReg, roster)
+
+	// Goal tools
+	goalTrk := goal.NewTracker()
+	tools.RegisterGoalTools(toolReg, goalTrk)
+
 	// Register GoGraph tools and hooks when available (opt-out via experimental.gograph=false)
 	if a.Config.Experimental["gograph"] != false && tools.IsGoGraphAvailable() {
 		runner := tools.NewGoGraphRunner()
@@ -5451,6 +5516,10 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	var skillCat *skill.Catalog
 	if cat, err := skill.Discover(cwd); err == nil {
 		skillCat = cat
+	}
+	// Register SkillTool after skill discovery
+	if skillCat != nil {
+		toolReg.Register(tools.NewSkillTool(skillCat, nil))
 	}
 	systemPrompt := buildSystemPrompt(cwd, branch, skillCat, nil)
 
