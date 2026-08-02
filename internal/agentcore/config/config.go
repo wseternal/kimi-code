@@ -28,6 +28,7 @@ type Config struct {
 	Server          ServerConfig                 `toml:"server"`
 	SecondaryModel  *SecondaryModelConfig        `toml:"secondary_model,omitempty"`
 	Hooks           []hooks.HookDef              `toml:"hooks,omitempty"`
+	McpServers      map[string]McpServerConfig   `toml:"mcp_servers"`
 
 	// Raw holds the original parsed TOML data for forward-compatible
 	// round-tripping of sections the Go CLI does not yet consume.
@@ -117,6 +118,19 @@ type SecondaryModelConfig struct {
 	DefaultEffort string `toml:"default_effort,omitempty"`
 }
 
+// McpServerConfig describes an MCP server connection.
+// Transport is "stdio", "http", or "sse".
+type McpServerConfig struct {
+	Transport    string            `toml:"transport"`
+	Command      string            `toml:"command,omitempty"`
+	Args         []string          `toml:"args,omitempty"`
+	URL          string            `toml:"url,omitempty"`
+	Env          map[string]string `toml:"env,omitempty"`
+	EnabledTools []string          `toml:"enabled_tools,omitempty"`
+	StartupTimeoutMs int           `toml:"startup_timeout_ms,omitempty"`
+	ToolTimeoutMs    int           `toml:"tool_timeout_ms,omitempty"`
+}
+
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -128,6 +142,7 @@ func DefaultConfig() *Config {
 			ReservedContextSize:    50000,
 		},
 		Experimental: make(map[string]bool),
+		McpServers:   make(map[string]McpServerConfig),
 		Server: ServerConfig{
 			Host: "127.0.0.1",
 			Port: 9876,
@@ -176,6 +191,9 @@ func parseConfigString(text string, filePath string) (*Config, error) {
 	}
 	if cfg.Experimental == nil {
 		cfg.Experimental = make(map[string]bool)
+	}
+	if cfg.McpServers == nil {
+		cfg.McpServers = make(map[string]McpServerConfig)
 	}
 
 	return cfg, nil
@@ -258,6 +276,9 @@ func (c *Config) overlayTyped(raw map[string]any) {
 	}
 	if len(c.Hooks) > 0 {
 		raw["hooks"] = hooksToMap(c.Hooks)
+	}
+	if len(c.McpServers) > 0 {
+		raw["mcp_servers"] = mcpServersToMap(c.McpServers)
 	}
 }
 
@@ -423,6 +444,36 @@ func hooksToMap(hks []hooks.HookDef) []any {
 			m["timeout"] = h.Timeout
 		}
 		out[i] = m
+	}
+	return out
+}
+
+func mcpServersToMap(servers map[string]McpServerConfig) map[string]any {
+	out := make(map[string]any, len(servers))
+	for k, sc := range servers {
+		m := map[string]any{"transport": sc.Transport}
+		if sc.Command != "" {
+			m["command"] = sc.Command
+		}
+		if len(sc.Args) > 0 {
+			m["args"] = sc.Args
+		}
+		if sc.URL != "" {
+			m["url"] = sc.URL
+		}
+		if len(sc.Env) > 0 {
+			m["env"] = sc.Env
+		}
+		if len(sc.EnabledTools) > 0 {
+			m["enabled_tools"] = sc.EnabledTools
+		}
+		if sc.StartupTimeoutMs != 0 {
+			m["startup_timeout_ms"] = sc.StartupTimeoutMs
+		}
+		if sc.ToolTimeoutMs != 0 {
+			m["tool_timeout_ms"] = sc.ToolTimeoutMs
+		}
+		out[k] = m
 	}
 	return out
 }

@@ -61,10 +61,13 @@ func (s *SnapshotService) Capture(sessionID string) (*rest.SessionSnapshot, erro
 // ── Additional REST Route Handlers ──
 
 // handleConfig returns the current agent configuration.
-// TODO(W18): Wire Config to return real permission mode from config.
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	permMode := "manual"
+	if s.configProvider != nil {
+		permMode = s.configProvider.PermissionMode()
+	}
 	respondJSON(w, 200, rest.ConfigResponse{
-		PermissionMode: "manual",
+		PermissionMode: permMode,
 	})
 }
 
@@ -467,9 +470,15 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 // ── Global Handlers ──
 
 // handleModelCatalog returns available models from configured providers.
-// TODO(W18): Wire provider config to return real model catalog from ListProviderModels.
 func (s *Server) handleModelCatalog(w http.ResponseWriter, _ *http.Request) {
-	respondJSON(w, 200, rest.ListModelCatalogResponse{Items: []rest.ModelCatalogItem{}})
+	var items []rest.ModelCatalogItem
+	if s.configProvider != nil {
+		items = s.configProvider.ListModels()
+	}
+	if items == nil {
+		items = []rest.ModelCatalogItem{}
+	}
+	respondJSON(w, 200, rest.ListModelCatalogResponse{Items: items})
 }
 
 // handleOAuthStatus returns current OAuth authentication status.
@@ -485,9 +494,20 @@ func (s *Server) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListConnections returns active WebSocket connections.
-// TODO(W18): Wire Registry to return real connection list.
 func (s *Server) handleListConnections(w http.ResponseWriter, _ *http.Request) {
-	respondJSON(w, 200, rest.ListConnectionsResponse{Items: []rest.ConnectionInfo{}})
+	items := make([]rest.ConnectionInfo, 0)
+	if s.wsRegistry != nil {
+		count := s.wsRegistry.Count()
+		// Return aggregate count; individual connection details
+		// would require Registry to expose a List method.
+		if count > 0 {
+			items = append(items, rest.ConnectionInfo{
+				ID:   fmt.Sprintf("aggregate_%d", count),
+				Type: "ws",
+			})
+		}
+	}
+	respondJSON(w, 200, rest.ListConnectionsResponse{Items: items})
 }
 
 // handleListWorkspaces returns known workspaces.

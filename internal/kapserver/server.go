@@ -12,12 +12,23 @@ import (
 	"time"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
+	"github.com/visdomtech/kimi-code/internal/kapserver/transport"
 	"github.com/visdomtech/kimi-code/internal/protocol"
 	"github.com/visdomtech/kimi-code/internal/protocol/rest"
 )
 
 // sessionSeq is an atomic counter for unique session IDs.
 var sessionSeq atomic.Uint64
+
+// ConfigProvider provides configuration data for server endpoints.
+type ConfigProvider interface {
+	// ListModels returns all configured model entries.
+	ListModels() []rest.ModelCatalogItem
+	// ListProviders returns all configured provider names.
+	ListProviders() []string
+	// PermissionMode returns the current permission mode.
+	PermissionMode() string
+}
 
 // PromptSubmitFunc is called when a prompt is submitted via REST.
 // Returns a prompt ID and optional error.
@@ -67,6 +78,13 @@ type Server struct {
 	security        *SecurityMiddleware
 	snapshotSvc     *SnapshotService
 	searchSvc       *SearchService
+
+	// WebSocket transport
+	wsRegistry    *transport.Registry
+	broadcaster   *transport.Broadcaster
+
+	// Config provider for model-catalog and config endpoints
+	configProvider ConfigProvider
 }
 
 // Config holds server configuration.
@@ -108,6 +126,11 @@ func WithWorkDir(dir string) ServerOption {
 	return func(s *Server) { s.workDir = dir }
 }
 
+// WithConfigProvider wires a config provider for model-catalog and config endpoints.
+func WithConfigProvider(cp ConfigProvider) ServerOption {
+	return func(s *Server) { s.configProvider = cp }
+}
+
 // NewServer creates a new server.
 func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger, opts ...ServerOption) *Server {
 	if cfg.Host == "" {
@@ -146,6 +169,10 @@ func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger, opt
 	// Cache services to avoid per-request allocation (S2).
 	s.snapshotSvc = NewSnapshotService(sessionMgr)
 	s.searchSvc = NewSearchService(s.workDir)
+
+	// Initialize WebSocket transport
+	s.wsRegistry = transport.NewRegistry(logger)
+	s.broadcaster = transport.NewBroadcaster(s.wsRegistry, 1000, logger)
 
 	s.setupRoutes()
 	return s
@@ -208,6 +235,9 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("GET /api/v1/connections", s.handleListConnections)
 	s.mux.HandleFunc("GET /api/v1/workspaces", s.handleListWorkspaces)
 	s.mux.HandleFunc("POST /api/v1/workspaces", s.handleCreateWorkspace)
+
+	// WebSocket route
+	s.mux.HandleFunc("GET /api/v1/ws", transport.HandleWebSocket(s.wsRegistry, s.broadcaster, s.logger))
 }
 
 // Start starts the HTTP server.
