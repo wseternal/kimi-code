@@ -6,16 +6,20 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/hooks"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/mcp"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/permission"
 	promptpkg "github.com/visdomtech/kimi-code/internal/agentcore/agent/prompt"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/profile"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
@@ -41,6 +45,8 @@ type CLIOptions struct {
 	Plan         bool
 	AddDirs      []string
 	TracePath    string
+	Agent        string // named agent profile
+	AgentFile    string // path to agent profile file
 }
 
 // App holds the application state.
@@ -161,6 +167,20 @@ func (a *App) run() error {
 				opts.TracePath = filepath.Join(home, ".kimi-code", fmt.Sprintf("trace_%d.jsonl", time.Now().Unix()))
 				i++
 			}
+		case arg == "--agent":
+			if i+1 < len(args) {
+				opts.Agent = args[i+1]
+				i += 2
+			} else {
+				return fmt.Errorf("--agent requires a profile name argument")
+			}
+		case arg == "--agent-file":
+			if i+1 < len(args) {
+				opts.AgentFile = args[i+1]
+				i += 2
+			} else {
+				return fmt.Errorf("--agent-file requires a file path argument")
+			}
 		case arg == "server":
 			return a.runServer()
 		case arg == "version" || arg == "--version" || arg == "-v":
@@ -235,6 +255,8 @@ func (a *App) printHelp() error {
 	fmt.Println("  kimi convert -s <id> -o <file> Convert session audit to DuckDB")
 	fmt.Println("  kimi version                  Show version")
 	fmt.Println("  kimi --trace [file]           Enable event tracing to JSONL file")
+	fmt.Println("  kimi --agent <name>           Use a named agent profile")
+	fmt.Println("  kimi --agent-file <path>      Load agent profile from file")
 	fmt.Println("  kimi help                     Show this help")
 	return nil
 }
@@ -244,6 +266,7 @@ func (a *App) runServer() error {
 		kapserver.Config{Host: a.Config.Server.Host, Port: a.Config.Server.Port},
 		a.SessionManager,
 		nil,
+		kapserver.WithConfigProvider(kapserver.NewConfigProvider(a.Config)),
 	)
 	fmt.Printf("Starting server on %s\n", srv.Addr())
 	return srv.Start(nil)
@@ -339,10 +362,22 @@ func (a *App) runTUI(opts CLIOptions) error {
 func (a *App) runHeadless(opts CLIOptions) error {
 	cwd, _ := os.Getwd()
 
+	// Load agent profile if specified
+	agentProfile, err := a.loadAgentProfile(opts)
+	if err != nil {
+		return err
+	}
+
 	// Resolve provider from config
 	if !providers.IsConfigured(a.Config) {
 		return fmt.Errorf("no provider configured. Add to ~/.kimi-code/config.toml or run 'kimi login'")
 	}
+
+	// Apply profile model override
+	if agentProfile != nil && agentProfile.Model != "" {
+		a.Config.DefaultModel = agentProfile.Model
+	}
+
 	provider, err := providers.NewFromConfig(a.Config)
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
@@ -352,6 +387,22 @@ func (a *App) runHeadless(opts CLIOptions) error {
 	toolReg := tools.NewRegistry()
 	tools.RegisterDefaultTools(toolReg)
 	tools.RegisterBackgroundTools(toolReg, nil)
+
+	// Connect MCP servers
+	var mcpMgr *mcp.Manager
+	if len(a.Config.McpServers) > 0 {
+		mcpMgr = mcp.NewManager(slog.Default())
+		if count, err := mcpMgr.ConnectAll(context.Background(), a.Config.McpServers, toolReg); err != nil {
+			slog.Warn("mcp: some servers failed to connect", "connected", count, "error", err)
+		} else if count > 0 {
+			slog.Info("mcp: servers connected", "tools", count)
+		}
+	}
+	defer func() {
+		if mcpMgr != nil {
+			mcpMgr.DisconnectAll()
+		}
+	}()
 
 	// Permission chain
 	var permChain *permission.Chain
@@ -382,6 +433,14 @@ func (a *App) runHeadless(opts CLIOptions) error {
 	agentsMd, _ := promptpkg.LoadAgentsMd(cwd, homeDir)
 	systemPrompt := buildSystemPrompt(cwd, getGitBranch(skill.FindProjectRoot(cwd)), skillCat, nil, agentsMd, "")
 
+	// Apply agent profile to system prompt
+	if agentProfile != nil {
+		systemPrompt = agentProfile.ApplyToSystemPrompt(systemPrompt)
+		if agentProfile.PlanMode {
+			systemPrompt += "\n\nYou are in plan mode. Focus on planning before implementation."
+		}
+	}
+
 	// Determine output format
 	outputFormat := opts.OutputFormat
 	if outputFormat == "" {
@@ -398,7 +457,9 @@ func (a *App) runHeadless(opts CLIOptions) error {
 		})
 	}
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	var history []kosong.Message
 	history = append(history, kosong.CreateUserMessage(opts.Prompt))
 
@@ -568,4 +629,28 @@ func (a *App) closeAuditStore() {
 func (a *App) switchAuditStore(sessionID, home string) {
 	a.closeAuditStore()
 	a.openAuditStore(sessionID, home)
+}
+
+// loadAgentProfile loads an agent profile from CLI flags.
+// Returns nil if no profile is specified. Returns an error if the
+// specified profile cannot be loaded.
+func (a *App) loadAgentProfile(opts CLIOptions) (*profile.AgentProfile, error) {
+	if opts.AgentFile != "" {
+		p, err := profile.Load(opts.AgentFile)
+		if err != nil {
+			return nil, fmt.Errorf("load agent profile from %s: %w", opts.AgentFile, err)
+		}
+		slog.Info("loaded agent profile", "name", p.Name, "source", opts.AgentFile)
+		return p, nil
+	}
+	if opts.Agent != "" {
+		home, _ := os.UserHomeDir()
+		p, err := profile.LoadNamed(opts.Agent, home)
+		if err != nil {
+			return nil, fmt.Errorf("load agent profile %q: %w", opts.Agent, err)
+		}
+		slog.Info("loaded agent profile", "name", p.Name)
+		return p, nil
+	}
+	return nil, nil
 }

@@ -1,2 +1,0 @@
-// Package profile — stub, will be implemented in a later phase.
-package profile

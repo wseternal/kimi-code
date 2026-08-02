@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
+	"github.com/visdomtech/kimi-code/internal/kapserver/transport"
 	"github.com/visdomtech/kimi-code/internal/protocol"
 	"github.com/visdomtech/kimi-code/internal/protocol/rest"
 )
@@ -19,9 +20,31 @@ import (
 // sessionSeq is an atomic counter for unique session IDs.
 var sessionSeq atomic.Uint64
 
+// ConfigProvider provides configuration data for server endpoints.
+type ConfigProvider interface {
+	// ListModels returns all configured model entries.
+	ListModels() []rest.ModelCatalogItem
+	// ListProviders returns all configured provider names.
+	ListProviders() []string
+	// PermissionMode returns the current permission mode.
+	PermissionMode() string
+}
+
 // PromptSubmitFunc is called when a prompt is submitted via REST.
 // Returns a prompt ID and optional error.
 type PromptSubmitFunc func(ctx context.Context, sessionID, prompt string) (string, error)
+
+// CompactFunc triggers context compaction for a session.
+type CompactFunc func(ctx context.Context, sessionID string) error
+
+// UndoFunc undoes the last N messages in a session.
+type UndoFunc func(ctx context.Context, sessionID string, n int) error
+
+// MessageListFunc returns messages for a session.
+type MessageListFunc func(ctx context.Context, sessionID string) ([]protocol.Message, error)
+
+// OAuthLoginFunc triggers the OAuth device flow login.
+type OAuthLoginFunc func(ctx context.Context) (string, error)
 
 // SessionDataProvider provides session-scoped data for route handlers.
 // Implementations wire real agent subsystems (permissions, background tasks,
@@ -60,6 +83,11 @@ type Server struct {
 	// When nil, the corresponding route returns an appropriate status
 	// without executing agent actions.
 	onPromptSubmit  PromptSubmitFunc
+	onCompact       CompactFunc
+	onUndo          UndoFunc
+	onListMessages  MessageListFunc
+	onOAuthLogin    OAuthLoginFunc
+	onListTranscript TranscriptListFunc
 	sessionData     SessionDataProvider
 	cancelFunc      context.CancelFunc // for shutdown
 	tokenStore      *TokenStore
@@ -67,6 +95,13 @@ type Server struct {
 	security        *SecurityMiddleware
 	snapshotSvc     *SnapshotService
 	searchSvc       *SearchService
+
+	// WebSocket transport
+	wsRegistry    *transport.Registry
+	broadcaster   *transport.Broadcaster
+
+	// Config provider for model-catalog and config endpoints
+	configProvider ConfigProvider
 }
 
 // Config holds server configuration.
@@ -81,6 +116,31 @@ type ServerOption func(*Server)
 // WithPromptSubmit wires a prompt submission handler.
 func WithPromptSubmit(fn PromptSubmitFunc) ServerOption {
 	return func(s *Server) { s.onPromptSubmit = fn }
+}
+
+// WithCompact wires a compaction handler.
+func WithCompact(fn CompactFunc) ServerOption {
+	return func(s *Server) { s.onCompact = fn }
+}
+
+// WithUndo wires an undo handler.
+func WithUndo(fn UndoFunc) ServerOption {
+	return func(s *Server) { s.onUndo = fn }
+}
+
+// WithMessageList wires a message listing handler.
+func WithMessageList(fn MessageListFunc) ServerOption {
+	return func(s *Server) { s.onListMessages = fn }
+}
+
+// WithOAuthLogin wires an OAuth login handler.
+func WithOAuthLogin(fn OAuthLoginFunc) ServerOption {
+	return func(s *Server) { s.onOAuthLogin = fn }
+}
+
+// WithTranscriptList wires a transcript listing handler.
+func WithTranscriptList(fn TranscriptListFunc) ServerOption {
+	return func(s *Server) { s.onListTranscript = fn }
 }
 
 // WithCancelFunc provides a context cancel function for shutdown.
@@ -106,6 +166,11 @@ func WithSecurityConfig(cfg SecurityConfig) ServerOption {
 // WithWorkDir sets the server's working directory for file operations.
 func WithWorkDir(dir string) ServerOption {
 	return func(s *Server) { s.workDir = dir }
+}
+
+// WithConfigProvider wires a config provider for model-catalog and config endpoints.
+func WithConfigProvider(cp ConfigProvider) ServerOption {
+	return func(s *Server) { s.configProvider = cp }
 }
 
 // NewServer creates a new server.
@@ -146,6 +211,10 @@ func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger, opt
 	// Cache services to avoid per-request allocation (S2).
 	s.snapshotSvc = NewSnapshotService(sessionMgr)
 	s.searchSvc = NewSearchService(s.workDir)
+
+	// Initialize WebSocket transport
+	s.wsRegistry = transport.NewRegistry(logger)
+	s.broadcaster = transport.NewBroadcaster(s.wsRegistry, 1000, logger)
 
 	s.setupRoutes()
 	return s
@@ -208,6 +277,9 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("GET /api/v1/connections", s.handleListConnections)
 	s.mux.HandleFunc("GET /api/v1/workspaces", s.handleListWorkspaces)
 	s.mux.HandleFunc("POST /api/v1/workspaces", s.handleCreateWorkspace)
+
+	// WebSocket route
+	s.mux.HandleFunc("GET /api/v1/ws", transport.HandleWebSocket(s.wsRegistry, s.broadcaster, s.logger))
 }
 
 // Start starts the HTTP server.
@@ -411,8 +483,15 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	// Messages are stored in the audit/transcript store.
-	// A full message listing requires wiring the transcript reader; return empty for now.
+	if s.onListMessages != nil {
+		msgs, err := s.onListMessages(r.Context(), id)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, msgs)
+		return
+	}
 	respondJSON(w, http.StatusOK, []protocol.Message{})
 }
 
