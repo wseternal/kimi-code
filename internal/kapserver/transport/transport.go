@@ -486,7 +486,10 @@ func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.
 		go func() { errCh <- conn.writePump() }()
 		go func() { errCh <- conn.readPump(registry, broadcaster) }()
 
-		// Wait for either pump to finish.
+		// Wait for the first pump to finish, then close the TCP connection
+		// to force the other pump to exit, and wait for it.
+		<-errCh
+		wsconn.close() // close TCP to unblock the other pump
 		<-errCh
 		logger.Info("websocket connection closed", "conn_id", connID)
 	}

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,11 +27,16 @@ const (
 	opPong         = 0xA
 )
 
+// maxFrameSize is the maximum allowed WebSocket frame payload (1 MB).
+// Frames exceeding this are rejected to prevent OOM from malicious clients.
+const maxFrameSize = 1 << 20
+
 // wsConn wraps a hijacked TCP connection with WebSocket frame I/O.
 type wsConn struct {
 	conn   net.Conn
 	rw     *bufio.ReadWriter
 	closed bool
+	writeMu sync.Mutex // serializes all writes to prevent concurrent frame corruption
 }
 
 // upgradeWebSocket performs the server-side WebSocket handshake.
@@ -79,7 +85,10 @@ func upgradeWebSocket(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 }
 
 // writeFrame writes a WebSocket frame (server frames are NOT masked per RFC 6455 §5.1).
+// All writes are serialized via writeMu to prevent concurrent corruption.
 func (wc *wsConn) writeFrame(opcode byte, payload []byte) error {
+	wc.writeMu.Lock()
+	defer wc.writeMu.Unlock()
 	if wc.closed {
 		return errors.New("connection closed")
 	}
@@ -161,6 +170,16 @@ func (wc *wsConn) readFrame() (byte, []byte, error) {
 			return 0, nil, err
 		}
 		length = binary.BigEndian.Uint64(buf)
+	}
+
+	// Reject oversized frames to prevent OOM.
+	if length > maxFrameSize {
+		return 0, nil, fmt.Errorf("frame too large: %d bytes (max %d)", length, maxFrameSize)
+	}
+
+	// RFC 6455 §5.1: client-to-server frames MUST be masked.
+	if !masked && (opcode == opText || opcode == opBinary || opcode == opContinuation) {
+		return 0, nil, errors.New("client frame not masked per RFC 6455")
 	}
 
 	// Read mask key if present (client frames are always masked).

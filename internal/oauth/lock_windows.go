@@ -16,8 +16,8 @@ func flockExclusive(f *os.File) error {
 	var overlapped windows.Overlapped
 	// LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY
 	const flags = windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY
-	// Lock the entire file (high+low = 0 means lock from current offset to EOF).
-	err := windows.LockFileEx(handle, flags, 0, 1, 0, &overlapped)
+	// Lock the maximum possible range to cover the entire file.
+	err := windows.LockFileEx(handle, flags, 0, 0xFFFFFFFF, 0xFFFFFFFF, &overlapped)
 	if err != nil {
 		return err
 	}
@@ -28,5 +28,5 @@ func flockExclusive(f *os.File) error {
 func flockUnlock(f *os.File) {
 	handle := windows.Handle(f.Fd())
 	var overlapped windows.Overlapped
-	windows.UnlockFileEx(handle, 0, 1, 0, &overlapped)
+	_ = windows.UnlockFileEx(handle, 0, 0xFFFFFFFF, 0xFFFFFFFF, &overlapped)
 }

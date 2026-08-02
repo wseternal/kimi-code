@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
@@ -301,6 +302,9 @@ func (s *Server) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 			respondError(w, 404, protocol.ErrorCodeApprovalNotFound, err.Error())
 			return
 		}
+	} else {
+		respondError(w, 501, protocol.ErrorCodeInternalError, "approval resolution not configured")
+		return
 	}
 	respondJSON(w, 200, map[string]string{"status": "resolved"})
 }
@@ -342,6 +346,9 @@ func (s *Server) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 			respondError(w, 404, protocol.ErrorCodeQuestionNotFound, err.Error())
 			return
 		}
+	} else {
+		respondError(w, 501, protocol.ErrorCodeInternalError, "question resolution not configured")
+		return
 	}
 	respondJSON(w, 200, map[string]string{"status": "resolved"})
 }
@@ -432,6 +439,7 @@ func (s *Server) handleListTranscript(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBrowseFS browses the filesystem for a session's working directory.
+// Paths are restricted to the server's working directory to prevent traversal.
 func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	_, ok := s.sessionManager.Get(id)
@@ -439,11 +447,19 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
+	workdir, _ := os.Getwd()
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		path = "."
 	}
-	entries, err := os.ReadDir(path)
+	// Resolve the requested path relative to workdir and enforce containment.
+	resolved := filepath.Clean(filepath.Join(workdir, path))
+	cleanWorkdir := filepath.Clean(workdir)
+	if resolved != cleanWorkdir && !strings.HasPrefix(resolved, cleanWorkdir+string(os.PathSeparator)) {
+		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "path outside working directory")
+		return
+	}
+	entries, err := os.ReadDir(resolved)
 	if err != nil {
 		respondError(w, 500, protocol.ErrorCodeInternalError, err.Error())
 		return
@@ -455,7 +471,7 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		items = append(items, rest.FileInfo{
-			Path:     filepath.Join(path, e.Name()),
+			Path:     filepath.Join(resolved, e.Name()),
 			Size:     int(info.Size()),
 			IsDir:    e.IsDir(),
 			Modified: info.ModTime().Format(time.RFC3339),
