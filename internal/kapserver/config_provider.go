@@ -1,6 +1,8 @@
 package kapserver
 
 import (
+	"sort"
+
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/protocol/rest"
 )
@@ -15,7 +17,7 @@ func NewConfigProvider(cfg *config.Config) ConfigProvider {
 	return &configProviderAdapter{cfg: cfg}
 }
 
-// ListModels returns all configured models as catalog items.
+// ListModels returns all configured models as catalog items, sorted by ID.
 func (a *configProviderAdapter) ListModels() []rest.ModelCatalogItem {
 	items := make([]rest.ModelCatalogItem, 0, len(a.cfg.Models))
 	for name, m := range a.cfg.Models {
@@ -33,15 +35,17 @@ func (a *configProviderAdapter) ListModels() []rest.ModelCatalogItem {
 		}
 		items = append(items, item)
 	}
+	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	return items
 }
 
-// ListProviders returns all configured provider names.
+// ListProviders returns all configured provider names, sorted.
 func (a *configProviderAdapter) ListProviders() []string {
 	names := make([]string, 0, len(a.cfg.Providers))
 	for name := range a.cfg.Providers {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 

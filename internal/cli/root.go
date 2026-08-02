@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -361,7 +363,10 @@ func (a *App) runHeadless(opts CLIOptions) error {
 	cwd, _ := os.Getwd()
 
 	// Load agent profile if specified
-	agentProfile := a.loadAgentProfile(opts)
+	agentProfile, err := a.loadAgentProfile(opts)
+	if err != nil {
+		return err
+	}
 
 	// Resolve provider from config
 	if !providers.IsConfigured(a.Config) {
@@ -452,7 +457,9 @@ func (a *App) runHeadless(opts CLIOptions) error {
 		})
 	}
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	var history []kosong.Message
 	history = append(history, kosong.CreateUserMessage(opts.Prompt))
 
@@ -625,26 +632,25 @@ func (a *App) switchAuditStore(sessionID, home string) {
 }
 
 // loadAgentProfile loads an agent profile from CLI flags.
-// Returns nil if no profile is specified.
-func (a *App) loadAgentProfile(opts CLIOptions) *profile.AgentProfile {
+// Returns nil if no profile is specified. Returns an error if the
+// specified profile cannot be loaded.
+func (a *App) loadAgentProfile(opts CLIOptions) (*profile.AgentProfile, error) {
 	if opts.AgentFile != "" {
 		p, err := profile.Load(opts.AgentFile)
 		if err != nil {
-			slog.Warn("failed to load agent profile from file", "path", opts.AgentFile, "error", err)
-			return nil
+			return nil, fmt.Errorf("load agent profile from %s: %w", opts.AgentFile, err)
 		}
 		slog.Info("loaded agent profile", "name", p.Name, "source", opts.AgentFile)
-		return p
+		return p, nil
 	}
 	if opts.Agent != "" {
 		home, _ := os.UserHomeDir()
 		p, err := profile.LoadNamed(opts.Agent, home)
 		if err != nil {
-			slog.Warn("failed to load named agent profile", "name", opts.Agent, "error", err)
-			return nil
+			return nil, fmt.Errorf("load agent profile %q: %w", opts.Agent, err)
 		}
 		slog.Info("loaded agent profile", "name", p.Name)
-		return p
+		return p, nil
 	}
-	return nil
+	return nil, nil
 }

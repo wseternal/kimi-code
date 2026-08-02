@@ -83,9 +83,17 @@ func loadMarkdown(path string) (*AgentProfile, error) {
 			// Simple YAML-like parsing for known fields
 			for _, line := range strings.Split(frontmatter, "\n") {
 				line = strings.TrimSpace(line)
+				// Skip comments and empty lines
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
 				if idx := strings.Index(line, ":"); idx > 0 {
 					key := strings.TrimSpace(line[:idx])
 					value := strings.TrimSpace(line[idx+1:])
+					// Strip inline comments
+					if ci := strings.Index(value, " #"); ci > 0 {
+						value = strings.TrimSpace(value[:ci])
+					}
 					value = strings.Trim(value, "\"'")
 					switch key {
 					case "name":

@@ -86,11 +86,12 @@ func sanitize(s string) string {
 }
 
 // RegisterServerTools discovers tools from an MCP server and registers
-// them into the given tool registry. Returns the number of tools registered.
-func RegisterServerTools(ctx context.Context, client Client, serverName string, registry *tools.Registry, enabledTools []string) (int, error) {
+// them into the given tool registry. Returns the tool definitions and the
+// number of tools registered.
+func RegisterServerTools(ctx context.Context, client Client, serverName string, registry *tools.Registry, enabledTools []string) ([]ToolDefinition, int, error) {
 	defs, err := client.ListTools(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("list tools from %s: %w", serverName, err)
+		return nil, 0, fmt.Errorf("list tools from %s: %w", serverName, err)
 	}
 
 	// Build enabled set for filtering
@@ -109,5 +110,5 @@ func RegisterServerTools(ctx context.Context, client Client, serverName string, 
 		registry.Register(adapter)
 		count++
 	}
-	return count, nil
+	return defs, count, nil
 }

@@ -90,14 +90,11 @@ func (m *Manager) Connect(ctx context.Context, name string, cfg config.McpServer
 	}
 
 	// Discover and register tools
-	count, err := RegisterServerTools(ctx, client, name, registry, cfg.EnabledTools)
+	defs, count, err := RegisterServerTools(ctx, client, name, registry, cfg.EnabledTools)
 	if err != nil {
 		m.setError(name, err)
 		return 0, err
 	}
-
-	// Fetch tool list for status tracking
-	defs, _ := client.ListTools(ctx)
 
 	m.mu.Lock()
 	state.Client = client

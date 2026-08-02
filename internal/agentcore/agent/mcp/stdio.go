@@ -142,11 +142,15 @@ func (c *StdioClient) Initialize(ctx context.Context) error {
 		c.logger.Warn("mcp: failed to send initialized notification", "error", err)
 	}
 
-	c.logger.Info("mcp: initialized",
-		"server", c.serverInfo.Name,
-		"version", c.serverInfo.Version,
-		"command", c.command,
-	)
+	if c.serverInfo != nil {
+		c.logger.Info("mcp: initialized",
+			"server", c.serverInfo.Name,
+			"version", c.serverInfo.Version,
+			"command", c.command,
+		)
+	} else {
+		c.logger.Info("mcp: initialized", "command", c.command, "server", "unknown")
+	}
 
 	return nil
 }
@@ -215,6 +219,9 @@ func (c *StdioClient) cleanup() error {
 		c.stdin = nil
 	}
 	if c.cmd != nil && c.cmd.Process != nil {
+		if c.stderr.Len() > 0 {
+			c.logger.Debug("mcp: server stderr", "output", c.stderr.String())
+		}
 		_ = c.cmd.Process.Kill()
 		_ = c.cmd.Wait()
 		c.cmd = nil
@@ -288,16 +295,9 @@ func (c *StdioClient) sendNotification(method string, params interface{}) error 
 // readResponse reads JSON-RPC responses until we get one matching our ID.
 func (c *StdioClient) readResponse(ctx context.Context, expectedID int64) (json.RawMessage, error) {
 	for {
-		// Check context timeout
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("mcp: timeout: %w", ctx.Err())
-		default:
-		}
-
-		line, err := c.stdout.ReadBytes('\n')
+		line, err := c.readLineWithContext(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("mcp: read from stdout: %w", err)
+			return nil, err
 		}
 
 		line = []byte(strings.TrimSpace(string(line)))
@@ -330,5 +330,27 @@ func (c *StdioClient) readResponse(ctx context.Context, expectedID int64) (json.
 		}
 
 		return resp.Result, nil
+	}
+}
+
+// readLineWithContext reads a line from stdout, racing against context cancellation.
+func (c *StdioClient) readLineWithContext(ctx context.Context) ([]byte, error) {
+	type readResult struct {
+		line []byte
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		line, err := c.stdout.ReadBytes('\n')
+		ch <- readResult{line, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("mcp: timeout: %w", ctx.Err())
+	case res := <-ch:
+		if res.err != nil {
+			return nil, fmt.Errorf("mcp: read from stdout: %w", res.err)
+		}
+		return res.line, nil
 	}
 }
