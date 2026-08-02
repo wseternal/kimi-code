@@ -97,7 +97,7 @@ func NewTracker() *Tracker { return &Tracker{} }
 // ── Queue Operations ──
 
 // QueueGoal adds a goal to the pending queue.
-func (t *Tracker) QueueGoal(objective, completionCriterion string, budget BudgetLimits) *QueuedGoal {
+func (t *Tracker) QueueGoal(objective, completionCriterion string, budget BudgetLimits) QueuedGoal {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	q := QueuedGoal{
@@ -108,7 +108,7 @@ func (t *Tracker) QueueGoal(objective, completionCriterion string, budget Budget
 		QueuedAt:            time.Now(),
 	}
 	t.queue = append(t.queue, q)
-	return &t.queue[len(t.queue)-1]
+	return q
 }
 
 // ListQueue returns all queued goals.
