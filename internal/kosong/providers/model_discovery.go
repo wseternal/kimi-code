@@ -65,7 +65,7 @@ func ListProviderModels(ctx context.Context, cfg *config.Config) ([]DiscoveredMo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("models endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
 

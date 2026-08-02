@@ -208,6 +208,8 @@ func (wc *wsConn) readFrame() (byte, []byte, error) {
 
 // close closes the underlying TCP connection.
 func (wc *wsConn) close() {
+	wc.writeMu.Lock()
+	defer wc.writeMu.Unlock()
 	if wc.closed {
 		return
 	}

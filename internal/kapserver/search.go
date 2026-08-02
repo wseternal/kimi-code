@@ -2,6 +2,7 @@ package kapserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +49,18 @@ func (s *SearchService) Search(q SearchQuery) (*SearchResponse, error) {
 	searchPath := q.Path
 	if searchPath == "" {
 		searchPath = s.workDir
+	}
+	// Containment check: search path must be within workDir.
+	absSearch, err := filepath.Abs(searchPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve search path: %w", err)
+	}
+	absWork, err := filepath.Abs(s.workDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve work dir: %w", err)
+	}
+	if absSearch != absWork && !strings.HasPrefix(absSearch, absWork+string(filepath.Separator)) {
+		return nil, fmt.Errorf("search path %q is outside working directory", searchPath)
 	}
 
 	args := []string{
