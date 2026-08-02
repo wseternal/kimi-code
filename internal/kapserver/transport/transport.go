@@ -411,7 +411,7 @@ func (b *Broadcaster) Journal() *EventJournal {
 }
 
 // HandleWebSocket handles a WebSocket upgrade request.
-// Note: This is a stub. Real implementation would use nhooyr.io/websocket or gorilla/websocket.
+// Uses a simplified implementation; for production use consider nhooyr.io/websocket or gorilla/websocket.
 func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.Logger) http.HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()

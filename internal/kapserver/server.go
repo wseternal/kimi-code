@@ -114,6 +114,28 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("POST /api/v1/sessions/{id}/search", s.handleSearch)
 	s.mux.HandleFunc("GET /api/v1/sessions/{id}/snapshot", s.handleSnapshot)
 	s.mux.HandleFunc("GET /api/v1/sessions/{id}/export", s.handleSessionExport)
+
+	// Approval & question routes
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/approvals", s.handleListApprovals)
+	s.mux.HandleFunc("POST /api/v1/sessions/{id}/approvals/{approval_id}", s.handleResolveApproval)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/questions", s.handleListQuestions)
+	s.mux.HandleFunc("POST /api/v1/sessions/{id}/questions/{question_id}", s.handleResolveQuestion)
+
+	// Session sub-resource routes
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/tasks", s.handleListTasks)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/tools", s.handleListTools)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/terminals", s.handleListTerminals)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/skills", s.handleListSkills)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/transcript", s.handleListTranscript)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/fs", s.handleBrowseFS)
+
+	// Global routes
+	s.mux.HandleFunc("GET /api/v1/model-catalog", s.handleModelCatalog)
+	s.mux.HandleFunc("GET /api/v1/oauth/status", s.handleOAuthStatus)
+	s.mux.HandleFunc("POST /api/v1/oauth/login", s.handleOAuthLogin)
+	s.mux.HandleFunc("GET /api/v1/connections", s.handleListConnections)
+	s.mux.HandleFunc("GET /api/v1/workspaces", s.handleListWorkspaces)
+	s.mux.HandleFunc("POST /api/v1/workspaces", s.handleCreateWorkspace)
 }
 
 // Start starts the HTTP server.
