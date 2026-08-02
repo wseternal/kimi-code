@@ -3,27 +3,29 @@
 **Autonomy rule:** When running with skill `as-goal`, always proceed autonomously to the next iteration/task without stopping to ask.
 
 - **Goal file:** docs/as-goals/ts-go-migration.md
-- **Current phase:** 3
-- **Iteration:** 0/10
+- **Current phase:** DONE
+- **Iteration:** 1/10
 
 ## Gate Dashboard
 
 | Gate | Status | Last Evaluated |
 |------|--------|----------------|
-| MCP HTTP/SSE Transport | Pending | - |
-| WebSearch Tool | Pending | - |
-| Shell Mode & Autocomplete | Pending | - |
-| Goal Tools Complete | Pending | - |
-| Upgrade System | Pending | - |
-| Build & Test Clean | Pending | - |
+| MCP HTTP/SSE Transport | Pass | Iteration 1 |
+| WebSearch Tool | Pass | Iteration 1 |
+| Shell Mode & Autocomplete | Pass | Iteration 1 |
+| Goal Tools Complete | Pass | Iteration 1 |
+| Upgrade System | Pass | Iteration 1 |
+| Build & Test Clean | Pass | Iteration 1 |
 
 ## Iteration Log
 
 | Iteration | Decision | Gates | Commits | Artifacts |
 |-----------|----------|-------|---------|-----------|
+| 1 | DONE | 6/6 | `1af029d`, `2ab3c0c` | [plan](1/plan.md) / [review](1/review.md) / [manifest](1/evidence-manifest.md) |
 
 ## Open Defects
 
+None.
+
 ## Next Actions
-- [ ] Phase 3: Define exit gates
-- [ ] Phase 4: Begin iteration 1
+- None (goal achieved)
