@@ -299,8 +299,8 @@ func (w *statusResponseWriter) WriteHeader(code int) {
 	if !w.wroteHeader {
 		w.statusCode = code
 		w.wroteHeader = true
+		w.ResponseWriter.WriteHeader(code)
 	}
-	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *statusResponseWriter) Write(b []byte) (int, error) {

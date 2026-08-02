@@ -159,33 +159,27 @@ func applyStepUpsert(state *Snapshot, op Operation) ApplyResult {
 	if op.Step == nil {
 		return ApplyResult{State: state, Changed: false}
 	}
-	turns := make([]TranscriptTurn, len(state.Turns))
-	copy(turns, state.Turns)
+	s := copySnapshot(state)
 	found := false
-	for i, t := range turns {
+	for i, t := range s.Turns {
 		if t.ID == op.Step.TurnID {
-			steps := make([]TranscriptStep, len(t.Steps))
-			copy(steps, t.Steps)
-			for j, st := range steps {
+			for j, st := range s.Turns[i].Steps {
 				if st.ID == op.Step.ID {
-					steps[j] = *op.Step
+					s.Turns[i].Steps[j] = *op.Step
 					found = true
 					break
 				}
 			}
 			if !found {
-				steps = append(steps, *op.Step)
+				s.Turns[i].Steps = append(s.Turns[i].Steps, *op.Step)
 				found = true
 			}
-			turns[i].Steps = steps
 			break
 		}
 	}
 	if !found {
 		return ApplyResult{State: state, Changed: false}
 	}
-	s := copySnapshot(state)
-	s.Turns = turns
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -193,21 +187,18 @@ func applyFrameUpsert(state *Snapshot, op Operation) ApplyResult {
 	if op.Frame == nil {
 		return ApplyResult{State: state, Changed: false}
 	}
-	frames := make([]Frame, len(state.Frames))
-	copy(frames, state.Frames)
+	s := copySnapshot(state)
 	found := false
-	for i, f := range frames {
+	for i, f := range s.Frames {
 		if f.ID == op.Frame.ID {
-			frames[i] = *op.Frame
+			s.Frames[i] = *op.Frame
 			found = true
 			break
 		}
 	}
 	if !found {
-		frames = append(frames, *op.Frame)
+		s.Frames = append(s.Frames, *op.Frame)
 	}
-	s := copySnapshot(state)
-	s.Frames = frames
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -215,24 +206,23 @@ func applyAppend(state *Snapshot, op Operation) ApplyResult {
 	if op.FrameID == "" || op.Content == "" {
 		return ApplyResult{State: state, Changed: false}
 	}
-	frames := make([]Frame, len(state.Frames))
-	copy(frames, state.Frames)
+	s := copySnapshot(state)
 	found := false
-	for i, f := range frames {
+	for i, f := range s.Frames {
 		if f.ID == op.FrameID {
 			found = true
 			switch f.Kind {
 			case FrameText:
-				if f.Text != nil {
-					t := *f.Text
+				if s.Frames[i].Text != nil {
+					t := *s.Frames[i].Text
 					t.Content += op.Content
-					frames[i].Text = &t
+					s.Frames[i].Text = &t
 				}
 			case FrameThinking:
-				if f.Thinking != nil {
-					t := *f.Thinking
+				if s.Frames[i].Thinking != nil {
+					t := *s.Frames[i].Thinking
 					t.Content += op.Content
-					frames[i].Thinking = &t
+					s.Frames[i].Thinking = &t
 				}
 			}
 			break
@@ -241,8 +231,6 @@ func applyAppend(state *Snapshot, op Operation) ApplyResult {
 	if !found {
 		return ApplyResult{State: state, Changed: false}
 	}
-	s := copySnapshot(state)
-	s.Frames = frames
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -250,24 +238,21 @@ func applyItemUpsert(state *Snapshot, op Operation) ApplyResult {
 	if op.Item == nil {
 		return ApplyResult{State: state, Changed: false}
 	}
-	items := make([]TranscriptItem, len(state.Items))
-	copy(items, state.Items)
-	// W1 fix: find-and-replace by identity (TurnID + Marker/TaskRef match) before appending.
+	s := copySnapshot(state)
+	// W1 fix: find-and-replace by identity before appending.
 	found := false
-	for i, item := range items {
+	for i, item := range s.Items {
 		if item.TurnID == op.Item.TurnID &&
 			((item.Marker != nil && op.Item.Marker != nil && item.Marker.Kind == op.Item.Marker.Kind) ||
 				(item.TaskRef != nil && op.Item.TaskRef != nil && item.TaskRef.TaskID == op.Item.TaskRef.TaskID)) {
-			items[i] = *op.Item
+			s.Items[i] = *op.Item
 			found = true
 			break
 		}
 	}
 	if !found {
-		items = append(items, *op.Item)
+		s.Items = append(s.Items, *op.Item)
 	}
-	s := copySnapshot(state)
-	s.Items = items
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -275,21 +260,18 @@ func applyTaskUpsert(state *Snapshot, op Operation) ApplyResult {
 	if op.Task == nil {
 		return ApplyResult{State: state, Changed: false}
 	}
-	tasks := make([]TranscriptTask, len(state.Tasks))
-	copy(tasks, state.Tasks)
+	s := copySnapshot(state)
 	found := false
-	for i, t := range tasks {
+	for i, t := range s.Tasks {
 		if t.ID == op.Task.ID {
-			tasks[i] = *op.Task
+			s.Tasks[i] = *op.Task
 			found = true
 			break
 		}
 	}
 	if !found {
-		tasks = append(tasks, *op.Task)
+		s.Tasks = append(s.Tasks, *op.Task)
 	}
-	s := copySnapshot(state)
-	s.Tasks = tasks
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -297,21 +279,18 @@ func applyInteractionUpsert(state *Snapshot, op Operation) ApplyResult {
 	if op.Interaction == nil {
 		return ApplyResult{State: state, Changed: false}
 	}
-	interactions := make([]TranscriptInteraction, len(state.Interactions))
-	copy(interactions, state.Interactions)
+	s := copySnapshot(state)
 	found := false
-	for i, in := range interactions {
+	for i, in := range s.Interactions {
 		if in.ID == op.Interaction.ID {
-			interactions[i] = *op.Interaction
+			s.Interactions[i] = *op.Interaction
 			found = true
 			break
 		}
 	}
 	if !found {
-		interactions = append(interactions, *op.Interaction)
+		s.Interactions = append(s.Interactions, *op.Interaction)
 	}
-	s := copySnapshot(state)
-	s.Interactions = interactions
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -319,19 +298,16 @@ func applyInteractionResolve(state *Snapshot, op Operation) ApplyResult {
 	if op.InteractionID == "" {
 		return ApplyResult{State: state, Changed: false}
 	}
-	interactions := make([]TranscriptInteraction, len(state.Interactions))
-	copy(interactions, state.Interactions)
+	s := copySnapshot(state)
 	now := time.Now()
-	for i, in := range interactions {
+	for i, in := range s.Interactions {
 		if in.ID == op.InteractionID {
-			interactions[i].Resolved = true
-			interactions[i].Response = op.Response
-			interactions[i].ResolvedAt = &now
+			s.Interactions[i].Resolved = true
+			s.Interactions[i].Response = op.Response
+			s.Interactions[i].ResolvedAt = &now
 			break
 		}
 	}
-	s := copySnapshot(state)
-	s.Interactions = interactions
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -339,21 +315,18 @@ func applyAttachmentUpsert(state *Snapshot, op Operation) ApplyResult {
 	if op.Attachment == nil {
 		return ApplyResult{State: state, Changed: false}
 	}
-	attachments := make([]TranscriptAttachment, len(state.Attachments))
-	copy(attachments, state.Attachments)
+	s := copySnapshot(state)
 	found := false
-	for i, a := range attachments {
+	for i, a := range s.Attachments {
 		if a.ID == op.Attachment.ID {
-			attachments[i] = *op.Attachment
+			s.Attachments[i] = *op.Attachment
 			found = true
 			break
 		}
 	}
 	if !found {
-		attachments = append(attachments, *op.Attachment)
+		s.Attachments = append(s.Attachments, *op.Attachment)
 	}
-	s := copySnapshot(state)
-	s.Attachments = attachments
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -361,21 +334,18 @@ func applyPromptUpsert(state *Snapshot, op Operation) ApplyResult {
 	if op.Prompt == nil {
 		return ApplyResult{State: state, Changed: false}
 	}
-	prompts := make([]TranscriptPrompt, len(state.Prompts))
-	copy(prompts, state.Prompts)
+	s := copySnapshot(state)
 	found := false
-	for i, p := range prompts {
+	for i, p := range s.Prompts {
 		if p.ID == op.Prompt.ID {
-			prompts[i] = *op.Prompt
+			s.Prompts[i] = *op.Prompt
 			found = true
 			break
 		}
 	}
 	if !found {
-		prompts = append(prompts, *op.Prompt)
+		s.Prompts = append(s.Prompts, *op.Prompt)
 	}
-	s := copySnapshot(state)
-	s.Prompts = prompts
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -430,14 +400,14 @@ func applyItemsRemove(state *Snapshot, op Operation) ApplyResult {
 	for _, idx := range op.ItemIndices {
 		removeSet[idx] = true
 	}
-	items := make([]TranscriptItem, 0, len(state.Items))
-	for i, item := range state.Items {
+	s := copySnapshot(state)
+	kept := make([]TranscriptItem, 0, len(s.Items))
+	for i, item := range s.Items {
 		if !removeSet[i] {
-			items = append(items, item)
+			kept = append(kept, item)
 		}
 	}
-	s := copySnapshot(state)
-	s.Items = items
+	s.Items = kept
 	return ApplyResult{State: s, Changed: true}
 }
 

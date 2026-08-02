@@ -480,7 +480,7 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 		// S6 fix: return paths relative to workdir to avoid leaking server structure.
 		relPath, err := filepath.Rel(cleanWorkdir, entryPath)
 		if err != nil {
-			relPath = entryPath
+			continue // R5 fix: skip entries that can't be made relative
 		}
 		fi := rest.FileInfo{
 			Path:  relPath,
@@ -562,6 +562,21 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	if absPath != absWork && !strings.HasPrefix(absPath, absWork+string(filepath.Separator)) {
 		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "workspace path outside working directory")
+		return
+	}
+	// R1 fix: resolve symlinks and re-validate (same as handleBrowseFS).
+	realPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "cannot resolve path")
+		return
+	}
+	realWork, err := filepath.EvalSymlinks(absWork)
+	if err != nil {
+		respondError(w, 500, protocol.ErrorCodeInternalError, "cannot resolve working directory")
+		return
+	}
+	if realPath != realWork && !strings.HasPrefix(realPath, realWork+string(filepath.Separator)) {
+		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "workspace path resolves outside working directory")
 		return
 	}
 	respondJSON(w, 201, rest.Workspace{ID: req.Name, Name: req.Name, Path: req.Path})

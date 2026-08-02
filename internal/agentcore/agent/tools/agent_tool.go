@@ -129,6 +129,8 @@ func (t *AgentTool) Execute(ctx context.Context, input json.RawMessage, exec Exe
 		return &Result{Output: fmt.Sprintf("Sub-agent %s timed out or cancelled. Check status via roster.", id)}, nil
 	case <-doneCh:
 		result, ok := t.Roster.GetResult(id)
+		// R3 fix: cleanup roster entry after collecting result.
+		t.Roster.Cleanup(id)
 		if !ok {
 			return &Result{Output: fmt.Sprintf("Sub-agent %s not found.", id), IsError: true}, nil
 		}
