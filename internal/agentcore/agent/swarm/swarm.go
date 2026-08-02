@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,14 +62,19 @@ type Roster struct {
 	done     map[string]chan struct{} // per-subagent completion channels
 	nextID   atomic.Int64
 	onChange func(roster *Roster)
+	logger   *slog.Logger
 }
 
 // NewRoster creates a sub-agent roster.
-func NewRoster(onChange func(*Roster)) *Roster {
+func NewRoster(onChange func(*Roster), logger *slog.Logger) *Roster {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Roster{
 		agents:   make(map[string]*Subagent),
 		done:     make(map[string]chan struct{}),
 		onChange: onChange,
+		logger:   logger,
 	}
 }
 
@@ -114,6 +120,7 @@ func (r *Roster) runAgent(ctx context.Context, sa *Subagent) {
 	r.mu.Lock()
 	sa.Result.Status = SubagentRunning
 	r.mu.Unlock()
+	r.logger.Info("sub-agent started", "id", sa.Config.ID, "prompt_len", len(sa.Config.Prompt))
 	r.notifyChange()
 
 	// Wait for context cancellation (abort/timeout) or completion signal
@@ -124,6 +131,7 @@ func (r *Roster) runAgent(ctx context.Context, sa *Subagent) {
 		sa.Result.Status = SubagentAborted
 		sa.Result.EndedAt = time.Now()
 		sa.Result.Error = ctx.Err().Error()
+		r.logger.Warn("sub-agent aborted", "id", sa.Config.ID, "reason", ctx.Err())
 	}
 	r.mu.Unlock()
 	r.signalDone(sa.Config.ID)
@@ -219,6 +227,9 @@ func (r *Roster) Complete(subagentID, output string) {
 		sa.Result.EndedAt = time.Now()
 	}
 	r.mu.Unlock()
+	if ok {
+		r.logger.Info("sub-agent completed", "id", subagentID, "output_len", len(output))
+	}
 	r.signalDone(subagentID)
 	r.notifyChange()
 }
@@ -233,6 +244,9 @@ func (r *Roster) Fail(subagentID, errMsg string) {
 		sa.Result.EndedAt = time.Now()
 	}
 	r.mu.Unlock()
+	if ok {
+		r.logger.Error("sub-agent failed", "id", subagentID, "error", errMsg)
+	}
 	r.signalDone(subagentID)
 	r.notifyChange()
 }
@@ -244,10 +258,10 @@ func (r *Roster) notifyChange() {
 }
 
 // signalDone closes the done channel for a sub-agent, unblocking WaitDone callers.
+// Uses exclusive Lock to prevent concurrent close panic (C1 fix).
 func (r *Roster) signalDone(subagentID string) {
-	r.mu.RLock()
+	r.mu.Lock()
 	ch, ok := r.done[subagentID]
-	r.mu.RUnlock()
 	if ok {
 		select {
 		case <-ch:
@@ -256,6 +270,16 @@ func (r *Roster) signalDone(subagentID string) {
 			close(ch)
 		}
 	}
+	r.mu.Unlock()
+}
+
+// Cleanup removes a sub-agent from the roster, freeing memory (C4 fix).
+// Call after the sub-agent reaches a terminal state and results have been collected.
+func (r *Roster) Cleanup(subagentID string) {
+	r.mu.Lock()
+	delete(r.agents, subagentID)
+	delete(r.done, subagentID)
+	r.mu.Unlock()
 }
 
 // WaitDone returns a channel that is closed when the sub-agent reaches
@@ -283,7 +307,7 @@ type AgentSwarmTool struct {
 // NewAgentSwarmTool creates an AgentSwarm tool.
 func NewAgentSwarmTool(roster *Roster) *AgentSwarmTool {
 	if roster == nil {
-		roster = NewRoster(nil)
+		roster = NewRoster(nil, nil)
 	}
 	return &AgentSwarmTool{roster: roster}
 }

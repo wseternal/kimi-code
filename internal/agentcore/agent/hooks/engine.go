@@ -2,20 +2,24 @@ package hooks
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"regexp"
 	"sync"
 )
 
 // Engine manages hook definitions and executes them at lifecycle events.
 type Engine struct {
-	mu    sync.RWMutex
-	hooks []HookDef
+	mu     sync.RWMutex
+	hooks  []HookDef
+	logger *slog.Logger
 }
 
 // NewEngine creates a hook engine from the given hook definitions.
-func NewEngine(defs []HookDef) *Engine {
-	return &Engine{hooks: defs}
+func NewEngine(defs []HookDef, logger *slog.Logger) *Engine {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Engine{hooks: defs, logger: logger}
 }
 
 // Trigger fires all matching hooks for the given event and returns all results.
@@ -32,7 +36,11 @@ func (e *Engine) Trigger(ctx context.Context, event EventType, input HookInput) 
 		input.Matcher = def.Matcher
 		result := RunHook(ctx, def, input)
 		if result.Err != nil {
-			log.Printf("hooks: %s hook %q failed: %v", event, def.Command, result.Err)
+			e.logger.Error("hook failed", "event", event, "command", def.Command, "error", result.Err)
+		} else if result.Blocked {
+			e.logger.Info("hook blocked", "event", event, "command", def.Command, "reason", result.Reason)
+		} else {
+			e.logger.Debug("hook executed", "event", event, "command", def.Command, "exit_code", result.ExitCode, "duration_ms", result.Duration.Milliseconds())
 		}
 		results = append(results, result)
 	}
@@ -54,6 +62,7 @@ func (e *Engine) TriggerBlock(ctx context.Context, event EventType, input HookIn
 		results = append(results, result)
 
 		if result.Blocked {
+			e.logger.Info("hook blocked", "event", event, "command", def.Command, "reason", result.Reason)
 			return BlockDecision{
 				Blocked: true,
 				Reason:  result.Reason,
@@ -61,7 +70,9 @@ func (e *Engine) TriggerBlock(ctx context.Context, event EventType, input HookIn
 			}
 		}
 		if result.Err != nil {
-			log.Printf("hooks: %s hook %q failed: %v", event, def.Command, result.Err)
+			e.logger.Error("hook failed", "event", event, "command", def.Command, "error", result.Err)
+		} else {
+			e.logger.Debug("hook executed", "event", event, "command", def.Command, "exit_code", result.ExitCode, "duration_ms", result.Duration.Milliseconds())
 		}
 	}
 	return BlockDecision{Results: results}
@@ -79,7 +90,9 @@ func (e *Engine) FireAndForget(ctx context.Context, event EventType, input HookI
 			input.Matcher = def.Matcher
 			result := RunHook(ctx, def, input)
 			if result.Err != nil {
-				log.Printf("hooks: %s hook %q failed: %v", event, def.Command, result.Err)
+				e.logger.Error("hook failed (async)", "event", event, "command", def.Command, "error", result.Err)
+			} else {
+				e.logger.Debug("hook executed (async)", "event", event, "command", def.Command, "exit_code", result.ExitCode, "duration_ms", result.Duration.Milliseconds())
 			}
 		}
 	}()

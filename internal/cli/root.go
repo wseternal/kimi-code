@@ -367,7 +367,7 @@ func (a *App) runHeadless(opts CLIOptions) error {
 	// Hook engine (from config)
 	var hookEng *hooks.Engine
 	if len(a.Config.Hooks) > 0 {
-		hookEng = hooks.NewEngine(a.Config.Hooks)
+		hookEng = hooks.NewEngine(a.Config.Hooks, nil)
 	}
 
 	// Discover skills

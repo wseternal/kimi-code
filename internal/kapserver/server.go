@@ -260,7 +260,17 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", requestID)
 
-		handler.ServeHTTP(w, r)
+		// S8 fix: access logging middleware.
+		start := time.Now()
+		rw := &statusResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		handler.ServeHTTP(rw, r)
+		s.logger.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.statusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"remote", r.RemoteAddr,
+		)
 	})
 }
 
@@ -276,6 +286,28 @@ func respondError(w http.ResponseWriter, status int, code int, msg string) {
 	env := protocol.ErrEnvelope(code, msg, w.Header().Get("X-Request-ID"))
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(env)
+}
+
+// statusResponseWriter captures the HTTP status code for access logging (S8 fix).
+type statusResponseWriter struct {
+	http.ResponseWriter
+	statusCode  int
+	wroteHeader bool
+}
+
+func (w *statusResponseWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.statusCode = code
+		w.wroteHeader = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 // Route handlers

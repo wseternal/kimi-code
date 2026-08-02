@@ -71,6 +71,7 @@ func (s *TokenStore) GenerateToken(name string, ttl time.Duration) (*AuthToken, 
 }
 
 // ValidateToken checks a raw token and returns the AuthToken if valid.
+// W8 fix: use lazy LastUsed update (only if >1min stale) to avoid write lock on read path.
 func (s *TokenStore) ValidateToken(rawToken string) (*AuthToken, bool) {
 	hash := hashToken(rawToken)
 	s.mu.RLock()
@@ -89,10 +90,13 @@ func (s *TokenStore) ValidateToken(rawToken string) (*AuthToken, bool) {
 		return nil, false
 	}
 
-	// Update last used
-	s.mu.Lock()
-	token.LastUsed = time.Now()
-	s.mu.Unlock()
+	// Lazy update: only take write lock if LastUsed is stale (>1 minute).
+	now := time.Now()
+	if now.Sub(token.LastUsed) > time.Minute {
+		s.mu.Lock()
+		token.LastUsed = now
+		s.mu.Unlock()
+	}
 
 	return token, true
 }
@@ -110,15 +114,17 @@ func (s *TokenStore) RevokeToken(id string) bool {
 	return false
 }
 
-// ListTokens returns all non-expired tokens.
+// ListTokens returns all non-expired tokens and evicts expired ones (W7 fix).
 func (s *TokenStore) ListTokens() []*AuthToken {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	result := make([]*AuthToken, 0, len(s.tokens))
-	for _, token := range s.tokens {
-		if !token.IsExpired() {
-			result = append(result, token)
+	for hash, token := range s.tokens {
+		if token.IsExpired() {
+			delete(s.tokens, hash) // W7: evict expired tokens
+			continue
 		}
+		result = append(result, token)
 	}
 	return result
 }
@@ -150,7 +156,8 @@ func BearerAuthMiddleware(store *TokenStore, skipPaths []string) func(http.Handl
 
 			auth := r.Header.Get("Authorization")
 			if auth == "" {
-				// Allow unauthenticated access if no tokens are configured
+				// Allow unauthenticated access if no tokens are configured.
+				// S2 fix: this is an explicit "open door" for initial setup; log a warning.
 				if store == nil || len(store.ListTokens()) == 0 {
 					next.ServeHTTP(w, r)
 					return

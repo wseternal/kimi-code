@@ -2,7 +2,6 @@ package kapserver
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,18 +53,13 @@ func (s *SnapshotService) Capture(sessionID string) (*rest.SessionSnapshot, erro
 }
 
 // CaptureWithMessages captures a snapshot including recent messages.
-func (s *SnapshotService) CaptureWithMessages(sessionID string, messageLimit int) (*rest.SessionSnapshot, error) {
+// S5 fix: removed unused messageLimit parameter; message fetching should use the transcript store.
+func (s *SnapshotService) CaptureWithMessages(sessionID string) (*rest.SessionSnapshot, error) {
 	snapshot, err := s.Capture(sessionID)
 	if err != nil {
 		return nil, err
 	}
-
-	// Messages are stored in the audit/transcript store, not in session memory.
-	// The message limit is respected for API consumers.
-	if messageLimit <= 0 {
-		messageLimit = 50
-	}
-
+	// Messages come from the transcript store, not session memory.
 	return snapshot, nil
 }
 
@@ -94,7 +88,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.searchSvc.Search(SearchQuery{
+	results, err := s.searchSvc.Search(r.Context(), SearchQuery{
 		Pattern: req.Query,
 		Limit:   req.Limit,
 	})
@@ -199,30 +193,23 @@ func (s *Server) handleSubmitPrompt(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCompactSession triggers compaction.
+// W5 fix: return 501 until actually wired to the agent loop.
 func (s *Server) handleCompactSession(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sess, ok := s.sessionManager.Get(id)
+	_, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	// Compaction is triggered at the session/agent level.
-	// The server signals intent; the actual compaction runs in the agent loop.
-	sess.SetStatus(session.StatusRunning)
-	respondJSON(w, 200, map[string]string{"status": "compaction_queued", "session_id": id})
+	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "compaction not yet implemented")
 }
 
 // handleUndoSession undoes the last N messages.
+// W5 fix: return 501 until actually wired to the agent loop.
 func (s *Server) handleUndoSession(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	_, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	// Undo is handled at the session/context-memory level.
-	// The server signals intent; the actual undo runs in the agent loop.
-	respondJSON(w, 200, map[string]string{"status": "undone", "session_id": id})
+	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "undo not yet implemented")
 }
 
 // handleArchiveSession archives a session.
@@ -461,7 +448,22 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "path outside working directory")
 		return
 	}
-	entries, err := os.ReadDir(resolved)
+	// C2b fix: resolve symlinks and re-validate containment.
+	resolvedReal, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "cannot resolve path")
+		return
+	}
+	workdirReal, err := filepath.EvalSymlinks(cleanWorkdir)
+	if err != nil {
+		respondError(w, 500, protocol.ErrorCodeInternalError, "cannot resolve working directory")
+		return
+	}
+	if resolvedReal != workdirReal && !strings.HasPrefix(resolvedReal, workdirReal+string(os.PathSeparator)) {
+		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "path resolves outside working directory")
+		return
+	}
+	entries, err := os.ReadDir(resolvedReal)
 	if err != nil {
 		respondError(w, 500, protocol.ErrorCodeInternalError, err.Error())
 		return
@@ -472,16 +474,26 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 		if len(items) >= maxEntries {
 			break
 		}
-		info, err := e.Info()
+		// N4 fix: use DirEntry.IsDir() directly (avoids stat for directory check).
+		isDir := e.IsDir()
+		entryPath := filepath.Join(resolved, e.Name())
+		// S6 fix: return paths relative to workdir to avoid leaking server structure.
+		relPath, err := filepath.Rel(cleanWorkdir, entryPath)
 		if err != nil {
-			continue
+			relPath = entryPath
 		}
-		items = append(items, rest.FileInfo{
-			Path:     filepath.Join(resolved, e.Name()),
-			Size:     int(info.Size()),
-			IsDir:    e.IsDir(),
-			Modified: info.ModTime().Format(time.RFC3339),
-		})
+		fi := rest.FileInfo{
+			Path:  relPath,
+			IsDir: isDir,
+		}
+		// Only stat if we need size/modtime (skip for directories).
+		if !isDir {
+			if info, err := e.Info(); err == nil {
+				fi.Size = int(info.Size())
+				fi.Modified = info.ModTime().Format(time.RFC3339)
+			}
+		}
+		items = append(items, fi)
 	}
 	respondJSON(w, 200, rest.ListFilesResponse{Items: items})
 }
@@ -501,17 +513,14 @@ func (s *Server) handleOAuthStatus(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleOAuthLogin initiates an OAuth device flow login.
-// TODO(W18): Wire OAuth manager to initiate real device flow.
+// W5 fix: return 501 until OAuth manager is wired.
 func (s *Server) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	var req rest.OAuthLoginRequest
 	if err := decodeJSON(r, &req); err != nil {
 		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid request")
 		return
 	}
-	respondJSON(w, 200, rest.OAuthLoginResponse{
-		AuthURL: "",
-		State:   fmt.Sprintf("oauth_%d", time.Now().UnixNano()),
-	})
+	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "OAuth login not yet implemented")
 }
 
 // handleListConnections returns active WebSocket connections.
@@ -529,10 +538,30 @@ func (s *Server) handleListWorkspaces(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleCreateWorkspace creates a new workspace.
+// W6 fix: validate path is within server workdir.
 func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	var req rest.CreateWorkspaceRequest
 	if err := decodeJSON(r, &req); err != nil {
 		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid request")
+		return
+	}
+	// Containment check: workspace path must be within server workDir.
+	workdir := s.workDir
+	if workdir == "" {
+		workdir, _ = os.Getwd()
+	}
+	absPath, err := filepath.Abs(req.Path)
+	if err != nil {
+		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid path")
+		return
+	}
+	absWork, err := filepath.Abs(workdir)
+	if err != nil {
+		respondError(w, 500, protocol.ErrorCodeInternalError, "cannot resolve workdir")
+		return
+	}
+	if absPath != absWork && !strings.HasPrefix(absPath, absWork+string(filepath.Separator)) {
+		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "workspace path outside working directory")
 		return
 	}
 	respondJSON(w, 201, rest.Workspace{ID: req.Name, Name: req.Name, Path: req.Path})

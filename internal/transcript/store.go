@@ -88,7 +88,8 @@ func (s *Store) Reset() {
 	s.ops = nil
 }
 
-// Persist writes the current state and operations to disk.
+// Persist writes the current state and operations to disk atomically (W3 fix).
+// Uses write-to-tmp + rename to prevent inconsistent state on crash.
 func (s *Store) Persist() error {
 	if s.dir == "" || s.sessionID == "" {
 		return nil
@@ -101,22 +102,40 @@ func (s *Store) Persist() error {
 		return fmt.Errorf("create transcript dir: %w", err)
 	}
 
-	// Write snapshot
+	snapPath := filepath.Join(dir, "snapshot.json")
+	opsPath := filepath.Join(dir, "operations.json")
+	snapTmp := snapPath + ".tmp"
+	opsTmp := opsPath + ".tmp"
+
+	// Write snapshot to tmp file
 	snapData, err := json.MarshalIndent(s.state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal snapshot: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "snapshot.json"), snapData, 0600); err != nil {
-		return fmt.Errorf("write snapshot: %w", err)
+	if err := os.WriteFile(snapTmp, snapData, 0600); err != nil {
+		return fmt.Errorf("write snapshot tmp: %w", err)
 	}
 
-	// Write operations log
+	// Write operations to tmp file
 	opsData, err := json.Marshal(s.ops)
 	if err != nil {
+		os.Remove(snapTmp) // cleanup on failure
 		return fmt.Errorf("marshal operations: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "operations.json"), opsData, 0600); err != nil {
-		return fmt.Errorf("write operations: %w", err)
+	if err := os.WriteFile(opsTmp, opsData, 0600); err != nil {
+		os.Remove(snapTmp) // cleanup on failure
+		return fmt.Errorf("write operations tmp: %w", err)
+	}
+
+	// Atomic rename both files
+	if err := os.Rename(snapTmp, snapPath); err != nil {
+		os.Remove(snapTmp)
+		os.Remove(opsTmp)
+		return fmt.Errorf("rename snapshot: %w", err)
+	}
+	if err := os.Rename(opsTmp, opsPath); err != nil {
+		os.Remove(opsTmp)
+		return fmt.Errorf("rename operations: %w", err)
 	}
 
 	return nil

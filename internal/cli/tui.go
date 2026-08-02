@@ -374,7 +374,7 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	tools.RegisterCronTools(toolReg, cronMgr)
 
 	// Swarm roster and individual Agent tool
-	roster := swarm.NewRoster(nil)
+	roster := swarm.NewRoster(nil, nil)
 	tools.RegisterAgentTool(toolReg, roster)
 
 	// Resolve the model's context window size from config so the status bar
@@ -420,7 +420,7 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	// Create hook engine from config
 	var hookEngine *hooks.Engine
 	if len(app.Config.Hooks) > 0 {
-		hookEngine = hooks.NewEngine(app.Config.Hooks)
+		hookEngine = hooks.NewEngine(app.Config.Hooks, nil)
 	}
 
 	permChain := permission.DefaultChain()
@@ -5706,7 +5706,7 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	tools.RegisterCronTools(toolReg, cronMgr)
 
 	// Swarm roster and Agent tool
-	roster := swarm.NewRoster(nil)
+	roster := swarm.NewRoster(nil, nil)
 	tools.RegisterAgentTool(toolReg, roster)
 
 	// Goal tools
@@ -5725,7 +5725,7 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	// Create hook engine from config
 	var simpleHookEng *hooks.Engine
 	if len(a.Config.Hooks) > 0 {
-		simpleHookEng = hooks.NewEngine(a.Config.Hooks)
+		simpleHookEng = hooks.NewEngine(a.Config.Hooks, nil)
 	}
 
 	branch := getGitBranch(skill.FindProjectRoot(cwd))

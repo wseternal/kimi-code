@@ -21,6 +21,9 @@ const (
 	writeTimeout = 10 * time.Second
 )
 
+// S9: atomic counter for connection IDs to avoid time.Now() collisions.
+var connIDCounter atomic.Int64
+
 // Connection represents a WebSocket connection.
 type Connection struct {
 	ID            string
@@ -248,7 +251,7 @@ func (c *Connection) Send(msg []byte) {
 	}
 }
 
-// Close closes the connection.
+// Close closes the connection and its send channel (S7 fix).
 func (c *Connection) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -257,6 +260,7 @@ func (c *Connection) Close() {
 	}
 	c.closed = true
 	close(c.done)
+	close(c.send) // S7: close send channel to unblock writePump
 }
 
 // Broadcaster manages per-session event broadcasting with journal replay.
@@ -440,28 +444,19 @@ func HandleWebSocketWithOrigins(registry *Registry, broadcaster *Broadcaster, lo
 			return
 		}
 
-		connID := fmt.Sprintf("ws_%d", time.Now().UnixNano())
+		// S9 fix: use atomic counter for connection ID to avoid collisions.
+		connID := fmt.Sprintf("ws_%d", connIDCounter.Add(1))
 		clientID := r.URL.Query().Get("client_id")
 		if clientID == "" {
 			clientID = "anonymous"
 		}
 
-		// Create a logger scoped to this connection for W21.
+		// Create a logger scoped to this connection.
 		connLogger := logger.With("conn_id", connID, "client_id", clientID)
 
-		conn := &Connection{
-			ID:            connID,
-			ClientID:      clientID,
-			ws:            wsconn,
-			send:          make(chan []byte, 256),
-			done:          make(chan struct{}),
-			logger:        connLogger,
-			subscriptions: make(map[string]bool),
-			cursors:       make(ws.CursorsBySession),
-			agentFilter:   make(ws.AgentFilter),
-			connectedAt:   time.Now(),
-			lastPong:      time.Now(),
-		}
+		// W10 fix: use NewConnection constructor, then assign ws.
+		conn := NewConnection(connID, clientID, connLogger)
+		conn.ws = wsconn
 		registry.Add(conn)
 		defer func() {
 			registry.Remove(connID)
@@ -487,8 +482,9 @@ func HandleWebSocketWithOrigins(registry *Registry, broadcaster *Broadcaster, lo
 			},
 		}
 		helloJSON, _ := json.Marshal(hello)
+		// W13 fix: use connLogger instead of logger for connection-scoped context.
 		if err := conn.ws.writeText(string(helloJSON)); err != nil {
-			logger.Error("failed to send server hello", "error", err)
+			connLogger.Error("failed to send server hello", "error", err)
 			return
 		}
 
@@ -515,16 +511,19 @@ func (c *Connection) writePump() error {
 		select {
 		case msg, ok := <-c.send:
 			if !ok {
+				// S7: send channel closed, connection is shutting down.
 				c.ws.writeClose(1001, "server shutting down")
 				return nil
 			}
 			c.ws.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := c.ws.writeText(string(msg)); err != nil {
+				c.logger.Error("writePump: write failed", "error", err) // W12b
 				return err
 			}
 		case <-ticker.C:
 			c.ws.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := c.ws.writePing(nil); err != nil {
+				c.logger.Error("writePump: ping failed", "error", err) // W12b
 				return err
 			}
 		case <-c.done:
@@ -540,6 +539,7 @@ func (c *Connection) readPump(registry *Registry, broadcaster *Broadcaster) erro
 	for {
 		opcode, payload, err := c.ws.readFrame()
 		if err != nil {
+			c.logger.Error("readPump: read failed", "error", err) // W12b
 			return err
 		}
 		// Reset read deadline after each successful read.
@@ -554,20 +554,20 @@ func (c *Connection) readPump(registry *Registry, broadcaster *Broadcaster) erro
 		case opPong:
 			c.UpdatePong()
 		case opClose:
+			c.logger.Info("readPump: received close frame") // W12b
 			return nil
 		}
 	}
 }
 
 // handleMessage dispatches a text message to the appropriate handler.
-// TODO(S5): Route ACK responses via send channel instead of direct ws.writeText
-// to maintain single-writer guarantee for all outbound frames.
+// W9 fix: route ACK responses via send channel to maintain single-writer guarantee.
 func (c *Connection) handleMessage(data []byte, registry *Registry, broadcaster *Broadcaster) {
 	var envelope struct {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		c.logger.Warn("invalid message envelope", "error", err)
+		c.logger.Warn("invalid message envelope", "error", err) // W12b
 		return
 	}
 
@@ -575,29 +575,32 @@ func (c *Connection) handleMessage(data []byte, registry *Registry, broadcaster 
 	case "client_hello":
 		var msg ws.ClientHelloMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
+			c.logger.Warn("invalid client_hello", "error", err) // W12b
 			return
 		}
 		ack := HandleClientHello(c, broadcaster, msg)
 		resp, _ := json.Marshal(map[string]interface{}{"type": "client_hello_ack", "payload": ack})
-		c.ws.writeText(string(resp))
+		c.Send(resp) // W9: route via send channel
 
 	case "subscribe":
 		var msg ws.SubscribeMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
+			c.logger.Warn("invalid subscribe", "error", err) // W12b
 			return
 		}
 		ack := HandleSubscribe(c, broadcaster, msg)
 		resp, _ := json.Marshal(map[string]interface{}{"type": "subscribe_ack", "payload": ack})
-		c.ws.writeText(string(resp))
+		c.Send(resp) // W9: route via send channel
 
 	case "unsubscribe":
 		var msg ws.UnsubscribeMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
+			c.logger.Warn("invalid unsubscribe", "error", err) // W12b
 			return
 		}
 		HandleUnsubscribe(c, msg)
 		resp, _ := json.Marshal(map[string]interface{}{"type": "unsubscribe_ack"})
-		c.ws.writeText(string(resp))
+		c.Send(resp) // W9: route via send channel
 
 	default:
 		c.logger.Debug("unhandled message type", "type", envelope.Type)
@@ -660,40 +663,58 @@ func HandleUnsubscribe(conn *Connection, msg ws.UnsubscribeMessage) {
 // ── Event Journal ──
 
 // EventJournal stores per-session event history for replay on reconnect.
+// W11 fix: uses ring buffer per session to avoid O(n) slice shift at capacity.
 type EventJournal struct {
 	mu       sync.RWMutex
-	sessions map[string][]BroadcasterEvent
+	sessions map[string]*sessionRing
 	maxPerSession int
+}
+
+// sessionRing is a circular buffer for a single session's events.
+type sessionRing struct {
+	events []BroadcasterEvent
+	head   int // index of oldest element
+	count  int // number of elements currently stored
 }
 
 // NewEventJournal creates a new event journal.
 func NewEventJournal() *EventJournal {
 	return &EventJournal{
-		sessions:      make(map[string][]BroadcasterEvent),
+		sessions:      make(map[string]*sessionRing),
 		maxPerSession: 5000,
 	}
 }
 
-// Append adds an event to a session's journal.
+// Append adds an event to a session's journal using ring buffer (W11 fix).
 func (j *EventJournal) Append(sessionID string, event BroadcasterEvent) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	events := j.sessions[sessionID]
-	if len(events) >= j.maxPerSession {
-		events = events[1:]
+	ring, ok := j.sessions[sessionID]
+	if !ok {
+		ring = &sessionRing{events: make([]BroadcasterEvent, j.maxPerSession)}
+		j.sessions[sessionID] = ring
 	}
-	j.sessions[sessionID] = append(events, event)
+	// Circular buffer write: overwrite oldest when full.
+	idx := (ring.head + ring.count) % len(ring.events)
+	if ring.count == len(ring.events) {
+		ring.head = (ring.head + 1) % len(ring.events)
+	} else {
+		ring.count++
+	}
+	ring.events[idx] = event
 }
 
 // EventsAfter returns events for a session after a given sequence.
-// TODO(S7): Use binary search since events are ordered by Seq, reducing
-// from O(n) to O(log n) for large journals.
 func (j *EventJournal) EventsAfter(sessionID string, afterSeq int64) []BroadcasterEvent {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	events := j.sessions[sessionID]
+	ring, ok := j.sessions[sessionID]
+	if !ok || ring.count == 0 {
+		return nil
+	}
 	var result []BroadcasterEvent
-	for _, e := range events {
+	for i := 0; i < ring.count; i++ {
+		e := ring.events[(ring.head+i)%len(ring.events)]
 		if e.Seq > afterSeq {
 			result = append(result, e)
 		}
@@ -712,7 +733,10 @@ func (j *EventJournal) Clear(sessionID string) {
 func (j *EventJournal) Count(sessionID string) int {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	return len(j.sessions[sessionID])
+	if ring, ok := j.sessions[sessionID]; ok {
+		return ring.count
+	}
+	return 0
 }
 
 // ── Turn Tracker ──

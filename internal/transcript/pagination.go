@@ -44,9 +44,6 @@ func Paginate(state *Snapshot, pageNumber, pageSize int) Page {
 		start = 0
 	}
 	end := total - pageNumber*pageSize
-	if end > total {
-		end = total
-	}
 
 	turns := make([]TranscriptTurn, end-start)
 	copy(turns, state.Turns[start:end])

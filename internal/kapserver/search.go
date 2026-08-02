@@ -1,12 +1,14 @@
 package kapserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // SearchService provides code search with snippet extraction.
@@ -42,7 +44,7 @@ type SearchResponse struct {
 }
 
 // Search performs a ripgrep search and returns hits with snippets.
-func (s *SearchService) Search(q SearchQuery) (*SearchResponse, error) {
+func (s *SearchService) Search(ctx context.Context, q SearchQuery) (*SearchResponse, error) {
 	if q.Limit <= 0 {
 		q.Limit = 100
 	}
@@ -62,6 +64,18 @@ func (s *SearchService) Search(q SearchQuery) (*SearchResponse, error) {
 	if absSearch != absWork && !strings.HasPrefix(absSearch, absWork+string(filepath.Separator)) {
 		return nil, fmt.Errorf("search path %q is outside working directory", searchPath)
 	}
+	// C2a fix: resolve symlinks and re-validate containment.
+	resolvedSearch, err := filepath.EvalSymlinks(absSearch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve symlinks: %w", err)
+	}
+	resolvedWork, err := filepath.EvalSymlinks(absWork)
+	if err != nil {
+		return nil, fmt.Errorf("resolve work symlinks: %w", err)
+	}
+	if resolvedSearch != resolvedWork && !strings.HasPrefix(resolvedSearch, resolvedWork+string(filepath.Separator)) {
+		return nil, fmt.Errorf("search path %q resolves outside working directory", searchPath)
+	}
 
 	args := []string{
 		"--json", "--hidden",
@@ -72,9 +86,13 @@ func (s *SearchService) Search(q SearchQuery) (*SearchResponse, error) {
 	if q.Glob != "" {
 		args = append(args, "--glob", q.Glob)
 	}
-	args = append(args, q.Pattern, searchPath)
+	// W4 fix: insert "--" sentinel to prevent argument injection.
+	args = append(args, "--", q.Pattern, searchPath)
 
-	cmd := exec.Command("rg", args...)
+	// W2 fix: apply context with timeout to prevent hanging.
+	searchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(searchCtx, "rg", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		// rg returns exit 1 for no matches
@@ -86,9 +104,10 @@ func (s *SearchService) Search(q SearchQuery) (*SearchResponse, error) {
 
 	hits := parseRgHits(string(out), q.Limit)
 
-	// Extract snippets for each hit
+	// N5 fix: cache file reads to avoid reading same file N times for N hits.
+	fileCache := make(map[string][]string)
 	for i := range hits {
-		hits[i].Snippet = extractSnippet(hits[i].Path, hits[i].Line)
+		hits[i].Snippet = extractSnippetCached(fileCache, hits[i].Path, hits[i].Line)
 	}
 
 	return &SearchResponse{
@@ -136,6 +155,24 @@ func extractSnippet(path string, line int) string {
 		return ""
 	}
 	lines := strings.Split(string(data), "\n")
+	return joinSnippetLines(lines, line)
+}
+
+// extractSnippetCached uses a file-line cache to avoid re-reading the same file (N5 fix).
+func extractSnippetCached(cache map[string][]string, path string, line int) string {
+	lines, ok := cache[path]
+	if !ok {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return ""
+		}
+		lines = strings.Split(string(data), "\n")
+		cache[path] = lines
+	}
+	return joinSnippetLines(lines, line)
+}
+
+func joinSnippetLines(lines []string, line int) string {
 	start := line - 3
 	if start < 0 {
 		start = 0

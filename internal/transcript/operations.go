@@ -139,21 +139,19 @@ func applyTurnUpsert(state *Snapshot, op Operation) ApplyResult {
 	if op.Turn == nil {
 		return ApplyResult{State: state, Changed: false}
 	}
-	turns := make([]TranscriptTurn, len(state.Turns))
-	copy(turns, state.Turns)
+	// Use copySnapshot then modify in place to avoid double-copying (N1 fix).
+	s := copySnapshot(state)
 	found := false
-	for i, t := range turns {
+	for i, t := range s.Turns {
 		if t.ID == op.Turn.ID {
-			turns[i] = *op.Turn
+			s.Turns[i] = *op.Turn
 			found = true
 			break
 		}
 	}
 	if !found {
-		turns = append(turns, *op.Turn)
+		s.Turns = append(s.Turns, *op.Turn)
 	}
-	s := copySnapshot(state)
-	s.Turns = turns
 	return ApplyResult{State: s, Changed: true}
 }
 
@@ -254,7 +252,20 @@ func applyItemUpsert(state *Snapshot, op Operation) ApplyResult {
 	}
 	items := make([]TranscriptItem, len(state.Items))
 	copy(items, state.Items)
-	items = append(items, *op.Item)
+	// W1 fix: find-and-replace by identity (TurnID + Marker/TaskRef match) before appending.
+	found := false
+	for i, item := range items {
+		if item.TurnID == op.Item.TurnID &&
+			((item.Marker != nil && op.Item.Marker != nil && item.Marker.Kind == op.Item.Marker.Kind) ||
+				(item.TaskRef != nil && op.Item.TaskRef != nil && item.TaskRef.TaskID == op.Item.TaskRef.TaskID)) {
+			items[i] = *op.Item
+			found = true
+			break
+		}
+	}
+	if !found {
+		items = append(items, *op.Item)
+	}
 	s := copySnapshot(state)
 	s.Items = items
 	return ApplyResult{State: s, Changed: true}
@@ -452,17 +463,114 @@ func copySnapshot(state *Snapshot) *Snapshot {
 		}
 		s.Todos = &todos
 	}
-	copy(s.Turns, state.Turns)
-	// Deep-copy each turn's Steps slice to avoid sharing backing arrays.
-	for i := range s.Turns {
-		s.Turns[i].Steps = make([]TranscriptStep, len(state.Turns[i].Steps))
-		copy(s.Turns[i].Steps, state.Turns[i].Steps)
+	// Deep-copy Meta.Custom map to avoid sharing with original.
+	if state.Meta.Custom != nil {
+		custom := make(map[string]any, len(state.Meta.Custom))
+		for k, v := range state.Meta.Custom {
+			custom[k] = v
+		}
+		s.Meta.Custom = custom
 	}
+	// Deep-copy Meta pointer fields.
+	if state.Meta.Goal != nil {
+		g := *state.Meta.Goal
+		s.Meta.Goal = &g
+	}
+	if state.Meta.Modes != nil {
+		m := *state.Meta.Modes
+		s.Meta.Modes = &m
+	}
+	if state.Meta.AgentPhase != nil {
+		p := *state.Meta.AgentPhase
+		s.Meta.AgentPhase = &p
+	}
+	if state.Meta.AgentStatus != nil {
+		a := *state.Meta.AgentStatus
+		s.Meta.AgentStatus = &a
+	}
+	// Deep-copy Turns with all pointer fields (C3 fix).
+	copy(s.Turns, state.Turns)
+	for i := range s.Turns {
+		// Deep-copy Steps slice and each step's pointer fields.
+		if state.Turns[i].Steps != nil {
+			s.Turns[i].Steps = make([]TranscriptStep, len(state.Turns[i].Steps))
+			copy(s.Turns[i].Steps, state.Turns[i].Steps)
+			for j := range s.Turns[i].Steps {
+				st := &s.Turns[i].Steps[j]
+				if st.Usage != nil {
+					u := *st.Usage
+					st.Usage = &u
+				}
+				if st.Timing != nil {
+					t := *st.Timing
+					st.Timing = &t
+				}
+				if st.Retry != nil {
+					r := *st.Retry
+					st.Retry = &r
+				}
+			}
+		}
+		// Deep-copy Turn pointer fields.
+		if state.Turns[i].Origin != nil {
+			o := *state.Turns[i].Origin
+			s.Turns[i].Origin = &o
+		}
+		if state.Turns[i].FinishedAt != nil {
+			t := *state.Turns[i].FinishedAt
+			s.Turns[i].FinishedAt = &t
+		}
+	}
+	// Deep-copy Frames with all pointer fields (C3 fix).
 	copy(s.Frames, state.Frames)
+	for i := range s.Frames {
+		f := &s.Frames[i]
+		if f.Text != nil {
+			t := *f.Text
+			f.Text = &t
+		}
+		if f.Thinking != nil {
+			t := *f.Thinking
+			f.Thinking = &t
+		}
+		if f.ToolCall != nil {
+			t := *f.ToolCall
+			f.ToolCall = &t
+		}
+		if f.Notice != nil {
+			n := *f.Notice
+			f.Notice = &n
+		}
+	}
+	// Deep-copy Interactions pointer fields.
 	copy(s.Interactions, state.Interactions)
+	for i := range s.Interactions {
+		if state.Interactions[i].ResolvedAt != nil {
+			t := *state.Interactions[i].ResolvedAt
+			s.Interactions[i].ResolvedAt = &t
+		}
+	}
 	copy(s.Attachments, state.Attachments)
+	// Deep-copy Tasks pointer fields.
 	copy(s.Tasks, state.Tasks)
+	for i := range s.Tasks {
+		if state.Tasks[i].EndedAt != nil {
+			t := *state.Tasks[i].EndedAt
+			s.Tasks[i].EndedAt = &t
+		}
+	}
+	// Deep-copy Items pointer fields.
 	copy(s.Items, state.Items)
+	for i := range s.Items {
+		if s.Items[i].Marker != nil {
+			m := *s.Items[i].Marker
+			s.Items[i].Marker = &m
+		}
+		if s.Items[i].TaskRef != nil {
+			tr := *s.Items[i].TaskRef
+			s.Items[i].TaskRef = &tr
+		}
+	}
 	copy(s.Prompts, state.Prompts)
 	return s
 }

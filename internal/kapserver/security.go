@@ -55,8 +55,7 @@ func (m *SecurityMiddleware) Wrap(next http.Handler) http.Handler {
 				return
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			// N3 fix: only set ACAO when Origin is present; don't set wildcard otherwise.
 		}
 		w.Header().Set("Vary", "Origin")
 
@@ -167,9 +166,28 @@ type rateCounter struct {
 }
 
 func newRateLimiter(limitPerMinute int) *rateLimiter {
-	return &rateLimiter{
+	rl := &rateLimiter{
 		limit:    limitPerMinute,
 		counters: make(map[string]*rateCounter),
+	}
+	// W7 fix: start background goroutine to evict stale rate counter entries.
+	go rl.evictStale()
+	return rl
+}
+
+// evictStale periodically removes rate counter entries older than 2 minutes.
+func (rl *rateLimiter) evictStale() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		rl.mu.Lock()
+		now := time.Now()
+		for ip, counter := range rl.counters {
+			if now.Sub(counter.windowAt) > 2*time.Minute {
+				delete(rl.counters, ip)
+			}
+		}
+		rl.mu.Unlock()
 	}
 }
 
