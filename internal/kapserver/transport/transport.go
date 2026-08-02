@@ -12,12 +12,20 @@ import (
 	"github.com/visdomtech/kimi-code/internal/protocol/ws"
 )
 
+const (
+	// heartbeatInterval is how often the server sends pings.
+	heartbeatInterval = 30 * time.Second
+	// pongTimeout is how long to wait for a pong before closing.
+	pongTimeout = heartbeatInterval + 10*time.Second
+	// writeTimeout is the max time to write a frame.
+	writeTimeout = 10 * time.Second
+)
+
 // Connection represents a WebSocket connection.
 type Connection struct {
 	ID            string
 	ClientID      string
-	conn          http.ResponseWriter
-	req           *http.Request
+	ws            *wsConn // real WebSocket connection (set after upgrade)
 	send          chan []byte
 	done          chan struct{}
 	logger        *slog.Logger
@@ -410,36 +418,56 @@ func (b *Broadcaster) Journal() *EventJournal {
 	return b.journal
 }
 
-// HandleWebSocket handles a WebSocket upgrade request.
-// Uses a simplified implementation; for production use consider nhooyr.io/websocket or gorilla/websocket.
+// HandleWebSocket handles a WebSocket upgrade request using RFC 6455
+// handshake via net/http.Hijacker, then runs read/write pumps with heartbeat.
 func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.Logger) http.HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Perform WebSocket handshake.
+		wsconn, err := upgradeWebSocket(w, r)
+		if err != nil {
+			logger.Error("websocket upgrade failed", "error", err)
+			return
+		}
+
 		connID := fmt.Sprintf("ws_%d", time.Now().UnixNano())
 		clientID := r.URL.Query().Get("client_id")
 		if clientID == "" {
 			clientID = "anonymous"
 		}
 
-		conn := NewConnection(connID, clientID, logger)
+		conn := &Connection{
+			ID:            connID,
+			ClientID:      clientID,
+			ws:            wsconn,
+			send:          make(chan []byte, 256),
+			done:          make(chan struct{}),
+			logger:        logger,
+			subscriptions: make(map[string]bool),
+			cursors:       make(ws.CursorsBySession),
+			agentFilter:   make(ws.AgentFilter),
+			connectedAt:   time.Now(),
+			lastPong:      time.Now(),
+		}
 		registry.Add(conn)
 		defer func() {
 			registry.Remove(connID)
 			conn.Close()
+			wsconn.close()
 		}()
 
 		logger.Info("websocket connection opened", "conn_id", connID, "client_id", clientID)
 
-		// Send server hello
+		// Send server hello over the WebSocket.
 		hello := ws.ServerHelloMessage{
 			Type:      "server_hello",
 			Timestamp: time.Now().Format(time.RFC3339Nano),
 			Payload: ws.ServerHelloPayload{
 				WSConnectionID:     connID,
 				ProtocolVersion:    ws.ProtocolVersion,
-				HeartbeatMs:        30000,
+				HeartbeatMs:        int(heartbeatInterval.Milliseconds()),
 				MaxEventBufferSize: len(broadcaster.ring),
 				Capabilities: ws.ServerHelloCapabilities{
 					EventBatching: true,
@@ -447,8 +475,115 @@ func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(hello)
+		helloJSON, _ := json.Marshal(hello)
+		if err := conn.ws.writeText(string(helloJSON)); err != nil {
+			logger.Error("failed to send server hello", "error", err)
+			return
+		}
+
+		// Run read and write pumps concurrently.
+		errCh := make(chan error, 2)
+		go func() { errCh <- conn.writePump() }()
+		go func() { errCh <- conn.readPump(registry, broadcaster) }()
+
+		// Wait for either pump to finish.
+		<-errCh
+		logger.Info("websocket connection closed", "conn_id", connID)
+	}
+}
+
+// writePump drains the send channel and writes frames to the WebSocket.
+// It also sends periodic ping frames for heartbeat.
+func (c *Connection) writePump() error {
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case msg, ok := <-c.send:
+			if !ok {
+				c.ws.writeClose(1001, "server shutting down")
+				return nil
+			}
+			c.ws.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.ws.writeText(string(msg)); err != nil {
+				return err
+			}
+		case <-ticker.C:
+			c.ws.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.ws.writePing(nil); err != nil {
+				return err
+			}
+		case <-c.done:
+			c.ws.writeClose(1000, "closing")
+			return nil
+		}
+	}
+}
+
+// readPump reads frames from the WebSocket and dispatches them.
+func (c *Connection) readPump(registry *Registry, broadcaster *Broadcaster) error {
+	c.ws.setReadDeadline(time.Now().Add(pongTimeout))
+	for {
+		opcode, payload, err := c.ws.readFrame()
+		if err != nil {
+			return err
+		}
+		// Reset read deadline after each successful read.
+		c.ws.setReadDeadline(time.Now().Add(pongTimeout))
+
+		switch opcode {
+		case opText:
+			c.handleMessage(payload, registry, broadcaster)
+		case opPing:
+			c.ws.writeFrame(opPong, payload)
+		case opPong:
+			c.UpdatePong()
+		case opClose:
+			return nil
+		}
+	}
+}
+
+// handleMessage dispatches a text message to the appropriate handler.
+func (c *Connection) handleMessage(data []byte, registry *Registry, broadcaster *Broadcaster) {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		c.logger.Warn("invalid message envelope", "error", err)
+		return
+	}
+
+	switch envelope.Type {
+	case "client_hello":
+		var msg ws.ClientHelloMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return
+		}
+		ack := HandleClientHello(c, broadcaster, msg)
+		resp, _ := json.Marshal(map[string]interface{}{"type": "client_hello_ack", "payload": ack})
+		c.ws.writeText(string(resp))
+
+	case "subscribe":
+		var msg ws.SubscribeMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return
+		}
+		ack := HandleSubscribe(c, broadcaster, msg)
+		resp, _ := json.Marshal(map[string]interface{}{"type": "subscribe_ack", "payload": ack})
+		c.ws.writeText(string(resp))
+
+	case "unsubscribe":
+		var msg ws.UnsubscribeMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return
+		}
+		HandleUnsubscribe(c, msg)
+		resp, _ := json.Marshal(map[string]interface{}{"type": "unsubscribe_ack"})
+		c.ws.writeText(string(resp))
+
+	default:
+		c.logger.Debug("unhandled message type", "type", envelope.Type)
 	}
 }
 

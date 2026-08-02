@@ -272,14 +272,20 @@ func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request) {
 		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	// Approvals are tracked by the permission system; return empty when no pending approvals.
-	respondJSON(w, 200, rest.ListApprovalsResponse{Items: []protocol.ApprovalRequest{}})
+	var items []protocol.ApprovalRequest
+	if s.sessionData != nil {
+		items = s.sessionData.ListApprovals(id)
+	}
+	if items == nil {
+		items = []protocol.ApprovalRequest{}
+	}
+	respondJSON(w, 200, rest.ListApprovalsResponse{Items: items})
 }
 
 // handleResolveApproval resolves a pending approval request.
 func (s *Server) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	_ = r.PathValue("approval_id")
+	approvalID := r.PathValue("approval_id")
 	_, ok := s.sessionManager.Get(id)
 	if !ok {
 		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
@@ -289,6 +295,12 @@ func (s *Server) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(r, &req); err != nil {
 		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid request")
 		return
+	}
+	if s.sessionData != nil {
+		if err := s.sessionData.ResolveApproval(id, approvalID, req); err != nil {
+			respondError(w, 404, protocol.ErrorCodeApprovalNotFound, err.Error())
+			return
+		}
 	}
 	respondJSON(w, 200, map[string]string{"status": "resolved"})
 }
@@ -301,13 +313,20 @@ func (s *Server) handleListQuestions(w http.ResponseWriter, r *http.Request) {
 		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	respondJSON(w, 200, rest.ListQuestionsResponse{Items: []protocol.QuestionRequest{}})
+	var items []protocol.QuestionRequest
+	if s.sessionData != nil {
+		items = s.sessionData.ListQuestions(id)
+	}
+	if items == nil {
+		items = []protocol.QuestionRequest{}
+	}
+	respondJSON(w, 200, rest.ListQuestionsResponse{Items: items})
 }
 
 // handleResolveQuestion resolves a pending question.
 func (s *Server) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	_ = r.PathValue("question_id")
+	questionID := r.PathValue("question_id")
 	_, ok := s.sessionManager.Get(id)
 	if !ok {
 		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
@@ -317,6 +336,12 @@ func (s *Server) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(r, &req); err != nil {
 		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid request")
 		return
+	}
+	if s.sessionData != nil {
+		if err := s.sessionData.ResolveQuestion(id, questionID, req); err != nil {
+			respondError(w, 404, protocol.ErrorCodeQuestionNotFound, err.Error())
+			return
+		}
 	}
 	respondJSON(w, 200, map[string]string{"status": "resolved"})
 }
@@ -331,7 +356,14 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	respondJSON(w, 200, rest.ListTasksResponse{Items: []rest.TaskInfo{}})
+	var items []rest.TaskInfo
+	if s.sessionData != nil {
+		items = s.sessionData.ListTasks(id)
+	}
+	if items == nil {
+		items = []rest.TaskInfo{}
+	}
+	respondJSON(w, 200, rest.ListTasksResponse{Items: items})
 }
 
 // handleListTools returns registered tools for a session.
@@ -342,7 +374,14 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	respondJSON(w, 200, rest.ListToolsResponse{Items: []rest.ToolDescriptor{}})
+	var items []rest.ToolDescriptor
+	if s.sessionData != nil {
+		items = s.sessionData.ListTools(id)
+	}
+	if items == nil {
+		items = []rest.ToolDescriptor{}
+	}
+	respondJSON(w, 200, rest.ListToolsResponse{Items: items})
 }
 
 // handleListTerminals returns active terminals for a session.
@@ -353,7 +392,14 @@ func (s *Server) handleListTerminals(w http.ResponseWriter, r *http.Request) {
 		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	respondJSON(w, 200, rest.ListTerminalsResponse{Items: []rest.TerminalInfo{}})
+	var items []rest.TerminalInfo
+	if s.sessionData != nil {
+		items = s.sessionData.ListTerminals(id)
+	}
+	if items == nil {
+		items = []rest.TerminalInfo{}
+	}
+	respondJSON(w, 200, rest.ListTerminalsResponse{Items: items})
 }
 
 // handleListSkills returns discovered skills for a session.
@@ -364,7 +410,14 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	respondJSON(w, 200, rest.ListSkillsResponse{Items: []rest.SkillDescriptor{}})
+	var items []rest.SkillDescriptor
+	if s.sessionData != nil {
+		items = s.sessionData.ListSkills(id)
+	}
+	if items == nil {
+		items = []rest.SkillDescriptor{}
+	}
+	respondJSON(w, 200, rest.ListSkillsResponse{Items: items})
 }
 
 // handleListTranscript returns transcript entries for a session.

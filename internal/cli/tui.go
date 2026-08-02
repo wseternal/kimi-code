@@ -213,6 +213,7 @@ type tuiModel struct {
 	height       int
 	yoloMode     bool
 	planMode     bool
+	swarmEnabled bool // whether swarm sub-agent spawning is active
 	quitting     bool
 	ctrlCPending bool // true after first Ctrl+C; second press quits
 	streaming    bool
@@ -3413,8 +3414,13 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		if hasAnyAuth(m.app.Config) {
 			status = "configured"
 		}
-		info := fmt.Sprintf("Session:   %s\nModel:     %s\nProvider:  %s (%s)\nTurns:     %d\nContext:   %s\nYOLO:      %v\nPlan:      %v",
-			m.svc.ID(), m.model, provName, status, m.svc.TurnCount(), m.svc.ContextMgr().UsageDisplay(), m.yoloMode, m.planMode)
+		info := fmt.Sprintf("Session:   %s\nModel:     %s\nProvider:  %s (%s)\nTurns:     %d\nContext:   %s\nYOLO:      %v\nPlan:      %v\nSwarm:     %v",
+			m.svc.ID(), m.model, provName, status, m.svc.TurnCount(), m.svc.ContextMgr().UsageDisplay(), m.yoloMode, m.planMode, m.swarmEnabled)
+		if m.swarmEnabled {
+			active := m.swarmRoster.ActiveCount()
+			total := m.swarmRoster.Count()
+			info += fmt.Sprintf(" (%d/%d agents)", active, total)
+		}
 		if m.svc.GoalTracker().IsActive() {
 			if snap := m.svc.GoalTracker().Current(); snap != nil {
 				info += "\nGoal:      " + snap.Objective
@@ -3608,7 +3614,29 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 	case input == "/swarm":
 		m.messages = append(m.messages, chatMessage{"user", input})
-		m.messages = append(m.messages, chatMessage{"system", "Swarm mode: parallel sub-agent execution.\nUsage: Set a goal with /goal, then enable swarm mode.\n(Currently a placeholder — full implementation pending.)"})
+		m.swarmEnabled = !m.swarmEnabled
+		active := m.swarmRoster.ActiveCount()
+		total := m.swarmRoster.Count()
+		if m.swarmEnabled {
+			msg := fmt.Sprintf("Swarm mode ENABLED.\nActive sub-agents: %d / %d total\nUse /swarm again to disable, or use the AgentSwarm tool to spawn sub-agents.", active, total)
+			if total > 0 {
+				msg += "\n\nRoster:"
+				for _, r := range m.swarmRoster.List() {
+					msg += fmt.Sprintf("\n  [%s] %s — %s", r.Status, r.SubagentID, r.Output)
+					if r.Error != "" {
+						msg += fmt.Sprintf(" (error: %s)", r.Error)
+					}
+				}
+			}
+			m.messages = append(m.messages, chatMessage{"system", msg})
+		} else {
+			if active > 0 {
+				m.swarmRoster.AbortAll()
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Swarm mode DISABLED. Aborted %d active sub-agent(s).", active)})
+			} else {
+				m.messages = append(m.messages, chatMessage{"system", "Swarm mode DISABLED."})
+			}
+		}
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false

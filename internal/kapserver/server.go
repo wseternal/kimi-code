@@ -11,11 +11,35 @@ import (
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
 	"github.com/visdomtech/kimi-code/internal/protocol"
+	"github.com/visdomtech/kimi-code/internal/protocol/rest"
 )
 
 // PromptSubmitFunc is called when a prompt is submitted via REST.
 // Returns a prompt ID and optional error.
 type PromptSubmitFunc func(ctx context.Context, sessionID, prompt string) (string, error)
+
+// SessionDataProvider provides session-scoped data for route handlers.
+// Implementations wire real agent subsystems (permissions, background tasks,
+// tool registry, etc.) to the server. Methods return empty slices when
+// the subsystem is not available.
+type SessionDataProvider interface {
+	// ListApprovals returns pending approval requests for a session.
+	ListApprovals(sessionID string) []protocol.ApprovalRequest
+	// ListQuestions returns pending questions for a session.
+	ListQuestions(sessionID string) []protocol.QuestionRequest
+	// ListTasks returns background tasks for a session.
+	ListTasks(sessionID string) []rest.TaskInfo
+	// ListTools returns registered tool descriptors for a session.
+	ListTools(sessionID string) []rest.ToolDescriptor
+	// ListTerminals returns active terminals for a session.
+	ListTerminals(sessionID string) []rest.TerminalInfo
+	// ListSkills returns discovered skills for a session.
+	ListSkills(sessionID string) []rest.SkillDescriptor
+	// ResolveApproval resolves a pending approval. Returns error if not found.
+	ResolveApproval(sessionID, approvalID string, response protocol.ApprovalResponse) error
+	// ResolveQuestion resolves a pending question. Returns error if not found.
+	ResolveQuestion(sessionID, questionID string, response protocol.QuestionResponse) error
+}
 
 // Server is the HTTP + WebSocket server.
 type Server struct {
@@ -29,8 +53,9 @@ type Server struct {
 	// Optional callbacks wired by the caller.
 	// When nil, the corresponding route returns an appropriate status
 	// without executing agent actions.
-	onPromptSubmit PromptSubmitFunc
-	cancelFunc     context.CancelFunc // for shutdown
+	onPromptSubmit  PromptSubmitFunc
+	sessionData     SessionDataProvider
+	cancelFunc      context.CancelFunc // for shutdown
 }
 
 // Config holds server configuration.
@@ -50,6 +75,11 @@ func WithPromptSubmit(fn PromptSubmitFunc) ServerOption {
 // WithCancelFunc provides a context cancel function for shutdown.
 func WithCancelFunc(fn context.CancelFunc) ServerOption {
 	return func(s *Server) { s.cancelFunc = fn }
+}
+
+// WithSessionDataProvider wires a session data provider for session-scoped routes.
+func WithSessionDataProvider(p SessionDataProvider) ServerOption {
+	return func(s *Server) { s.sessionData = p }
 }
 
 // NewServer creates a new server.

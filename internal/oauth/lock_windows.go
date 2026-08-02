@@ -4,17 +4,29 @@ package oauth
 
 import (
 	"os"
+
+	"golang.org/x/sys/windows"
 )
 
-// flockExclusive on Windows is best-effort.
-// TODO: implement using LockFileEx via golang.org/x/sys/windows for proper
-// cross-process locking. The current no-op means concurrent processes on
-// Windows may race on token refresh and storage.
+// flockExclusive acquires an exclusive (non-blocking) lock on the file using
+// Windows LockFileEx. This prevents concurrent processes from racing on token
+// refresh and storage.
 func flockExclusive(f *os.File) error {
-	return nil // Always succeeds on Windows
+	handle := windows.Handle(f.Fd())
+	var overlapped windows.Overlapped
+	// LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY
+	const flags = windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY
+	// Lock the entire file (high+low = 0 means lock from current offset to EOF).
+	err := windows.LockFileEx(handle, flags, 0, 1, 0, &overlapped)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
-// flockUnlock on Windows is a no-op.
+// flockUnlock releases an exclusive lock on the file.
 func flockUnlock(f *os.File) {
-	// no-op
+	handle := windows.Handle(f.Fd())
+	var overlapped windows.Overlapped
+	windows.UnlockFileEx(handle, 0, 1, 0, &overlapped)
 }
