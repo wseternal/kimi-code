@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,14 +13,35 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
 
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/hooks"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/permission"
+	promptpkg "github.com/visdomtech/kimi-code/internal/agentcore/agent/prompt"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/skill"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 	"github.com/visdomtech/kimi-code/internal/agentcore/di"
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
 	"github.com/visdomtech/kimi-code/internal/audit"
-	"github.com/visdomtech/kimi-code/internal/trace"
 	"github.com/visdomtech/kimi-code/internal/kapserver"
+	"github.com/visdomtech/kimi-code/internal/kosong"
+	"github.com/visdomtech/kimi-code/internal/kosong/providers"
 	"github.com/visdomtech/kimi-code/internal/persistence"
+	"github.com/visdomtech/kimi-code/internal/trace"
 )
+
+// CLIOptions holds all parsed CLI flags.
+type CLIOptions struct {
+	ResumeID     string
+	ContinueLast bool
+	Prompt       string
+	OutputFormat string // "text" or "stream-json"
+	Model        string
+	Yolo         bool
+	Auto         bool
+	Plan         bool
+	AddDirs      []string
+	TracePath    string
+}
 
 // App holds the application state.
 type App struct {
@@ -74,43 +96,69 @@ func (a *App) run() error {
 	args := os.Args[1:]
 
 	if len(args) == 0 {
-		return a.runTUI("", false)
+		return a.runTUI(CLIOptions{})
 	}
 
 	// Parse flags and subcommands
-	var resumeID string
-	var continueLast bool
-	var promptArg string
-	var tracePath string
+	opts := CLIOptions{}
 
 	i := 0
 	for i < len(args) {
 		arg := args[i]
 		switch {
 		case arg == "-S" || arg == "-r" || arg == "--resume":
-			if i+1 < len(args) {
-				resumeID = args[i+1]
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				opts.ResumeID = args[i+1]
 				i += 2
 			} else {
 				return fmt.Errorf("--resume requires a session ID argument")
 			}
 		case arg == "-c" || arg == "--continue":
-			continueLast = true
+			opts.ContinueLast = true
 			i++
 		case arg == "-p" || arg == "--prompt":
 			if i+1 < len(args) {
-				promptArg = args[i+1]
+				opts.Prompt = args[i+1]
 				i += 2
 			} else {
 				return fmt.Errorf("--prompt requires an argument")
 			}
-		case arg == "--trace":
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				tracePath = args[i+1]
+		case arg == "--output-format":
+			if i+1 < len(args) {
+				opts.OutputFormat = args[i+1]
 				i += 2
 			} else {
-				// Default trace path
-				tracePath = filepath.Join(home, ".kimi-code", fmt.Sprintf("trace_%d.jsonl", time.Now().Unix()))
+				return fmt.Errorf("--output-format requires an argument (text or stream-json)")
+			}
+		case arg == "-m" || arg == "--model":
+			if i+1 < len(args) {
+				opts.Model = args[i+1]
+				i += 2
+			} else {
+				return fmt.Errorf("--model requires a model name argument")
+			}
+		case arg == "-y" || arg == "--yolo" || arg == "--yes":
+			opts.Yolo = true
+			i++
+		case arg == "--auto" || arg == "--auto-approve":
+			opts.Auto = true
+			i++
+		case arg == "--plan":
+			opts.Plan = true
+			i++
+		case arg == "--add-dir":
+			if i+1 < len(args) {
+				opts.AddDirs = append(opts.AddDirs, args[i+1])
+				i += 2
+			} else {
+				return fmt.Errorf("--add-dir requires a directory argument")
+			}
+		case arg == "--trace":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				opts.TracePath = args[i+1]
+				i += 2
+			} else {
+				opts.TracePath = filepath.Join(home, ".kimi-code", fmt.Sprintf("trace_%d.jsonl", time.Now().Unix()))
 				i++
 			}
 		case arg == "server":
@@ -134,8 +182,8 @@ func (a *App) run() error {
 		case arg == "sessions":
 			return a.runSessions()
 		default:
-			if arg[0] != '-' {
-				promptArg = arg
+			if len(arg) > 0 && arg[0] != '-' {
+				opts.Prompt = arg
 				i++
 			} else {
 				return fmt.Errorf("unknown flag: %s", arg)
@@ -144,30 +192,41 @@ func (a *App) run() error {
 	}
 
 	// Enable tracing if requested
-	if tracePath != "" {
-		if err := trace.Enable(tracePath); err != nil {
+	if opts.TracePath != "" {
+		if err := trace.Enable(opts.TracePath); err != nil {
 			return fmt.Errorf("failed to enable trace: %w", err)
 		}
 		defer trace.Disable()
-		fmt.Fprintf(os.Stderr, "Trace enabled: %s\n", tracePath)
+		fmt.Fprintf(os.Stderr, "Trace enabled: %s\n", opts.TracePath)
+	}
+
+	// Apply model override to config
+	if opts.Model != "" {
+		a.Config.DefaultModel = opts.Model
 	}
 
 	// Determine mode
-	if promptArg != "" {
-		return a.runHeadless(promptArg)
+	if opts.Prompt != "" {
+		return a.runHeadless(opts)
 	}
 
-	return a.runTUI(resumeID, continueLast)
+	return a.runTUI(opts)
 }
 
 func (a *App) printHelp() error {
-	fmt.Println("kimi-code — AI-powered coding assistant")
+	fmt.Println("kimi-code \u2014 AI-powered coding assistant")
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  kimi                          Start interactive TUI")
 	fmt.Println("  kimi -c                       Continue last session")
 	fmt.Println("  kimi -S <session-id>          Resume a specific session")
 	fmt.Println("  kimi -p <prompt>              Run headless (non-interactive)")
+	fmt.Println("  kimi -m, --model <model>      Override LLM model for this invocation")
+	fmt.Println("  kimi -y, --yolo               Auto-approve regular tool calls")
+	fmt.Println("  kimi --auto                   Start in fully autonomous auto mode")
+	fmt.Println("  kimi --plan                   Start in plan mode")
+	fmt.Println("  kimi --output-format <fmt>    Headless output format: text, stream-json")
+	fmt.Println("  kimi --add-dir <dir>          Add additional workspace directory (repeatable)")
 	fmt.Println("  kimi server                   Start HTTP server")
 	fmt.Println("  kimi doctor                   Run diagnostics")
 	fmt.Println("  kimi login                    Set up API key")
@@ -190,17 +249,17 @@ func (a *App) runServer() error {
 	return srv.Start(nil)
 }
 
-func (a *App) runTUI(resumeID string, continueLast bool) error {
+func (a *App) runTUI(opts CLIOptions) error {
 	var sess *session.Session
 	var err error
 
 	// Try to resume or continue
-	if resumeID != "" {
-		sess, err = a.SessionManager.Resume(resumeID)
+	if opts.ResumeID != "" {
+		sess, err = a.SessionManager.Resume(opts.ResumeID)
 		if err != nil {
-			return fmt.Errorf("failed to resume session %s: %w", resumeID, err)
+			return fmt.Errorf("failed to resume session %s: %w", opts.ResumeID, err)
 		}
-	} else if continueLast {
+	} else if opts.ContinueLast {
 		sess, err = a.SessionManager.GetLatest()
 		if err != nil {
 			// Fall back to new session
@@ -232,8 +291,19 @@ func (a *App) runTUI(resumeID string, continueLast bool) error {
 
 	model := newTUIModel(a, sess)
 
+	// Apply CLI options to TUI model
+	if opts.Yolo {
+		model.permChain = permission.YoloChain()
+	}
+	if opts.Auto {
+		model.permChain = permission.AutoChain()
+	}
+	if opts.Plan {
+		model.planMode = true
+	}
+
 	// Replay history if resuming
-	if resumeID != "" || continueLast {
+	if opts.ResumeID != "" || opts.ContinueLast {
 		model.replayHistory()
 	}
 
@@ -266,11 +336,176 @@ func (a *App) runTUI(resumeID string, continueLast bool) error {
 	return err
 }
 
-func (a *App) runHeadless(prompt string) error {
-	fmt.Printf("Running headless with prompt: %s\n", prompt)
-	// TODO: Wire to agent loop
-	fmt.Println("Headless mode not yet fully wired (requires provider adapter)")
+func (a *App) runHeadless(opts CLIOptions) error {
+	cwd, _ := os.Getwd()
+
+	// Resolve provider from config
+	if !providers.IsConfigured(a.Config) {
+		return fmt.Errorf("no provider configured. Add to ~/.kimi-code/config.toml or run 'kimi login'")
+	}
+	provider, err := providers.NewFromConfig(a.Config)
+	if err != nil {
+		return fmt.Errorf("failed to create provider: %w", err)
+	}
+
+	// Build tool registry
+	toolReg := tools.NewRegistry()
+	tools.RegisterDefaultTools(toolReg)
+	tools.RegisterBackgroundTools(toolReg, nil)
+
+	// Permission chain
+	var permChain *permission.Chain
+	switch {
+	case opts.Auto:
+		permChain = permission.AutoChain()
+	case opts.Yolo:
+		permChain = permission.YoloChain()
+	default:
+		permChain = permission.DefaultChain()
+	}
+
+	// Hook engine (from config)
+	var hookEng *hooks.Engine
+	if len(a.Config.Hooks) > 0 {
+		hookEng = hooks.NewEngine(a.Config.Hooks)
+	}
+
+	// Discover skills
+	var skillCat *skill.Catalog
+	if cat, err := skill.Discover(cwd); err == nil {
+		skillCat = cat
+		toolReg.Register(tools.NewSkillTool(skillCat, nil))
+	}
+
+	// Build system prompt
+	homeDir, _ := os.UserHomeDir()
+	agentsMd, _ := promptpkg.LoadAgentsMd(cwd, homeDir)
+	systemPrompt := buildSystemPrompt(cwd, getGitBranch(skill.FindProjectRoot(cwd)), skillCat, nil, agentsMd, "")
+
+	// Determine output format
+	outputFormat := opts.OutputFormat
+	if outputFormat == "" {
+		outputFormat = "text"
+	}
+
+	// Convert tool definitions
+	var kosongTools []kosong.Tool
+	for _, def := range toolReg.Definitions() {
+		kosongTools = append(kosongTools, kosong.Tool{
+			Name:        def.Name,
+			Description: def.Description,
+			Parameters:  def.Parameters,
+		})
+	}
+
+	ctx := context.Background()
+	var history []kosong.Message
+	history = append(history, kosong.CreateUserMessage(opts.Prompt))
+
+	maxSteps := 25
+	for step := 0; step < maxSteps; step++ {
+		stream, err := provider.Generate(ctx, systemPrompt, kosongTools, history, nil)
+		if err != nil {
+			if outputFormat == "stream-json" {
+				emitJSON(os.Stdout, "error", map[string]string{"message": err.Error()})
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			}
+			return err
+		}
+
+		msg, err := kosong.Generate(ctx, stream)
+		if err != nil {
+			if outputFormat == "stream-json" {
+				emitJSON(os.Stdout, "error", map[string]string{"message": err.Error()})
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			}
+			return err
+		}
+
+		// Output text
+		for _, part := range msg.Content {
+			if part.Type == "text" {
+				if outputFormat == "stream-json" {
+					emitJSON(os.Stdout, "text", map[string]string{"content": part.Text})
+				} else {
+					fmt.Print(part.Text)
+				}
+			}
+		}
+
+		if len(msg.ToolCalls) == 0 {
+			history = append(history, *msg)
+			break
+		}
+
+		history = append(history, *msg)
+
+		// Execute tool calls
+		for _, tc := range msg.ToolCalls {
+			tool, ok := toolReg.Get(tc.Name)
+			if !ok {
+				history = append(history, kosong.CreateToolMessage(tc.ID, fmt.Sprintf("tool %q not found", tc.Name)))
+				continue
+			}
+
+			var toolInput json.RawMessage
+			if tc.Arguments != nil {
+				toolInput = json.RawMessage(*tc.Arguments)
+			} else {
+				toolInput = json.RawMessage("{}")
+			}
+
+			// Permission check
+			permResult := permChain.Evaluate(tc.Name, toolInput)
+			if permResult.Decision == permission.DecisionDeny {
+				history = append(history, kosong.CreateToolMessage(tc.ID, fmt.Sprintf("Permission denied: %s", permResult.Reason)))
+				continue
+			}
+
+			// PreToolUse hook
+			if hookEng != nil {
+				hookInput := hooks.HookInput{
+					Tool:    &hooks.HookToolInput{Name: tc.Name, Input: string(toolInput)},
+					Session: &hooks.HookSession{WorkDir: cwd},
+				}
+				decision := hookEng.TriggerBlock(ctx, hooks.PreToolUse, hookInput)
+				if decision.Blocked {
+					history = append(history, kosong.CreateToolMessage(tc.ID, fmt.Sprintf("Blocked by hook: %s", decision.Reason)))
+					continue
+				}
+			}
+
+			result, execErr := tool.Execute(ctx, toolInput, tools.ExecContext{WorkDir: cwd})
+			if execErr != nil {
+				result = &tools.Result{Output: execErr.Error(), IsError: true}
+			}
+
+			if outputFormat == "stream-json" {
+				emitJSON(os.Stdout, "tool_call", map[string]any{"name": tc.Name, "result": result.Output, "is_error": result.IsError})
+			}
+
+			history = append(history, kosong.CreateToolMessage(tc.ID, result.Output))
+		}
+	}
+
+	if outputFormat == "stream-json" {
+		emitJSON(os.Stdout, "done", nil)
+	} else {
+		fmt.Println()
+	}
 	return nil
+}
+
+// emitJSON writes a newline-delimited JSON event to the writer.
+func emitJSON(w *os.File, eventType string, data any) {
+	event := map[string]any{"type": eventType}
+	if data != nil {
+		event["data"] = data
+	}
+	b, _ := json.Marshal(event)
+	fmt.Fprintln(w, string(b))
 }
 
 func (a *App) runDoctor() error {

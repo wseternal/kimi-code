@@ -13,6 +13,10 @@ import (
 	"github.com/visdomtech/kimi-code/internal/protocol"
 )
 
+// PromptSubmitFunc is called when a prompt is submitted via REST.
+// Returns a prompt ID and optional error.
+type PromptSubmitFunc func(ctx context.Context, sessionID, prompt string) (string, error)
+
 // Server is the HTTP + WebSocket server.
 type Server struct {
 	httpServer     *http.Server
@@ -21,6 +25,12 @@ type Server struct {
 	host           string
 	port           int
 	mux            *http.ServeMux
+
+	// Optional callbacks wired by the caller.
+	// When nil, the corresponding route returns an appropriate status
+	// without executing agent actions.
+	onPromptSubmit PromptSubmitFunc
+	cancelFunc     context.CancelFunc // for shutdown
 }
 
 // Config holds server configuration.
@@ -29,8 +39,21 @@ type Config struct {
 	Port int
 }
 
+// ServerOption configures optional server features.
+type ServerOption func(*Server)
+
+// WithPromptSubmit wires a prompt submission handler.
+func WithPromptSubmit(fn PromptSubmitFunc) ServerOption {
+	return func(s *Server) { s.onPromptSubmit = fn }
+}
+
+// WithCancelFunc provides a context cancel function for shutdown.
+func WithCancelFunc(fn context.CancelFunc) ServerOption {
+	return func(s *Server) { s.cancelFunc = fn }
+}
+
 // NewServer creates a new server.
-func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger) *Server {
+func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger, opts ...ServerOption) *Server {
 	if cfg.Host == "" {
 		cfg.Host = "127.0.0.1"
 	}
@@ -47,6 +70,9 @@ func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger) *Se
 		host:           cfg.Host,
 		port:           cfg.Port,
 		mux:            http.NewServeMux(),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	s.setupRoutes()
@@ -240,13 +266,14 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	// Messages not yet wired — return empty
+	// Messages are stored in the audit/transcript store.
+	// A full message listing requires wiring the transcript reader; return empty for now.
 	respondJSON(w, http.StatusOK, []protocol.Message{})
 }
 
 func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	sess, ok := s.sessionManager.Get(id)
 	if !ok {
 		respondError(w, http.StatusNotFound, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
@@ -260,8 +287,19 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: wire to agent loop
-	respondJSON(w, http.StatusCreated, map[string]string{"status": "queued"})
+	if s.onPromptSubmit != nil {
+		promptID, err := s.onPromptSubmit(r.Context(), id, req.Content)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())
+			return
+		}
+		sess.SetStatus(session.StatusRunning)
+		respondJSON(w, http.StatusCreated, map[string]string{"status": "queued", "prompt_id": promptID})
+		return
+	}
+	// No prompt handler wired — accept and mark session busy
+	sess.SetStatus(session.StatusRunning)
+	respondJSON(w, http.StatusCreated, map[string]string{"status": "accepted", "note": "no agent loop wired"})
 }
 
 func (s *Server) handleAbortSession(w http.ResponseWriter, r *http.Request) {
