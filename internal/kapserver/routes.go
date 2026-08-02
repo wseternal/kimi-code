@@ -191,23 +191,43 @@ func (s *Server) handleSubmitPrompt(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCompactSession triggers compaction.
-// W5 fix: return 501 until actually wired to the agent loop.
 func (s *Server) handleCompactSession(w http.ResponseWriter, r *http.Request) {
-	_, ok := s.requireSession(w, r)
+	id, ok := s.requireSession(w, r)
 	if !ok {
 		return
 	}
-	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "compaction not yet implemented")
+	if s.onCompact != nil {
+		if err := s.onCompact(r.Context(), id); err != nil {
+			respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]string{"status": "compacted"})
+		return
+	}
+	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "compaction not configured")
 }
 
 // handleUndoSession undoes the last N messages.
-// W5 fix: return 501 until actually wired to the agent loop.
 func (s *Server) handleUndoSession(w http.ResponseWriter, r *http.Request) {
-	_, ok := s.requireSession(w, r)
+	id, ok := s.requireSession(w, r)
 	if !ok {
 		return
 	}
-	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "undo not yet implemented")
+	var req struct {
+		N int `json:"n"`
+	}
+	if err := decodeJSON(r, &req); err != nil || req.N <= 0 {
+		req.N = 1 // default: undo last message
+	}
+	if s.onUndo != nil {
+		if err := s.onUndo(r.Context(), id, req.N); err != nil {
+			respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"status": "undone", "n": req.N})
+		return
+	}
+	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "undo not configured")
 }
 
 // handleArchiveSession archives a session.
@@ -406,12 +426,22 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		func(items []rest.SkillDescriptor) any { return rest.ListSkillsResponse{Items: items} })
 }
 
+// TranscriptListFunc returns transcript entries for a session.
+type TranscriptListFunc func(ctx context.Context, sessionID string) ([]rest.TranscriptEntry, error)
+
 // handleListTranscript returns transcript entries for a session.
-// TODO(W17): Wire transcript.Store into the server to provide real transcript data.
-// Currently returns empty until the transcript store is integrated with the agent loop.
 func (s *Server) handleListTranscript(w http.ResponseWriter, r *http.Request) {
 	_, ok := s.requireSession(w, r)
 	if !ok {
+		return
+	}
+	if s.onListTranscript != nil {
+		entries, err := s.onListTranscript(r.Context(), r.PathValue("id"))
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())
+			return
+		}
+		respondJSON(w, 200, rest.ListTranscriptResponse{Items: entries, HasMore: false})
 		return
 	}
 	respondJSON(w, 200, rest.ListTranscriptResponse{Items: []rest.TranscriptEntry{}, HasMore: false})
@@ -488,9 +518,20 @@ func (s *Server) handleOAuthStatus(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleOAuthLogin initiates an OAuth device flow login.
-// W5 fix: return 501 until OAuth manager is wired.
 func (s *Server) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
-	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "OAuth login not yet implemented")
+	if s.onOAuthLogin != nil {
+		verificationURI, err := s.onOAuthLogin(r.Context())
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]string{
+			"status":           "started",
+			"verification_uri": verificationURI,
+		})
+		return
+	}
+	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "OAuth login not configured")
 }
 
 // handleListConnections returns active WebSocket connections.

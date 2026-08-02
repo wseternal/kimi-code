@@ -34,6 +34,18 @@ type ConfigProvider interface {
 // Returns a prompt ID and optional error.
 type PromptSubmitFunc func(ctx context.Context, sessionID, prompt string) (string, error)
 
+// CompactFunc triggers context compaction for a session.
+type CompactFunc func(ctx context.Context, sessionID string) error
+
+// UndoFunc undoes the last N messages in a session.
+type UndoFunc func(ctx context.Context, sessionID string, n int) error
+
+// MessageListFunc returns messages for a session.
+type MessageListFunc func(ctx context.Context, sessionID string) ([]protocol.Message, error)
+
+// OAuthLoginFunc triggers the OAuth device flow login.
+type OAuthLoginFunc func(ctx context.Context) (string, error)
+
 // SessionDataProvider provides session-scoped data for route handlers.
 // Implementations wire real agent subsystems (permissions, background tasks,
 // tool registry, etc.) to the server. Methods return empty slices when
@@ -71,6 +83,11 @@ type Server struct {
 	// When nil, the corresponding route returns an appropriate status
 	// without executing agent actions.
 	onPromptSubmit  PromptSubmitFunc
+	onCompact       CompactFunc
+	onUndo          UndoFunc
+	onListMessages  MessageListFunc
+	onOAuthLogin    OAuthLoginFunc
+	onListTranscript TranscriptListFunc
 	sessionData     SessionDataProvider
 	cancelFunc      context.CancelFunc // for shutdown
 	tokenStore      *TokenStore
@@ -99,6 +116,31 @@ type ServerOption func(*Server)
 // WithPromptSubmit wires a prompt submission handler.
 func WithPromptSubmit(fn PromptSubmitFunc) ServerOption {
 	return func(s *Server) { s.onPromptSubmit = fn }
+}
+
+// WithCompact wires a compaction handler.
+func WithCompact(fn CompactFunc) ServerOption {
+	return func(s *Server) { s.onCompact = fn }
+}
+
+// WithUndo wires an undo handler.
+func WithUndo(fn UndoFunc) ServerOption {
+	return func(s *Server) { s.onUndo = fn }
+}
+
+// WithMessageList wires a message listing handler.
+func WithMessageList(fn MessageListFunc) ServerOption {
+	return func(s *Server) { s.onListMessages = fn }
+}
+
+// WithOAuthLogin wires an OAuth login handler.
+func WithOAuthLogin(fn OAuthLoginFunc) ServerOption {
+	return func(s *Server) { s.onOAuthLogin = fn }
+}
+
+// WithTranscriptList wires a transcript listing handler.
+func WithTranscriptList(fn TranscriptListFunc) ServerOption {
+	return func(s *Server) { s.onListTranscript = fn }
 }
 
 // WithCancelFunc provides a context cancel function for shutdown.
@@ -441,8 +483,15 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	// Messages are stored in the audit/transcript store.
-	// A full message listing requires wiring the transcript reader; return empty for now.
+	if s.onListMessages != nil {
+		msgs, err := s.onListMessages(r.Context(), id)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, msgs)
+		return
+	}
 	respondJSON(w, http.StatusOK, []protocol.Message{})
 }
 
