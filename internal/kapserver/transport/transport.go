@@ -12,12 +12,23 @@ import (
 	"github.com/visdomtech/kimi-code/internal/protocol/ws"
 )
 
+const (
+	// heartbeatInterval is how often the server sends pings.
+	heartbeatInterval = 30 * time.Second
+	// pongTimeout is how long to wait for a pong before closing.
+	pongTimeout = heartbeatInterval + 10*time.Second
+	// writeTimeout is the max time to write a frame.
+	writeTimeout = 10 * time.Second
+)
+
+// S9: atomic counter for connection IDs to avoid time.Now() collisions.
+var connIDCounter atomic.Int64
+
 // Connection represents a WebSocket connection.
 type Connection struct {
 	ID            string
 	ClientID      string
-	conn          http.ResponseWriter
-	req           *http.Request
+	ws            *wsConn // real WebSocket connection (set after upgrade)
 	send          chan []byte
 	done          chan struct{}
 	logger        *slog.Logger
@@ -213,6 +224,8 @@ func (r *Registry) Broadcast(msg []byte) {
 }
 
 // BroadcastToSession sends a message to all connections subscribed to a session.
+// TODO(S8): Build a reverse index (sessionID → []conn) to avoid scanning all
+// connections on every broadcast, reducing from O(C) to O(S) where S is subscribers.
 func (r *Registry) BroadcastToSession(sessionID string, msg []byte) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -238,7 +251,7 @@ func (c *Connection) Send(msg []byte) {
 	}
 }
 
-// Close closes the connection.
+// Close closes the connection and its send channel (S7 fix).
 func (c *Connection) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -246,7 +259,7 @@ func (c *Connection) Close() {
 		return
 	}
 	c.closed = true
-	close(c.done)
+	close(c.done) // signal writePump to send close frame and exit
 }
 
 // Broadcaster manages per-session event broadcasting with journal replay.
@@ -254,9 +267,7 @@ type Broadcaster struct {
 	registry    *Registry
 	sequence    atomic.Int64
 	epoch       string
-	ring        []BroadcasterEvent // fixed-size circular buffer
-	ringHead    int                // index of the oldest element
-	ringCount   int                // number of elements currently in the ring
+	ring        ringBuf[BroadcasterEvent] // fixed-size circular buffer
 	journal     *EventJournal
 	turnTracker *TurnTracker
 	mu          sync.RWMutex
@@ -284,7 +295,7 @@ func NewBroadcaster(registry *Registry, ringSize int, logger *slog.Logger) *Broa
 	return &Broadcaster{
 		registry:    registry,
 		epoch:       time.Now().Format(time.RFC3339Nano),
-		ring:        make([]BroadcasterEvent, ringSize),
+		ring:        newRingBuf[BroadcasterEvent](ringSize),
 		journal:     NewEventJournal(),
 		turnTracker: NewTurnTracker(),
 		logger:      logger,
@@ -300,24 +311,17 @@ func (b *Broadcaster) Publish(eventType string, sessionID string, data any) {
 	}
 
 	seq := b.sequence.Add(1)
+	now := time.Now()
 	event := BroadcasterEvent{
 		Seq:       seq,
 		Type:      eventType,
 		SessionID: sessionID,
 		Data:      raw,
-		Time:      time.Now(),
+		Time:      now,
 	}
 
 	b.mu.Lock()
-	// Circular buffer write: overwrite oldest when full.
-	idx := (b.ringHead + b.ringCount) % len(b.ring)
-	if b.ringCount == len(b.ring) {
-		// Buffer full — advance head (overwrite oldest)
-		b.ringHead = (b.ringHead + 1) % len(b.ring)
-	} else {
-		b.ringCount++
-	}
-	b.ring[idx] = event
+	b.ring.Push(event)
 	b.mu.Unlock()
 
 	// Persist to journal for replay
@@ -325,14 +329,14 @@ func (b *Broadcaster) Publish(eventType string, sessionID string, data any) {
 		b.journal.Append(sessionID, event)
 	}
 
-	// Route to session subscribers or broadcast globally
+	// Build the wire message once and reuse (W13: avoid double marshal).
 	msg, _ := json.Marshal(map[string]any{
 		"type":       eventType,
 		"seq":        seq,
 		"epoch":      b.epoch,
 		"session_id": sessionID,
-		"timestamp":  event.Time.Format(time.RFC3339Nano),
-		"data":       data,
+		"timestamp":  now.Format(time.RFC3339Nano),
+		"data":       json.RawMessage(raw),
 	})
 	if sessionID != "" {
 		b.registry.BroadcastToSession(sessionID, msg)
@@ -369,10 +373,8 @@ func (b *Broadcaster) PublishVolatile(eventType string, sessionID string, data a
 func (b *Broadcaster) EventsAfter(seq int64) []BroadcasterEvent {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-
 	var result []BroadcasterEvent
-	for i := 0; i < b.ringCount; i++ {
-		e := b.ring[(b.ringHead+i)%len(b.ring)]
+	for _, e := range b.ring.All() {
 		if e.Seq > seq {
 			result = append(result, e)
 		}
@@ -410,45 +412,180 @@ func (b *Broadcaster) Journal() *EventJournal {
 	return b.journal
 }
 
-// HandleWebSocket handles a WebSocket upgrade request.
-// Note: This is a stub. Real implementation would use nhooyr.io/websocket or gorilla/websocket.
+// HandleWebSocket handles a WebSocket upgrade request using RFC 6455
+// handshake via net/http.Hijacker, then runs read/write pumps with heartbeat.
 func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.Logger) http.HandlerFunc {
+	return HandleWebSocketWithOrigins(registry, broadcaster, logger, nil)
+}
+
+// HandleWebSocketWithOrigins handles WebSocket upgrades with optional origin restriction.
+func HandleWebSocketWithOrigins(registry *Registry, broadcaster *Broadcaster, logger *slog.Logger, allowedOrigins []string) http.HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		connID := fmt.Sprintf("ws_%d", time.Now().UnixNano())
+		// Perform WebSocket handshake.
+		wsconn, err := upgradeWebSocket(w, r, allowedOrigins)
+		if err != nil {
+			logger.Error("websocket upgrade failed", "error", err)
+			return
+		}
+
+		// S9 fix: use atomic counter for connection ID to avoid collisions.
+		connID := fmt.Sprintf("ws_%d", connIDCounter.Add(1))
 		clientID := r.URL.Query().Get("client_id")
 		if clientID == "" {
 			clientID = "anonymous"
 		}
 
-		conn := NewConnection(connID, clientID, logger)
+		// Create a logger scoped to this connection.
+		connLogger := logger.With("conn_id", connID, "client_id", clientID)
+
+		// W10 fix: use NewConnection constructor, then assign ws.
+		conn := NewConnection(connID, clientID, connLogger)
+		conn.ws = wsconn
 		registry.Add(conn)
 		defer func() {
 			registry.Remove(connID)
 			conn.Close()
+			wsconn.close()
 		}()
 
-		logger.Info("websocket connection opened", "conn_id", connID, "client_id", clientID)
+		connLogger.Info("websocket connection opened")
 
-		// Send server hello
+		// Send server hello over the WebSocket.
 		hello := ws.ServerHelloMessage{
 			Type:      "server_hello",
 			Timestamp: time.Now().Format(time.RFC3339Nano),
 			Payload: ws.ServerHelloPayload{
 				WSConnectionID:     connID,
 				ProtocolVersion:    ws.ProtocolVersion,
-				HeartbeatMs:        30000,
-				MaxEventBufferSize: len(broadcaster.ring),
+				HeartbeatMs:        int(heartbeatInterval.Milliseconds()),
+				MaxEventBufferSize: broadcaster.ring.Cap(),
 				Capabilities: ws.ServerHelloCapabilities{
 					EventBatching: true,
 					Compression:   false,
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(hello)
+		helloJSON, _ := json.Marshal(hello)
+		// W13 fix: use connLogger instead of logger for connection-scoped context.
+		if err := conn.ws.writeText(string(helloJSON)); err != nil {
+			connLogger.Error("failed to send server hello", "error", err)
+			return
+		}
+
+		// Run read and write pumps concurrently.
+		errCh := make(chan error, 2)
+		go func() { errCh <- conn.writePump() }()
+		go func() { errCh <- conn.readPump(registry, broadcaster) }()
+
+		// Wait for the first pump to finish, then close the TCP connection
+		// to force the other pump to exit, and wait for it.
+		<-errCh
+		wsconn.close() // close TCP to unblock the other pump
+		<-errCh
+		connLogger.Info("websocket connection closed")
+	}
+}
+
+// writePump drains the send channel and writes frames to the WebSocket.
+// It also sends periodic ping frames for heartbeat.
+func (c *Connection) writePump() error {
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case msg := <-c.send:
+			c.ws.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.ws.writeText(string(msg)); err != nil {
+				c.logger.Error("writePump: write failed", "error", err)
+				return err
+			}
+		case <-ticker.C:
+			c.ws.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.ws.writePing(nil); err != nil {
+				c.logger.Error("writePump: ping failed", "error", err)
+				return err
+			}
+		case <-c.done:
+			c.ws.writeClose(1000, "closing")
+			return nil
+		}
+	}
+}
+
+// readPump reads frames from the WebSocket and dispatches them.
+func (c *Connection) readPump(registry *Registry, broadcaster *Broadcaster) error {
+	c.ws.setReadDeadline(time.Now().Add(pongTimeout))
+	for {
+		opcode, payload, err := c.ws.readFrame()
+		if err != nil {
+			c.logger.Error("readPump: read failed", "error", err) // W12b
+			return err
+		}
+		// Reset read deadline after each successful read.
+		c.ws.setReadDeadline(time.Now().Add(pongTimeout))
+
+		switch opcode {
+		case opText:
+			c.handleMessage(payload, registry, broadcaster)
+		case opPing:
+			// Respond to ping with pong (writePong is thread-safe via writeMu).
+			c.ws.writePong(payload)
+		case opPong:
+			c.UpdatePong()
+		case opClose:
+			c.logger.Info("readPump: received close frame") // W12b
+			return nil
+		}
+	}
+}
+
+// handleMessage dispatches a text message to the appropriate handler.
+// W9 fix: route ACK responses via send channel to maintain single-writer guarantee.
+func (c *Connection) handleMessage(data []byte, registry *Registry, broadcaster *Broadcaster) {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		c.logger.Warn("invalid message envelope", "error", err) // W12b
+		return
+	}
+
+	switch envelope.Type {
+	case "client_hello":
+		var msg ws.ClientHelloMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			c.logger.Warn("invalid client_hello", "error", err) // W12b
+			return
+		}
+		ack := HandleClientHello(c, broadcaster, msg)
+		resp, _ := json.Marshal(map[string]interface{}{"type": "client_hello_ack", "payload": ack})
+		c.Send(resp) // W9: route via send channel
+
+	case "subscribe":
+		var msg ws.SubscribeMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			c.logger.Warn("invalid subscribe", "error", err) // W12b
+			return
+		}
+		ack := HandleSubscribe(c, broadcaster, msg)
+		resp, _ := json.Marshal(map[string]interface{}{"type": "subscribe_ack", "payload": ack})
+		c.Send(resp) // W9: route via send channel
+
+	case "unsubscribe":
+		var msg ws.UnsubscribeMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			c.logger.Warn("invalid unsubscribe", "error", err) // W12b
+			return
+		}
+		HandleUnsubscribe(c, msg)
+		resp, _ := json.Marshal(map[string]interface{}{"type": "unsubscribe_ack"})
+		c.Send(resp) // W9: route via send channel
+
+	default:
+		c.logger.Debug("unhandled message type", "type", envelope.Type)
 	}
 }
 
@@ -505,41 +642,84 @@ func HandleUnsubscribe(conn *Connection, msg ws.UnsubscribeMessage) {
 	conn.Unsubscribe(msg.Payload.SessionIDs)
 }
 
+// ── Ring Buffer ──
+
+// ringBuf is a generic fixed-size circular buffer.
+type ringBuf[T any] struct {
+	data  []T
+	head  int // index of the oldest element
+	count int // number of elements currently stored
+}
+
+// newRingBuf creates a ring buffer with the given capacity.
+func newRingBuf[T any](capacity int) ringBuf[T] {
+	return ringBuf[T]{data: make([]T, capacity)}
+}
+
+// Push writes an item, overwriting the oldest when full.
+func (r *ringBuf[T]) Push(item T) {
+	idx := (r.head + r.count) % len(r.data)
+	if r.count == len(r.data) {
+		r.head = (r.head + 1) % len(r.data)
+	} else {
+		r.count++
+	}
+	r.data[idx] = item
+}
+
+// All returns all items in insertion order (oldest first).
+func (r *ringBuf[T]) All() []T {
+	out := make([]T, 0, r.count)
+	for i := 0; i < r.count; i++ {
+		out = append(out, r.data[(r.head+i)%len(r.data)])
+	}
+	return out
+}
+
+// Cap returns the buffer capacity.
+func (r *ringBuf[T]) Cap() int { return len(r.data) }
+
 // ── Event Journal ──
 
 // EventJournal stores per-session event history for replay on reconnect.
+// W11 fix: uses ring buffer per session to avoid O(n) slice shift at capacity.
 type EventJournal struct {
-	mu       sync.RWMutex
-	sessions map[string][]BroadcasterEvent
+	mu            sync.RWMutex
+	sessions      map[string]*ringBuf[BroadcasterEvent]
 	maxPerSession int
 }
 
 // NewEventJournal creates a new event journal.
 func NewEventJournal() *EventJournal {
 	return &EventJournal{
-		sessions:      make(map[string][]BroadcasterEvent),
+		sessions:      make(map[string]*ringBuf[BroadcasterEvent]),
 		maxPerSession: 5000,
 	}
 }
 
-// Append adds an event to a session's journal.
+// Append adds an event to a session's journal using ring buffer (W11 fix).
 func (j *EventJournal) Append(sessionID string, event BroadcasterEvent) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	events := j.sessions[sessionID]
-	if len(events) >= j.maxPerSession {
-		events = events[1:]
+	ring, ok := j.sessions[sessionID]
+	if !ok {
+		rb := newRingBuf[BroadcasterEvent](j.maxPerSession)
+		ring = &rb
+		j.sessions[sessionID] = ring
 	}
-	j.sessions[sessionID] = append(events, event)
+	ring.Push(event)
 }
 
 // EventsAfter returns events for a session after a given sequence.
 func (j *EventJournal) EventsAfter(sessionID string, afterSeq int64) []BroadcasterEvent {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	events := j.sessions[sessionID]
+	ring, ok := j.sessions[sessionID]
+	if !ok || ring.count == 0 {
+		return nil
+	}
 	var result []BroadcasterEvent
-	for _, e := range events {
+	for _, e := range ring.All() {
 		if e.Seq > afterSeq {
 			result = append(result, e)
 		}
@@ -558,7 +738,10 @@ func (j *EventJournal) Clear(sessionID string) {
 func (j *EventJournal) Count(sessionID string) int {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	return len(j.sessions[sessionID])
+	if ring, ok := j.sessions[sessionID]; ok {
+		return ring.count
+	}
+	return 0
 }
 
 // ── Turn Tracker ──

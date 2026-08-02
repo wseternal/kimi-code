@@ -55,8 +55,7 @@ func (m *SecurityMiddleware) Wrap(next http.Handler) http.Handler {
 				return
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			// N3 fix: only set ACAO when Origin is present; don't set wildcard otherwise.
 		}
 		w.Header().Set("Vary", "Origin")
 
@@ -88,6 +87,13 @@ func (m *SecurityMiddleware) Wrap(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Stop releases background resources used by the security middleware.
+func (m *SecurityMiddleware) Stop() {
+	if m.rateLimiter != nil {
+		m.rateLimiter.Stop()
+	}
 }
 
 func (m *SecurityMiddleware) isAllowedOrigin(origin string) bool {
@@ -159,6 +165,7 @@ type rateLimiter struct {
 	mu       sync.Mutex
 	limit    int
 	counters map[string]*rateCounter
+	done     chan struct{}
 }
 
 type rateCounter struct {
@@ -167,9 +174,39 @@ type rateCounter struct {
 }
 
 func newRateLimiter(limitPerMinute int) *rateLimiter {
-	return &rateLimiter{
+	rl := &rateLimiter{
 		limit:    limitPerMinute,
 		counters: make(map[string]*rateCounter),
+		done:     make(chan struct{}),
+	}
+	// W7 fix: start background goroutine to evict stale rate counter entries.
+	go rl.evictStale()
+	return rl
+}
+
+// Stop terminates the background eviction goroutine.
+func (rl *rateLimiter) Stop() {
+	close(rl.done)
+}
+
+// evictStale periodically removes rate counter entries older than 2 minutes.
+func (rl *rateLimiter) evictStale() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-rl.done:
+			return
+		case <-ticker.C:
+			rl.mu.Lock()
+			now := time.Now()
+			for ip, counter := range rl.counters {
+				if now.Sub(counter.windowAt) > 2*time.Minute {
+					delete(rl.counters, ip)
+				}
+			}
+			rl.mu.Unlock()
+		}
 	}
 }
 

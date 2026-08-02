@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/hooks"
 )
 
 // Config is the application configuration, compatible with the TS CLI's
@@ -24,6 +26,8 @@ type Config struct {
 	Permission      PermissionConfig             `toml:"permission"`
 	Experimental    map[string]bool              `toml:"experimental"`
 	Server          ServerConfig                 `toml:"server"`
+	SecondaryModel  *SecondaryModelConfig        `toml:"secondary_model,omitempty"`
+	Hooks           []hooks.HookDef              `toml:"hooks,omitempty"`
 
 	// Raw holds the original parsed TOML data for forward-compatible
 	// round-tripping of sections the Go CLI does not yet consume.
@@ -105,6 +109,12 @@ type PermissionRule struct {
 type ServerConfig struct {
 	Host string `toml:"host"`
 	Port int    `toml:"port"`
+}
+
+// SecondaryModelConfig specifies a fallback/cheaper model for sub-agents.
+type SecondaryModelConfig struct {
+	Model         string `toml:"model"`
+	DefaultEffort string `toml:"default_effort,omitempty"`
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -242,6 +252,12 @@ func (c *Config) overlayTyped(raw map[string]any) {
 	}
 	if c.Server.Host != "" || c.Server.Port != 0 {
 		raw["server"] = serverToMap(c.Server)
+	}
+	if c.SecondaryModel != nil {
+		raw["secondary_model"] = secondaryModelToMap(c.SecondaryModel)
+	}
+	if len(c.Hooks) > 0 {
+		raw["hooks"] = hooksToMap(c.Hooks)
 	}
 }
 
@@ -383,6 +399,32 @@ func serverToMap(s ServerConfig) map[string]any {
 		m["port"] = s.Port
 	}
 	return m
+}
+
+func secondaryModelToMap(sm *SecondaryModelConfig) map[string]any {
+	m := make(map[string]any)
+	if sm.Model != "" {
+		m["model"] = sm.Model
+	}
+	if sm.DefaultEffort != "" {
+		m["default_effort"] = sm.DefaultEffort
+	}
+	return m
+}
+
+func hooksToMap(hks []hooks.HookDef) []any {
+	out := make([]any, len(hks))
+	for i, h := range hks {
+		m := map[string]any{"event": string(h.Event), "command": h.Command}
+		if h.Matcher != "" {
+			m["matcher"] = h.Matcher
+		}
+		if h.Timeout != 0 {
+			m["timeout"] = h.Timeout
+		}
+		out[i] = m
+	}
+	return out
 }
 
 // ConfigPath returns the default config.toml path under the given home dir.

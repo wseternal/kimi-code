@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agentctx "github.com/visdomtech/kimi-code/internal/agentcore/agent/context"
+	"github.com/visdomtech/kimi-code/internal/agentcore/agent/hooks"
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
 	"github.com/visdomtech/kimi-code/internal/agentcore/event"
 	"github.com/visdomtech/kimi-code/internal/kosong"
@@ -106,6 +107,7 @@ type Service struct {
 	provider     kosong.ChatProvider
 	toolRegistry *tools.Registry
 	eventBus     *event.Bus[Event]
+	hookEngine   *hooks.Engine
 
 	turnQueue   chan *TurnJob
 	stepSeq     atomic.Int64
@@ -145,6 +147,13 @@ func WithCompaction(fn CompactionFunc, strategy *agentctx.CompactionStrategy, cm
 		s.compaction = fn
 		s.compactionStrategy = strategy
 		s.contextManager = cm
+	}
+}
+
+// WithHooks sets the hook engine for lifecycle hook execution.
+func WithHooks(engine *hooks.Engine) Option {
+	return func(s *Service) {
+		s.hookEngine = engine
 	}
 }
 
@@ -584,10 +593,61 @@ func (s *Service) executeToolCall(turn *TurnJob, tc kosong.ToolCall) (*tools.Res
 		input = json.RawMessage("{}")
 	}
 
-	return tool.Execute(turn.ctx, input, tools.ExecContext{
+	// PreToolUse hook: can block tool execution
+	if s.hookEngine != nil {
+		hookInput := hooks.HookInput{
+			Event: hooks.PreToolUse,
+			Tool: &hooks.HookToolInput{
+				Name:      tc.Name,
+				Input:     string(input),
+				SessionID: turn.SessionID,
+			},
+			Session: &hooks.HookSession{
+				ID:      turn.SessionID,
+				WorkDir: s.workDir,
+			},
+		}
+		decision := s.hookEngine.TriggerBlock(turn.ctx, hooks.PreToolUse, hookInput)
+		if decision.Blocked {
+			return &tools.Result{
+				Output:  fmt.Sprintf("Tool %q blocked by hook: %s", tc.Name, decision.Reason),
+				IsError: true,
+			}, nil
+		}
+	}
+
+	result, err := tool.Execute(turn.ctx, input, tools.ExecContext{
 		SessionID: turn.SessionID,
 		WorkDir:   s.workDir,
 	})
+
+	// PostToolUse hook: fire and forget
+	if s.hookEngine != nil {
+		hookInput := hooks.HookInput{
+			Event: hooks.PostToolUse,
+			Tool: &hooks.HookToolInput{
+				Name:      tc.Name,
+				Input:     string(input),
+				SessionID: turn.SessionID,
+			},
+			Session: &hooks.HookSession{
+				ID:      turn.SessionID,
+				WorkDir: s.workDir,
+			},
+		}
+		if result != nil {
+			hookInput.Tool.Output = result.Output
+			hookInput.Tool.IsError = result.IsError
+		}
+		event := hooks.PostToolUse
+		if err != nil || (result != nil && result.IsError) {
+			event = hooks.PostToolUseFailure
+			hookInput.Event = event
+		}
+		s.hookEngine.FireAndForget(turn.ctx, event, hookInput)
+	}
+
+	return result, err
 }
 
 // shouldAutoCompact checks if auto-compaction should be triggered.

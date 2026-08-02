@@ -351,8 +351,17 @@ func (m *Manager) Login(ctx context.Context, opts LoginOptions) (*TokenInfo, err
 	return nil, NewOAuthError("device flow ended unexpectedly")
 }
 
-// acquireLock acquires a cross-process file lock. Returns a release function and an error.
-// If the lock cannot be acquired within the timeout, an error is returned.
+// staleLockThreshold is the maximum age of a lock directory before it is
+// considered stale. Token refresh typically completes in <10s, so 2 minutes
+// is a very generous margin.
+const staleLockThreshold = 2 * time.Minute
+
+// acquireLock acquires a cross-process lock using directory creation (mkdir).
+// This is compatible with the TypeScript kimi CLI which uses mkdir/rmdir for
+// the same lock path. Stale locks are detected via the directory's mtime.
+// No files are written inside the lock directory, ensuring that rmdir-based
+// release (used by both CLIs) works without ENOTEMPTY errors.
+// Returns a release function and an error.
 func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 	if m.configDir == "" {
 		return func() {}, nil
@@ -363,26 +372,42 @@ func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 		return nil, fmt.Errorf("create lock dir: %w", err)
 	}
 
-	lockFile := filepath.Join(lockDir, m.config.Name+".lock")
-	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open lock file: %w", err)
-	}
+	lockPath := filepath.Join(lockDir, m.config.Name+".lock")
 
-	// Try to acquire exclusive lock with retry
 	for i := 0; i < 120; i++ {
-		if err := flockExclusive(f); err == nil {
+		if err := os.Mkdir(lockPath, 0o700); err == nil {
+			// Acquired. Release via os.Remove (rmdir) — compatible with TS CLI.
 			return func() {
-				flockUnlock(f)
-				f.Close()
+				os.Remove(lockPath)
 			}, nil
 		}
-		if !contextSleep(ctx, 500*time.Millisecond) {
-			f.Close()
+
+		// Lock directory exists — check mtime for stale detection.
+		// A lock older than the threshold is assumed orphaned.
+		if info, err := os.Stat(lockPath); err == nil {
+			if time.Since(info.ModTime()) > staleLockThreshold {
+				os.Remove(lockPath)
+				continue
+			}
+		}
+
+		if !m.contextSleepFunc(ctx, 500*time.Millisecond) {
 			return nil, ctx.Err()
 		}
 	}
 
-	f.Close()
 	return nil, fmt.Errorf("failed to acquire lock after 60s")
+}
+
+// contextSleepFunc sleeps for d or until ctx is cancelled, using the injectable
+// sleepFunc for testability. Returns false if the context was cancelled.
+func (m *Manager) contextSleepFunc(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

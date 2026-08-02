@@ -1,2 +1,4 @@
-// Package transport — stub, will be implemented in a later phase.
+// Package transport implements WebSocket transport for the kapserver,
+// including connection management, event broadcasting, session journals,
+// and in-flight turn tracking.
 package transport

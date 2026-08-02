@@ -19,6 +19,10 @@ type Harness struct {
 	SessionManager *session.Manager
 	ctx            context.Context
 	cancel         context.CancelFunc
+
+	// PromptHandler is called when SubmitPrompt is invoked.
+	// When nil, SubmitPrompt is a no-op (caller wires the agent loop).
+	PromptHandler func(ctx context.Context, sessionID, prompt string) error
 }
 
 // NewHarness creates a new in-process harness.
@@ -69,8 +73,16 @@ func (h *Harness) DeleteSession(id string) {
 }
 
 // SubmitPrompt submits a prompt to a session.
-// TODO: Wire to agent loop.
-func (h *Harness) SubmitPrompt(_ string, _ string) error {
+// Delegates to the wired PromptHandler if set; otherwise marks session running.
+func (h *Harness) SubmitPrompt(sessionID, prompt string) error {
+	sess, ok := h.SessionManager.Get(sessionID)
+	if !ok {
+		return fmt.Errorf("session %q not found", sessionID)
+	}
+	if h.PromptHandler != nil {
+		return h.PromptHandler(h.ctx, sessionID, prompt)
+	}
+	sess.SetStatus(session.StatusRunning)
 	return nil
 }
 

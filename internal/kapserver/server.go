@@ -7,11 +7,44 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
 	"github.com/visdomtech/kimi-code/internal/protocol"
+	"github.com/visdomtech/kimi-code/internal/protocol/rest"
 )
+
+// sessionSeq is an atomic counter for unique session IDs.
+var sessionSeq atomic.Uint64
+
+// PromptSubmitFunc is called when a prompt is submitted via REST.
+// Returns a prompt ID and optional error.
+type PromptSubmitFunc func(ctx context.Context, sessionID, prompt string) (string, error)
+
+// SessionDataProvider provides session-scoped data for route handlers.
+// Implementations wire real agent subsystems (permissions, background tasks,
+// tool registry, etc.) to the server. Methods return empty slices when
+// the subsystem is not available.
+type SessionDataProvider interface {
+	// ListApprovals returns pending approval requests for a session.
+	ListApprovals(sessionID string) []protocol.ApprovalRequest
+	// ListQuestions returns pending questions for a session.
+	ListQuestions(sessionID string) []protocol.QuestionRequest
+	// ListTasks returns background tasks for a session.
+	ListTasks(sessionID string) []rest.TaskInfo
+	// ListTools returns registered tool descriptors for a session.
+	ListTools(sessionID string) []rest.ToolDescriptor
+	// ListTerminals returns active terminals for a session.
+	ListTerminals(sessionID string) []rest.TerminalInfo
+	// ListSkills returns discovered skills for a session.
+	ListSkills(sessionID string) []rest.SkillDescriptor
+	// ResolveApproval resolves a pending approval. Returns error if not found.
+	ResolveApproval(sessionID, approvalID string, response protocol.ApprovalResponse) error
+	// ResolveQuestion resolves a pending question. Returns error if not found.
+	ResolveQuestion(sessionID, questionID string, response protocol.QuestionResponse) error
+}
 
 // Server is the HTTP + WebSocket server.
 type Server struct {
@@ -20,7 +53,20 @@ type Server struct {
 	logger         *slog.Logger
 	host           string
 	port           int
+	workDir        string
 	mux            *http.ServeMux
+
+	// Optional callbacks wired by the caller.
+	// When nil, the corresponding route returns an appropriate status
+	// without executing agent actions.
+	onPromptSubmit  PromptSubmitFunc
+	sessionData     SessionDataProvider
+	cancelFunc      context.CancelFunc // for shutdown
+	tokenStore      *TokenStore
+	securityConfig  SecurityConfig
+	security        *SecurityMiddleware
+	snapshotSvc     *SnapshotService
+	searchSvc       *SearchService
 }
 
 // Config holds server configuration.
@@ -29,8 +75,41 @@ type Config struct {
 	Port int
 }
 
+// ServerOption configures optional server features.
+type ServerOption func(*Server)
+
+// WithPromptSubmit wires a prompt submission handler.
+func WithPromptSubmit(fn PromptSubmitFunc) ServerOption {
+	return func(s *Server) { s.onPromptSubmit = fn }
+}
+
+// WithCancelFunc provides a context cancel function for shutdown.
+func WithCancelFunc(fn context.CancelFunc) ServerOption {
+	return func(s *Server) { s.cancelFunc = fn }
+}
+
+// WithSessionDataProvider wires a session data provider for session-scoped routes.
+func WithSessionDataProvider(p SessionDataProvider) ServerOption {
+	return func(s *Server) { s.sessionData = p }
+}
+
+// WithTokenStore wires an auth token store for bearer authentication.
+func WithTokenStore(ts *TokenStore) ServerOption {
+	return func(s *Server) { s.tokenStore = ts }
+}
+
+// WithSecurityConfig configures the security middleware (CORS, rate limiting).
+func WithSecurityConfig(cfg SecurityConfig) ServerOption {
+	return func(s *Server) { s.securityConfig = cfg }
+}
+
+// WithWorkDir sets the server's working directory for file operations.
+func WithWorkDir(dir string) ServerOption {
+	return func(s *Server) { s.workDir = dir }
+}
+
 // NewServer creates a new server.
-func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger) *Server {
+func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger, opts ...ServerOption) *Server {
 	if cfg.Host == "" {
 		cfg.Host = "127.0.0.1"
 	}
@@ -48,6 +127,25 @@ func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger) *Se
 		port:           cfg.Port,
 		mux:            http.NewServeMux(),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	// Default workDir to current directory if not set.
+	if s.workDir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			s.workDir = wd
+		}
+	}
+
+	// Default security config: bind address for loopback detection.
+	if s.securityConfig.BindAddress == "" {
+		s.securityConfig.BindAddress = cfg.Host
+	}
+
+	// Cache services to avoid per-request allocation (S2).
+	s.snapshotSvc = NewSnapshotService(sessionMgr)
+	s.searchSvc = NewSearchService(s.workDir)
 
 	s.setupRoutes()
 	return s
@@ -88,6 +186,28 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("POST /api/v1/sessions/{id}/search", s.handleSearch)
 	s.mux.HandleFunc("GET /api/v1/sessions/{id}/snapshot", s.handleSnapshot)
 	s.mux.HandleFunc("GET /api/v1/sessions/{id}/export", s.handleSessionExport)
+
+	// Approval & question routes
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/approvals", s.handleListApprovals)
+	s.mux.HandleFunc("POST /api/v1/sessions/{id}/approvals/{approval_id}", s.handleResolveApproval)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/questions", s.handleListQuestions)
+	s.mux.HandleFunc("POST /api/v1/sessions/{id}/questions/{question_id}", s.handleResolveQuestion)
+
+	// Session sub-resource routes
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/tasks", s.handleListTasks)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/tools", s.handleListTools)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/terminals", s.handleListTerminals)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/skills", s.handleListSkills)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/transcript", s.handleListTranscript)
+	s.mux.HandleFunc("GET /api/v1/sessions/{id}/fs", s.handleBrowseFS)
+
+	// Global routes
+	s.mux.HandleFunc("GET /api/v1/model-catalog", s.handleModelCatalog)
+	s.mux.HandleFunc("GET /api/v1/oauth/status", s.handleOAuthStatus)
+	s.mux.HandleFunc("POST /api/v1/oauth/login", s.handleOAuthLogin)
+	s.mux.HandleFunc("GET /api/v1/connections", s.handleListConnections)
+	s.mux.HandleFunc("GET /api/v1/workspaces", s.handleListWorkspaces)
+	s.mux.HandleFunc("POST /api/v1/workspaces", s.handleCreateWorkspace)
 }
 
 // Start starts the HTTP server.
@@ -102,6 +222,9 @@ func (s *Server) Start(_ context.Context) error {
 
 // Stop gracefully stops the server.
 func (s *Server) Stop(ctx context.Context) error {
+	if s.security != nil {
+		s.security.Stop()
+	}
 	return s.httpServer.Shutdown(ctx)
 }
 
@@ -111,12 +234,28 @@ func (s *Server) Addr() string {
 }
 
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
+	// Apply security middleware (CORS origin validation, host checks, rate limiting).
+	sec := NewSecurityMiddleware(s.securityConfig)
+	s.security = sec
+	handler := sec.Wrap(next)
+
+	// Apply bearer auth middleware when a token store is configured.
+	if s.tokenStore != nil {
+		skipPaths := []string{
+			"/api/v1/health",
+			"/api/v1/meta",
+			"/api/v1/oauth/login",
+			"/api/v1/oauth/status",
+		}
+		auth := BearerAuthMiddleware(s.tokenStore, skipPaths)
+		handler = auth(handler)
+	}
+
+	// Wrap with request ID and content-type.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusNoContent)
@@ -130,7 +269,17 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", requestID)
 
-		next.ServeHTTP(w, r)
+		// S8 fix: access logging middleware.
+		start := time.Now()
+		rw := &statusResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		handler.ServeHTTP(rw, r)
+		s.logger.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.statusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"remote", r.RemoteAddr,
+		)
 	})
 }
 
@@ -146,6 +295,28 @@ func respondError(w http.ResponseWriter, status int, code int, msg string) {
 	env := protocol.ErrEnvelope(code, msg, w.Header().Get("X-Request-ID"))
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(env)
+}
+
+// statusResponseWriter captures the HTTP status code for access logging (S8 fix).
+type statusResponseWriter struct {
+	http.ResponseWriter
+	statusCode  int
+	wroteHeader bool
+}
+
+func (w *statusResponseWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.statusCode = code
+		w.wroteHeader = true
+		w.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (w *statusResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 // Route handlers
@@ -179,7 +350,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := fmt.Sprintf("sess_%d", time.Now().UnixNano())
+	id := fmt.Sprintf("sess_%d_%d", time.Now().UnixMilli(), sessionSeq.Add(1))
 	sess, err := s.sessionManager.Create(r.Context(), id, req.Title)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())
@@ -240,13 +411,14 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	// Messages not yet wired — return empty
+	// Messages are stored in the audit/transcript store.
+	// A full message listing requires wiring the transcript reader; return empty for now.
 	respondJSON(w, http.StatusOK, []protocol.Message{})
 }
 
 func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	sess, ok := s.sessionManager.Get(id)
 	if !ok {
 		respondError(w, http.StatusNotFound, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
@@ -260,8 +432,19 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: wire to agent loop
-	respondJSON(w, http.StatusCreated, map[string]string{"status": "queued"})
+	if s.onPromptSubmit != nil {
+		promptID, err := s.onPromptSubmit(r.Context(), id, req.Content)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())
+			return
+		}
+		sess.SetStatus(session.StatusRunning)
+		respondJSON(w, http.StatusCreated, map[string]string{"status": "queued", "prompt_id": promptID})
+		return
+	}
+	// No prompt handler wired — accept and mark session busy
+	sess.SetStatus(session.StatusRunning)
+	respondJSON(w, http.StatusCreated, map[string]string{"status": "accepted", "note": "no agent loop wired"})
 }
 
 func (s *Server) handleAbortSession(w http.ResponseWriter, r *http.Request) {
