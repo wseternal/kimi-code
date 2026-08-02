@@ -351,10 +351,16 @@ func (m *Manager) Login(ctx context.Context, opts LoginOptions) (*TokenInfo, err
 	return nil, NewOAuthError("device flow ended unexpectedly")
 }
 
+// staleLockThreshold is the maximum age of a lock directory before it is
+// considered stale. Token refresh typically completes in <10s, so 2 minutes
+// is a very generous margin.
+const staleLockThreshold = 2 * time.Minute
+
 // acquireLock acquires a cross-process lock using directory creation (mkdir).
 // This is compatible with the TypeScript kimi CLI which uses mkdir/rmdir for
-// the same lock path. A PID file is written inside the lock directory to
-// enable stale lock detection.
+// the same lock path. Stale locks are detected via the directory's mtime.
+// No files are written inside the lock directory, ensuring that rmdir-based
+// release (used by both CLIs) works without ENOTEMPTY errors.
 // Returns a release function and an error.
 func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 	if m.configDir == "" {
@@ -370,26 +376,18 @@ func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 
 	for i := 0; i < 120; i++ {
 		if err := os.Mkdir(lockPath, 0o700); err == nil {
-			// Acquired — write PID for stale detection.
-			pidFile := filepath.Join(lockPath, "pid")
-			_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600)
+			// Acquired. Release via os.Remove (rmdir) — compatible with TS CLI.
 			return func() {
-				os.Remove(pidFile)
 				os.Remove(lockPath)
 			}, nil
 		}
 
-		// Lock directory exists — check if holder is stale.
-		pidFile := filepath.Join(lockPath, "pid")
-		if pidData, err := os.ReadFile(pidFile); err == nil {
-			var pid int
-			if _, err := fmt.Sscanf(string(pidData), "%d", &pid); err == nil && pid > 0 {
-				if !isProcessAlive(pid) {
-					// Stale lock: previous holder died without releasing.
-					os.Remove(pidFile)
-					os.Remove(lockPath)
-					continue
-				}
+		// Lock directory exists — check mtime for stale detection.
+		// A lock older than the threshold is assumed orphaned.
+		if info, err := os.Stat(lockPath); err == nil {
+			if time.Since(info.ModTime()) > staleLockThreshold {
+				os.Remove(lockPath)
+				continue
 			}
 		}
 
