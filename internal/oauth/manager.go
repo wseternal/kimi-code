@@ -351,8 +351,11 @@ func (m *Manager) Login(ctx context.Context, opts LoginOptions) (*TokenInfo, err
 	return nil, NewOAuthError("device flow ended unexpectedly")
 }
 
-// acquireLock acquires a cross-process file lock. Returns a release function and an error.
-// If the lock cannot be acquired within the timeout, an error is returned.
+// acquireLock acquires a cross-process lock using directory creation (mkdir).
+// This is compatible with the TypeScript kimi CLI which uses mkdir/rmdir for
+// the same lock path. A PID file is written inside the lock directory to
+// enable stale lock detection.
+// Returns a release function and an error.
 func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 	if m.configDir == "" {
 		return func() {}, nil
@@ -363,26 +366,37 @@ func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 		return nil, fmt.Errorf("create lock dir: %w", err)
 	}
 
-	lockFile := filepath.Join(lockDir, m.config.Name+".lock")
-	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open lock file: %w", err)
-	}
+	lockPath := filepath.Join(lockDir, m.config.Name+".lock")
 
-	// Try to acquire exclusive lock with retry
 	for i := 0; i < 120; i++ {
-		if err := flockExclusive(f); err == nil {
+		if err := os.Mkdir(lockPath, 0o700); err == nil {
+			// Acquired — write PID for stale detection.
+			pidFile := filepath.Join(lockPath, "pid")
+			_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600)
 			return func() {
-				flockUnlock(f)
-				f.Close()
+				os.Remove(pidFile)
+				os.Remove(lockPath)
 			}, nil
 		}
+
+		// Lock directory exists — check if holder is stale.
+		pidFile := filepath.Join(lockPath, "pid")
+		if pidData, err := os.ReadFile(pidFile); err == nil {
+			var pid int
+			if _, err := fmt.Sscanf(string(pidData), "%d", &pid); err == nil && pid > 0 {
+				if !isProcessAlive(pid) {
+					// Stale lock: previous holder died without releasing.
+					os.Remove(pidFile)
+					os.Remove(lockPath)
+					continue
+				}
+			}
+		}
+
 		if !contextSleep(ctx, 500*time.Millisecond) {
-			f.Close()
 			return nil, ctx.Err()
 		}
 	}
 
-	f.Close()
 	return nil, fmt.Errorf("failed to acquire lock after 60s")
 }

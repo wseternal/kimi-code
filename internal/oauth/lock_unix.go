@@ -7,12 +7,13 @@ import (
 	"syscall"
 )
 
-// flockExclusive attempts to acquire an exclusive lock on a file.
-func flockExclusive(f *os.File) error {
-	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-}
-
-// flockUnlock releases an exclusive lock on a file.
-func flockUnlock(f *os.File) {
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+// isProcessAlive reports whether a process with the given PID is running.
+// On Unix, FindProcess always succeeds; Signal(0) tests existence.
+func isProcessAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
 }
