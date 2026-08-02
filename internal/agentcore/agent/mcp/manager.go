@@ -4,12 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/tools"
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 )
+
+// lookupEnv resolves an environment variable name to its value.
+func lookupEnv(name string) string {
+	return os.Getenv(name)
+}
 
 // ServerStatus represents the connection state of an MCP server.
 type ServerStatus string
@@ -186,8 +192,29 @@ func createClient(name string, cfg config.McpServerConfig, logger *slog.Logger) 
 		return NewStdioClient(cfg.Command, cfg.Args, opts...), nil
 
 	case "http", "sse":
-		// HTTP and SSE transports not yet implemented
-		return nil, fmt.Errorf("transport %q not yet implemented (only stdio is supported)", cfg.Transport)
+		if cfg.URL == "" {
+			return nil, fmt.Errorf("%s transport requires a url", cfg.Transport)
+		}
+		var opts []HTTPOption
+		opts = append(opts, WithHTTPLogger(logger.With("mcp_server", name)))
+		if len(cfg.Env) > 0 {
+			headers := make(map[string]string)
+			if bearerEnv, ok := cfg.Env["BEARER_TOKEN_ENV"]; ok {
+				if tok := lookupEnv(bearerEnv); tok != "" {
+					headers["Authorization"] = "Bearer " + tok
+				}
+			}
+			if len(headers) > 0 {
+				opts = append(opts, WithHTTPHeaders(headers))
+			}
+		}
+		if cfg.StartupTimeoutMs > 0 {
+			opts = append(opts, WithHTTPStartupTimeout(time.Duration(cfg.StartupTimeoutMs)*time.Millisecond))
+		}
+		if cfg.ToolTimeoutMs > 0 {
+			opts = append(opts, WithHTTPToolTimeout(time.Duration(cfg.ToolTimeoutMs)*time.Millisecond))
+		}
+		return NewHTTPClient(cfg.URL, cfg.Transport, opts...), nil
 
 	default:
 		return nil, fmt.Errorf("unknown transport %q (supported: stdio, http, sse)", cfg.Transport)

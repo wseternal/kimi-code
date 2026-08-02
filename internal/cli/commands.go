@@ -99,7 +99,7 @@ func (r *CommandRegistry) registerDefaults() {
 	r.Register(SlashCommandDef{Name: "export-md", Desc: "Export conversation as markdown", Group: "session"})
 
 	// Agent commands
-	r.Register(SlashCommandDef{Name: "goal", Desc: "Set autonomous goal", Usage: "/goal <text>", Group: "agent"})
+	r.Register(SlashCommandDef{Name: "goal", Desc: "Manage autonomous goals", Usage: "/goal <text>|status|pause|resume|cancel|next <obj>|next manage", Group: "agent"})
 	r.Register(SlashCommandDef{Name: "swarm", Desc: "Toggle swarm mode", Group: "agent"})
 	r.Register(SlashCommandDef{Name: "btw", Desc: "Side query without context impact", Usage: "/btw <prompt>", Group: "agent"})
 

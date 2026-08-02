@@ -547,6 +547,10 @@ func RegisterDefaultTools(registry *Registry) {
 	registry.Register(NewFetchURLTool())
 	registry.Register(NewReadMediaTool())
 	registry.Register(NewAskUserTool(nil))
+	// WebSearch: registered with nil provider; the tool returns a clear
+	// "not configured" error when invoked without a provider, matching
+	// the TS behavior when no search service is set up.
+	registry.Register(NewWebSearchTool(nil))
 }
 
 func resolvePath(path, workDir string) string {
