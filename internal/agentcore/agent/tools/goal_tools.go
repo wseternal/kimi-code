@@ -229,6 +229,8 @@ func (t *SetGoalBudgetTool) Execute(_ context.Context, input json.RawMessage, _ 
 }
 
 // RegisterGoalTools registers all goal management tools.
+// TODO(S1): Consider introducing a GoalTracker interface to reduce coupling
+// on the concrete goal.Tracker type, enabling testing and alternative implementations.
 func RegisterGoalTools(registry *Registry, tracker *goal.Tracker) {
 	registry.Register(&CreateGoalTool{Tracker: tracker})
 	registry.Register(&GetGoalTool{Tracker: tracker})

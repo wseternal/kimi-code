@@ -163,11 +163,11 @@ func applyStepUpsert(state *Snapshot, op Operation) ApplyResult {
 	}
 	turns := make([]TranscriptTurn, len(state.Turns))
 	copy(turns, state.Turns)
+	found := false
 	for i, t := range turns {
 		if t.ID == op.Step.TurnID {
 			steps := make([]TranscriptStep, len(t.Steps))
 			copy(steps, t.Steps)
-			found := false
 			for j, st := range steps {
 				if st.ID == op.Step.ID {
 					steps[j] = *op.Step
@@ -177,10 +177,14 @@ func applyStepUpsert(state *Snapshot, op Operation) ApplyResult {
 			}
 			if !found {
 				steps = append(steps, *op.Step)
+				found = true
 			}
 			turns[i].Steps = steps
 			break
 		}
+	}
+	if !found {
+		return ApplyResult{State: state, Changed: false}
 	}
 	s := copySnapshot(state)
 	s.Turns = turns
@@ -215,8 +219,10 @@ func applyAppend(state *Snapshot, op Operation) ApplyResult {
 	}
 	frames := make([]Frame, len(state.Frames))
 	copy(frames, state.Frames)
+	found := false
 	for i, f := range frames {
 		if f.ID == op.FrameID {
+			found = true
 			switch f.Kind {
 			case FrameText:
 				if f.Text != nil {
@@ -233,6 +239,9 @@ func applyAppend(state *Snapshot, op Operation) ApplyResult {
 			}
 			break
 		}
+	}
+	if !found {
+		return ApplyResult{State: state, Changed: false}
 	}
 	s := copySnapshot(state)
 	s.Frames = frames
@@ -363,18 +372,23 @@ func applyMetaMerge(state *Snapshot, op Operation) ApplyResult {
 	if op.MetaPatch == nil {
 		return ApplyResult{State: state, Changed: false}
 	}
-	meta := state.Meta // copy
+	meta := state.Meta // shallow copy of struct
+	// Deep-copy pointer fields to avoid aliasing the operation input.
 	if op.MetaPatch.Goal != nil {
-		meta.Goal = op.MetaPatch.Goal
+		g := *op.MetaPatch.Goal
+		meta.Goal = &g
 	}
 	if op.MetaPatch.Modes != nil {
-		meta.Modes = op.MetaPatch.Modes
+		m := *op.MetaPatch.Modes
+		meta.Modes = &m
 	}
 	if op.MetaPatch.AgentPhase != nil {
-		meta.AgentPhase = op.MetaPatch.AgentPhase
+		p := *op.MetaPatch.AgentPhase
+		meta.AgentPhase = &p
 	}
 	if op.MetaPatch.AgentStatus != nil {
-		meta.AgentStatus = op.MetaPatch.AgentStatus
+		a := *op.MetaPatch.AgentStatus
+		meta.AgentStatus = &a
 	}
 	if op.MetaPatch.Model != "" {
 		meta.Model = op.MetaPatch.Model
@@ -424,11 +438,19 @@ func copySnapshot(state *Snapshot) *Snapshot {
 		Frames:       make([]Frame, len(state.Frames)),
 		Interactions: make([]TranscriptInteraction, len(state.Interactions)),
 		Attachments:  make([]TranscriptAttachment, len(state.Attachments)),
-		Todos:        state.Todos,
 		Tasks:        make([]TranscriptTask, len(state.Tasks)),
 		Items:        make([]TranscriptItem, len(state.Items)),
 		Prompts:      make([]TranscriptPrompt, len(state.Prompts)),
 		Meta:         state.Meta,
+	}
+	// Deep-copy Todos pointer to avoid sharing with original.
+	if state.Todos != nil {
+		todos := *state.Todos
+		if state.Todos.Items != nil {
+			todos.Items = make([]TodoItem, len(state.Todos.Items))
+			copy(todos.Items, state.Todos.Items)
+		}
+		s.Todos = &todos
 	}
 	copy(s.Turns, state.Turns)
 	// Deep-copy each turn's Steps slice to avoid sharing backing arrays.

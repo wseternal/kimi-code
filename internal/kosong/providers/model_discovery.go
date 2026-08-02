@@ -12,6 +12,9 @@ import (
 	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 )
 
+// sharedHTTPClient is reused across model discovery calls (S3).
+var sharedHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
 // DiscoveredModel represents a model discovered from a provider's API.
 type DiscoveredModel struct {
 	ID      string `json:"id"`
@@ -57,7 +60,7 @@ func ListProviderModels(ctx context.Context, cfg *config.Config) ([]DiscoveredMo
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := sharedHTTPClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)

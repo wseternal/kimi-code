@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
@@ -48,6 +49,7 @@ type Server struct {
 	logger         *slog.Logger
 	host           string
 	port           int
+	workDir        string
 	mux            *http.ServeMux
 
 	// Optional callbacks wired by the caller.
@@ -56,6 +58,10 @@ type Server struct {
 	onPromptSubmit  PromptSubmitFunc
 	sessionData     SessionDataProvider
 	cancelFunc      context.CancelFunc // for shutdown
+	tokenStore      *TokenStore
+	securityConfig  SecurityConfig
+	snapshotSvc     *SnapshotService
+	searchSvc       *SearchService
 }
 
 // Config holds server configuration.
@@ -82,6 +88,21 @@ func WithSessionDataProvider(p SessionDataProvider) ServerOption {
 	return func(s *Server) { s.sessionData = p }
 }
 
+// WithTokenStore wires an auth token store for bearer authentication.
+func WithTokenStore(ts *TokenStore) ServerOption {
+	return func(s *Server) { s.tokenStore = ts }
+}
+
+// WithSecurityConfig configures the security middleware (CORS, rate limiting).
+func WithSecurityConfig(cfg SecurityConfig) ServerOption {
+	return func(s *Server) { s.securityConfig = cfg }
+}
+
+// WithWorkDir sets the server's working directory for file operations.
+func WithWorkDir(dir string) ServerOption {
+	return func(s *Server) { s.workDir = dir }
+}
+
 // NewServer creates a new server.
 func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger, opts ...ServerOption) *Server {
 	if cfg.Host == "" {
@@ -104,6 +125,22 @@ func NewServer(cfg Config, sessionMgr *session.Manager, logger *slog.Logger, opt
 	for _, opt := range opts {
 		opt(s)
 	}
+
+	// Default workDir to current directory if not set.
+	if s.workDir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			s.workDir = wd
+		}
+	}
+
+	// Default security config: bind address for loopback detection.
+	if s.securityConfig.BindAddress == "" {
+		s.securityConfig.BindAddress = cfg.Host
+	}
+
+	// Cache services to avoid per-request allocation (S2).
+	s.snapshotSvc = NewSnapshotService(sessionMgr)
+	s.searchSvc = NewSearchService(s.workDir)
 
 	s.setupRoutes()
 	return s
@@ -189,12 +226,27 @@ func (s *Server) Addr() string {
 }
 
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
+	// Apply security middleware (CORS origin validation, host checks, rate limiting).
+	sec := NewSecurityMiddleware(s.securityConfig)
+	handler := sec.Wrap(next)
+
+	// Apply bearer auth middleware when a token store is configured.
+	if s.tokenStore != nil {
+		skipPaths := []string{
+			"/api/v1/health",
+			"/api/v1/meta",
+			"/api/v1/oauth/login",
+			"/api/v1/oauth/status",
+		}
+		auth := BearerAuthMiddleware(s.tokenStore, skipPaths)
+		handler = auth(handler)
+	}
+
+	// Wrap with request ID and content-type.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusNoContent)
@@ -208,7 +260,7 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", requestID)
 
-		next.ServeHTTP(w, r)
+		handler.ServeHTTP(w, r)
 	})
 }
 

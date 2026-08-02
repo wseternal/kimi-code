@@ -221,6 +221,8 @@ func (r *Registry) Broadcast(msg []byte) {
 }
 
 // BroadcastToSession sends a message to all connections subscribed to a session.
+// TODO(S8): Build a reverse index (sessionID → []conn) to avoid scanning all
+// connections on every broadcast, reducing from O(C) to O(S) where S is subscribers.
 func (r *Registry) BroadcastToSession(sessionID string, msg []byte) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -308,12 +310,13 @@ func (b *Broadcaster) Publish(eventType string, sessionID string, data any) {
 	}
 
 	seq := b.sequence.Add(1)
+	now := time.Now()
 	event := BroadcasterEvent{
 		Seq:       seq,
 		Type:      eventType,
 		SessionID: sessionID,
 		Data:      raw,
-		Time:      time.Now(),
+		Time:      now,
 	}
 
 	b.mu.Lock()
@@ -333,14 +336,14 @@ func (b *Broadcaster) Publish(eventType string, sessionID string, data any) {
 		b.journal.Append(sessionID, event)
 	}
 
-	// Route to session subscribers or broadcast globally
+	// Build the wire message once and reuse (W13: avoid double marshal).
 	msg, _ := json.Marshal(map[string]any{
 		"type":       eventType,
 		"seq":        seq,
 		"epoch":      b.epoch,
 		"session_id": sessionID,
-		"timestamp":  event.Time.Format(time.RFC3339Nano),
-		"data":       data,
+		"timestamp":  now.Format(time.RFC3339Nano),
+		"data":       json.RawMessage(raw),
 	})
 	if sessionID != "" {
 		b.registry.BroadcastToSession(sessionID, msg)
@@ -421,12 +424,17 @@ func (b *Broadcaster) Journal() *EventJournal {
 // HandleWebSocket handles a WebSocket upgrade request using RFC 6455
 // handshake via net/http.Hijacker, then runs read/write pumps with heartbeat.
 func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.Logger) http.HandlerFunc {
+	return HandleWebSocketWithOrigins(registry, broadcaster, logger, nil)
+}
+
+// HandleWebSocketWithOrigins handles WebSocket upgrades with optional origin restriction.
+func HandleWebSocketWithOrigins(registry *Registry, broadcaster *Broadcaster, logger *slog.Logger, allowedOrigins []string) http.HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Perform WebSocket handshake.
-		wsconn, err := upgradeWebSocket(w, r)
+		wsconn, err := upgradeWebSocket(w, r, allowedOrigins)
 		if err != nil {
 			logger.Error("websocket upgrade failed", "error", err)
 			return
@@ -438,13 +446,16 @@ func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.
 			clientID = "anonymous"
 		}
 
+		// Create a logger scoped to this connection for W21.
+		connLogger := logger.With("conn_id", connID, "client_id", clientID)
+
 		conn := &Connection{
 			ID:            connID,
 			ClientID:      clientID,
 			ws:            wsconn,
 			send:          make(chan []byte, 256),
 			done:          make(chan struct{}),
-			logger:        logger,
+			logger:        connLogger,
 			subscriptions: make(map[string]bool),
 			cursors:       make(ws.CursorsBySession),
 			agentFilter:   make(ws.AgentFilter),
@@ -458,7 +469,7 @@ func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.
 			wsconn.close()
 		}()
 
-		logger.Info("websocket connection opened", "conn_id", connID, "client_id", clientID)
+		connLogger.Info("websocket connection opened")
 
 		// Send server hello over the WebSocket.
 		hello := ws.ServerHelloMessage{
@@ -491,7 +502,7 @@ func HandleWebSocket(registry *Registry, broadcaster *Broadcaster, logger *slog.
 		<-errCh
 		wsconn.close() // close TCP to unblock the other pump
 		<-errCh
-		logger.Info("websocket connection closed", "conn_id", connID)
+		connLogger.Info("websocket connection closed")
 	}
 }
 
@@ -538,7 +549,8 @@ func (c *Connection) readPump(registry *Registry, broadcaster *Broadcaster) erro
 		case opText:
 			c.handleMessage(payload, registry, broadcaster)
 		case opPing:
-			c.ws.writeFrame(opPong, payload)
+			// Respond to ping with pong (writePong is thread-safe via writeMu).
+			c.ws.writePong(payload)
 		case opPong:
 			c.UpdatePong()
 		case opClose:
@@ -548,6 +560,8 @@ func (c *Connection) readPump(registry *Registry, broadcaster *Broadcaster) erro
 }
 
 // handleMessage dispatches a text message to the appropriate handler.
+// TODO(S5): Route ACK responses via send channel instead of direct ws.writeText
+// to maintain single-writer guarantee for all outbound frames.
 func (c *Connection) handleMessage(data []byte, registry *Registry, broadcaster *Broadcaster) {
 	var envelope struct {
 		Type string `json:"type"`
@@ -672,6 +686,8 @@ func (j *EventJournal) Append(sessionID string, event BroadcasterEvent) {
 }
 
 // EventsAfter returns events for a session after a given sequence.
+// TODO(S7): Use binary search since events are ordered by Seq, reducing
+// from O(n) to O(log n) for large journals.
 func (j *EventJournal) EventsAfter(sessionID string, afterSeq int64) []BroadcasterEvent {
 	j.mu.RLock()
 	defer j.mu.RUnlock()

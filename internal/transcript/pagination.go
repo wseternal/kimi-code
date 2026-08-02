@@ -51,17 +51,12 @@ func Paginate(state *Snapshot, pageNumber, pageSize int) Page {
 	turns := make([]TranscriptTurn, end-start)
 	copy(turns, state.Turns[start:end])
 
-	// Collect frames belonging to these turns
-	stepIDs := make(map[StepID]bool)
+	// Build frame index by StepID once, then collect frames for these turns.
+	frameIndex := buildFrameIndex(state.Frames)
+	var frames []Frame
 	for _, turn := range turns {
 		for _, step := range turn.Steps {
-			stepIDs[step.ID] = true
-		}
-	}
-	var frames []Frame
-	for _, f := range state.Frames {
-		if stepIDs[f.StepID] {
-			frames = append(frames, f)
+			frames = append(frames, frameIndex[step.ID]...)
 		}
 	}
 
@@ -81,7 +76,18 @@ func Paginate(state *Snapshot, pageNumber, pageSize int) Page {
 	}
 }
 
+// buildFrameIndex indexes frames by StepID for O(1) lookup per step.
+func buildFrameIndex(frames []Frame) map[StepID][]Frame {
+	idx := make(map[StepID][]Frame, len(frames)/4)
+	for _, f := range frames {
+		idx[f.StepID] = append(idx[f.StepID], f)
+	}
+	return idx
+}
+
 // PaginateByCursor extracts turns after a given turn ID cursor.
+// TODO(S4): Consider switching to true cursor semantics (opaque token → index)
+// instead of using TurnID as cursor, for better forward-compatibility.
 func PaginateByCursor(state *Snapshot, cursor TurnID, limit int) Page {
 	if state == nil || len(state.Turns) == 0 || limit <= 0 {
 		return Page{Turns: nil, PageSize: limit}

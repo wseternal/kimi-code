@@ -3,11 +3,15 @@ package transcript
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 )
+
+// maxOps is the maximum number of operations kept in memory.
+// Older operations are discarded to prevent unbounded growth.
+const maxOps = 10000
 
 // Store provides persistent storage for transcript snapshots.
 // It uses an in-memory snapshot with optional file-based persistence.
@@ -17,14 +21,24 @@ type Store struct {
 	ops       []Operation
 	dir       string
 	sessionID string
+	logger    *slog.Logger
 }
 
 // NewStore creates a transcript store.
 func NewStore(dir, sessionID string) *Store {
+	return NewStoreWithLogger(dir, sessionID, nil)
+}
+
+// NewStoreWithLogger creates a transcript store with a custom logger.
+func NewStoreWithLogger(dir, sessionID string, logger *slog.Logger) *Store {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	s := &Store{
 		state:     NewSnapshot(),
 		dir:       dir,
 		sessionID: sessionID,
+		logger:    logger,
 	}
 	// Try to load persisted state
 	if dir != "" && sessionID != "" {
@@ -42,6 +56,10 @@ func (s *Store) Apply(op Operation) ApplyResult {
 	if result.Changed {
 		s.state = result.State
 		s.ops = append(s.ops, op)
+		// Bound ops in memory to prevent unbounded growth.
+		if len(s.ops) > maxOps {
+			s.ops = s.ops[len(s.ops)-maxOps:]
+		}
 	}
 	return result
 }
@@ -79,7 +97,7 @@ func (s *Store) Persist() error {
 	defer s.mu.Unlock()
 
 	dir := filepath.Join(s.dir, "transcripts", s.sessionID)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create transcript dir: %w", err)
 	}
 
@@ -88,7 +106,7 @@ func (s *Store) Persist() error {
 	if err != nil {
 		return fmt.Errorf("marshal snapshot: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "snapshot.json"), snapData, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "snapshot.json"), snapData, 0600); err != nil {
 		return fmt.Errorf("write snapshot: %w", err)
 	}
 
@@ -97,7 +115,7 @@ func (s *Store) Persist() error {
 	if err != nil {
 		return fmt.Errorf("marshal operations: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "operations.json"), opsData, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "operations.json"), opsData, 0600); err != nil {
 		return fmt.Errorf("write operations: %w", err)
 	}
 
@@ -110,13 +128,13 @@ func (s *Store) load() {
 	data, err := os.ReadFile(snapPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Printf("transcript: failed to read snapshot: %v", err)
+			s.logger.Error("transcript: failed to read snapshot", "error", err)
 		}
 		return
 	}
 	var snap Snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
-		log.Printf("transcript: failed to parse snapshot: %v", err)
+		s.logger.Error("transcript: failed to parse snapshot", "error", err)
 		return
 	}
 	s.state = &snap
@@ -125,13 +143,13 @@ func (s *Store) load() {
 	opsData, err := os.ReadFile(opsPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Printf("transcript: failed to read operations: %v", err)
+			s.logger.Error("transcript: failed to read operations", "error", err)
 		}
 		return
 	}
 	var ops []Operation
 	if err := json.Unmarshal(opsData, &ops); err != nil {
-		log.Printf("transcript: failed to parse operations: %v", err)
+		s.logger.Error("transcript: failed to parse operations", "error", err)
 		return
 	}
 	s.ops = ops

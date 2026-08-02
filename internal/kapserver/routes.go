@@ -72,6 +72,7 @@ func (s *SnapshotService) CaptureWithMessages(sessionID string, messageLimit int
 // ── Additional REST Route Handlers ──
 
 // handleConfig returns the current agent configuration.
+// TODO(W18): Wire Config to return real permission mode from config.
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	respondJSON(w, 200, rest.ConfigResponse{
 		PermissionMode: "manual",
@@ -93,8 +94,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	svc := NewSearchService(".")
-	results, err := svc.Search(SearchQuery{
+	results, err := s.searchSvc.Search(SearchQuery{
 		Pattern: req.Query,
 		Limit:   req.Limit,
 	})
@@ -125,8 +125,7 @@ func toRESTHits(hits []SearchHit) []rest.SearchHit {
 // handleSnapshot captures a session snapshot.
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	svc := NewSnapshotService(s.sessionManager)
-	snapshot, err := svc.Capture(id)
+	snapshot, err := s.snapshotSvc.Capture(id)
 	if err != nil {
 		if apiErr, ok := err.(*protocol.APIError); ok {
 			respondError(w, 404, apiErr.Code, apiErr.Message)
@@ -430,6 +429,8 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListTranscript returns transcript entries for a session.
+// TODO(W17): Wire transcript.Store into the server to provide real transcript data.
+// Currently returns empty until the transcript store is integrated with the agent loop.
 func (s *Server) handleListTranscript(w http.ResponseWriter, r *http.Request) {
 	_, ok := s.requireSession(w, r)
 	if !ok {
@@ -445,7 +446,10 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	workdir, _ := os.Getwd()
+	workdir := s.workDir
+	if workdir == "" {
+		workdir, _ = os.Getwd()
+	}
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		path = "."
@@ -463,7 +467,11 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]rest.FileInfo, 0, len(entries))
+	const maxEntries = 1000
 	for _, e := range entries {
+		if len(items) >= maxEntries {
+			break
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
@@ -481,16 +489,19 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 // ── Global Handlers ──
 
 // handleModelCatalog returns available models from configured providers.
+// TODO(W18): Wire provider config to return real model catalog from ListProviderModels.
 func (s *Server) handleModelCatalog(w http.ResponseWriter, _ *http.Request) {
 	respondJSON(w, 200, rest.ListModelCatalogResponse{Items: []rest.ModelCatalogItem{}})
 }
 
 // handleOAuthStatus returns current OAuth authentication status.
+// TODO(W18): Wire OAuth manager to return real auth status.
 func (s *Server) handleOAuthStatus(w http.ResponseWriter, _ *http.Request) {
 	respondJSON(w, 200, rest.OAuthStatusResponse{Authenticated: false})
 }
 
 // handleOAuthLogin initiates an OAuth device flow login.
+// TODO(W18): Wire OAuth manager to initiate real device flow.
 func (s *Server) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	var req rest.OAuthLoginRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -504,6 +515,7 @@ func (s *Server) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListConnections returns active WebSocket connections.
+// TODO(W18): Wire Registry to return real connection list.
 func (s *Server) handleListConnections(w http.ResponseWriter, _ *http.Request) {
 	respondJSON(w, 200, rest.ListConnectionsResponse{Items: []rest.ConnectionInfo{}})
 }

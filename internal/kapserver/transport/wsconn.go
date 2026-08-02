@@ -40,7 +40,8 @@ type wsConn struct {
 }
 
 // upgradeWebSocket performs the server-side WebSocket handshake.
-func upgradeWebSocket(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
+// It validates the Origin header for CSWSH protection when allowedOrigins is non-nil.
+func upgradeWebSocket(w http.ResponseWriter, r *http.Request, allowedOrigins []string) (*wsConn, error) {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		http.Error(w, "expected websocket upgrade", http.StatusBadRequest)
 		return nil, errors.New("not a websocket request")
@@ -49,6 +50,15 @@ func upgradeWebSocket(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 	if key == "" {
 		http.Error(w, "missing Sec-WebSocket-Key", http.StatusBadRequest)
 		return nil, errors.New("missing key")
+	}
+
+	// CSWSH protection: validate Origin header when origins are restricted.
+	if len(allowedOrigins) > 0 {
+		origin := r.Header.Get("Origin")
+		if origin != "" && !isAllowedWSOrigin(origin, allowedOrigins) {
+			http.Error(w, "origin not allowed", http.StatusForbidden)
+			return nil, errors.New("websocket origin not allowed")
+		}
 	}
 
 	// Compute accept hash per RFC 6455 §4.2.2.
@@ -140,6 +150,11 @@ func (wc *wsConn) writeClose(code int, reason string) error {
 	return wc.writeFrame(opClose, payload)
 }
 
+// writePong writes a pong frame. Thread-safe via writeMu (W16).
+func (wc *wsConn) writePong(payload []byte) error {
+	return wc.writeFrame(opPong, payload)
+}
+
 // readFrame reads a single WebSocket frame. Returns opcode and payload.
 func (wc *wsConn) readFrame() (byte, []byte, error) {
 	// First byte: FIN + opcode.
@@ -220,4 +235,14 @@ func (wc *wsConn) close() {
 // setReadDeadline sets the read deadline on the underlying connection.
 func (wc *wsConn) setReadDeadline(t time.Time) error {
 	return wc.conn.SetReadDeadline(t)
+}
+
+// isAllowedWSOrigin checks if the origin is in the allowed list.
+func isAllowedWSOrigin(origin string, allowed []string) bool {
+	for _, a := range allowed {
+		if a == "*" || a == origin {
+			return true
+		}
+	}
+	return false
 }

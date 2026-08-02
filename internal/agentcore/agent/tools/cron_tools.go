@@ -27,7 +27,7 @@ type cronCreateInput struct {
 
 func (t *CronCreateTool) Definition() Definition {
 	return Definition{
-		Name:        "CronCreate",
+		Name:        "cronCreate",
 		Description: "Create a new cron-scheduled task. Uses standard 5-field cron expressions (minute hour day-of-month month day-of-week). The prompt will be submitted to the agent each time the schedule fires.",
 		Parameters: map[string]interface{}{
 			"type": "object",
@@ -86,7 +86,7 @@ type cronDeleteInput struct {
 
 func (t *CronDeleteTool) Definition() Definition {
 	return Definition{
-		Name:        "CronDelete",
+		Name:        "cronDelete",
 		Description: "Delete a cron-scheduled task by its ID.",
 		Parameters: map[string]interface{}{
 			"type": "object",
@@ -127,7 +127,7 @@ var _ Tool = (*CronListTool)(nil)
 
 func (t *CronListTool) Definition() Definition {
 	return Definition{
-		Name:        "CronList",
+		Name:        "cronList",
 		Description: "List all cron-scheduled tasks with their IDs, schedules, next run times, and status.",
 		Parameters: map[string]interface{}{
 			"type":       "object",
@@ -175,6 +175,7 @@ func truncateStr(s string, maxLen int) string {
 }
 
 // RegisterCronTools registers all cron management tools.
+// TODO(S1): Consider introducing a CronManager interface to reduce coupling.
 func RegisterCronTools(registry *Registry, manager *cron.CronManager) {
 	registry.Register(&CronCreateTool{Manager: manager})
 	registry.Register(&CronDeleteTool{Manager: manager})

@@ -122,37 +122,35 @@ func (t *AgentTool) Execute(ctx context.Context, input json.RawMessage, exec Exe
 		defer cancel()
 	}
 
-	// Poll for completion
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-waitCtx.Done():
-			return &Result{Output: fmt.Sprintf("Sub-agent %s timed out or cancelled. Check status via roster.", id)}, nil
-		case <-ticker.C:
-			result, ok := t.Roster.GetResult(id)
-			if !ok {
-				return &Result{Output: fmt.Sprintf("Sub-agent %s not found.", id), IsError: true}, nil
-			}
-			switch result.Status {
-			case swarm.SubagentDone:
-				out, _ := json.Marshal(map[string]interface{}{
-					"agent_id": id,
-					"status":   "done",
-					"output":   result.Output,
-				})
-				return &Result{Output: string(out)}, nil
-			case swarm.SubagentFailed:
-				out, _ := json.Marshal(map[string]interface{}{
-					"agent_id": id,
-					"status":   "failed",
-					"error":    result.Error,
-				})
-				return &Result{Output: string(out), IsError: true}, nil
-			case swarm.SubagentAborted:
-				return &Result{Output: fmt.Sprintf("Sub-agent %s was aborted.", id)}, nil
-			}
+	// Block on completion channel instead of polling (W12).
+	doneCh := t.Roster.WaitDone(id)
+	select {
+	case <-waitCtx.Done():
+		return &Result{Output: fmt.Sprintf("Sub-agent %s timed out or cancelled. Check status via roster.", id)}, nil
+	case <-doneCh:
+		result, ok := t.Roster.GetResult(id)
+		if !ok {
+			return &Result{Output: fmt.Sprintf("Sub-agent %s not found.", id), IsError: true}, nil
+		}
+		switch result.Status {
+		case swarm.SubagentDone:
+			out, _ := json.Marshal(map[string]interface{}{
+				"agent_id": id,
+				"status":   "done",
+				"output":   result.Output,
+			})
+			return &Result{Output: string(out)}, nil
+		case swarm.SubagentFailed:
+			out, _ := json.Marshal(map[string]interface{}{
+				"agent_id": id,
+				"status":   "failed",
+				"error":    result.Error,
+			})
+			return &Result{Output: string(out), IsError: true}, nil
+		case swarm.SubagentAborted:
+			return &Result{Output: fmt.Sprintf("Sub-agent %s was aborted.", id)}, nil
+		default:
+			return &Result{Output: fmt.Sprintf("Sub-agent %s in unexpected state: %s", id, result.Status)}, nil
 		}
 	}
 }
