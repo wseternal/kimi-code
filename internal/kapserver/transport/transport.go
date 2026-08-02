@@ -268,9 +268,7 @@ type Broadcaster struct {
 	registry    *Registry
 	sequence    atomic.Int64
 	epoch       string
-	ring        []BroadcasterEvent // fixed-size circular buffer
-	ringHead    int                // index of the oldest element
-	ringCount   int                // number of elements currently in the ring
+	ring        ringBuf[BroadcasterEvent] // fixed-size circular buffer
 	journal     *EventJournal
 	turnTracker *TurnTracker
 	mu          sync.RWMutex
@@ -298,7 +296,7 @@ func NewBroadcaster(registry *Registry, ringSize int, logger *slog.Logger) *Broa
 	return &Broadcaster{
 		registry:    registry,
 		epoch:       time.Now().Format(time.RFC3339Nano),
-		ring:        make([]BroadcasterEvent, ringSize),
+		ring:        newRingBuf[BroadcasterEvent](ringSize),
 		journal:     NewEventJournal(),
 		turnTracker: NewTurnTracker(),
 		logger:      logger,
@@ -324,15 +322,7 @@ func (b *Broadcaster) Publish(eventType string, sessionID string, data any) {
 	}
 
 	b.mu.Lock()
-	// Circular buffer write: overwrite oldest when full.
-	idx := (b.ringHead + b.ringCount) % len(b.ring)
-	if b.ringCount == len(b.ring) {
-		// Buffer full — advance head (overwrite oldest)
-		b.ringHead = (b.ringHead + 1) % len(b.ring)
-	} else {
-		b.ringCount++
-	}
-	b.ring[idx] = event
+	b.ring.Push(event)
 	b.mu.Unlock()
 
 	// Persist to journal for replay
@@ -384,10 +374,8 @@ func (b *Broadcaster) PublishVolatile(eventType string, sessionID string, data a
 func (b *Broadcaster) EventsAfter(seq int64) []BroadcasterEvent {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-
 	var result []BroadcasterEvent
-	for i := 0; i < b.ringCount; i++ {
-		e := b.ring[(b.ringHead+i)%len(b.ring)]
+	for _, e := range b.ring.All() {
 		if e.Seq > seq {
 			result = append(result, e)
 		}
@@ -474,7 +462,7 @@ func HandleWebSocketWithOrigins(registry *Registry, broadcaster *Broadcaster, lo
 				WSConnectionID:     connID,
 				ProtocolVersion:    ws.ProtocolVersion,
 				HeartbeatMs:        int(heartbeatInterval.Milliseconds()),
-				MaxEventBufferSize: len(broadcaster.ring),
+				MaxEventBufferSize: broadcaster.ring.Cap(),
 				Capabilities: ws.ServerHelloCapabilities{
 					EventBatching: true,
 					Compression:   false,
@@ -660,27 +648,57 @@ func HandleUnsubscribe(conn *Connection, msg ws.UnsubscribeMessage) {
 	conn.Unsubscribe(msg.Payload.SessionIDs)
 }
 
+// ── Ring Buffer ──
+
+// ringBuf is a generic fixed-size circular buffer.
+type ringBuf[T any] struct {
+	data  []T
+	head  int // index of the oldest element
+	count int // number of elements currently stored
+}
+
+// newRingBuf creates a ring buffer with the given capacity.
+func newRingBuf[T any](capacity int) ringBuf[T] {
+	return ringBuf[T]{data: make([]T, capacity)}
+}
+
+// Push writes an item, overwriting the oldest when full.
+func (r *ringBuf[T]) Push(item T) {
+	idx := (r.head + r.count) % len(r.data)
+	if r.count == len(r.data) {
+		r.head = (r.head + 1) % len(r.data)
+	} else {
+		r.count++
+	}
+	r.data[idx] = item
+}
+
+// All returns all items in insertion order (oldest first).
+func (r *ringBuf[T]) All() []T {
+	out := make([]T, 0, r.count)
+	for i := 0; i < r.count; i++ {
+		out = append(out, r.data[(r.head+i)%len(r.data)])
+	}
+	return out
+}
+
+// Cap returns the buffer capacity.
+func (r *ringBuf[T]) Cap() int { return len(r.data) }
+
 // ── Event Journal ──
 
 // EventJournal stores per-session event history for replay on reconnect.
 // W11 fix: uses ring buffer per session to avoid O(n) slice shift at capacity.
 type EventJournal struct {
-	mu       sync.RWMutex
-	sessions map[string]*sessionRing
+	mu            sync.RWMutex
+	sessions      map[string]*ringBuf[BroadcasterEvent]
 	maxPerSession int
-}
-
-// sessionRing is a circular buffer for a single session's events.
-type sessionRing struct {
-	events []BroadcasterEvent
-	head   int // index of oldest element
-	count  int // number of elements currently stored
 }
 
 // NewEventJournal creates a new event journal.
 func NewEventJournal() *EventJournal {
 	return &EventJournal{
-		sessions:      make(map[string]*sessionRing),
+		sessions:      make(map[string]*ringBuf[BroadcasterEvent]),
 		maxPerSession: 5000,
 	}
 }
@@ -691,17 +709,11 @@ func (j *EventJournal) Append(sessionID string, event BroadcasterEvent) {
 	defer j.mu.Unlock()
 	ring, ok := j.sessions[sessionID]
 	if !ok {
-		ring = &sessionRing{events: make([]BroadcasterEvent, j.maxPerSession)}
+		rb := newRingBuf[BroadcasterEvent](j.maxPerSession)
+		ring = &rb
 		j.sessions[sessionID] = ring
 	}
-	// Circular buffer write: overwrite oldest when full.
-	idx := (ring.head + ring.count) % len(ring.events)
-	if ring.count == len(ring.events) {
-		ring.head = (ring.head + 1) % len(ring.events)
-	} else {
-		ring.count++
-	}
-	ring.events[idx] = event
+	ring.Push(event)
 }
 
 // EventsAfter returns events for a session after a given sequence.
@@ -713,8 +725,7 @@ func (j *EventJournal) EventsAfter(sessionID string, afterSeq int64) []Broadcast
 		return nil
 	}
 	var result []BroadcasterEvent
-	for i := 0; i < ring.count; i++ {
-		e := ring.events[(ring.head+i)%len(ring.events)]
+	for _, e := range ring.All() {
 		if e.Seq > afterSeq {
 			result = append(result, e)
 		}

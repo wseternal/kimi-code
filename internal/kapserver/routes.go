@@ -52,17 +52,6 @@ func (s *SnapshotService) Capture(sessionID string) (*rest.SessionSnapshot, erro
 	return snapshot, nil
 }
 
-// CaptureWithMessages captures a snapshot including recent messages.
-// S5 fix: removed unused messageLimit parameter; message fetching should use the transcript store.
-func (s *SnapshotService) CaptureWithMessages(sessionID string) (*rest.SessionSnapshot, error) {
-	snapshot, err := s.Capture(sessionID)
-	if err != nil {
-		return nil, err
-	}
-	// Messages come from the transcript store, not session memory.
-	return snapshot, nil
-}
-
 // ── Additional REST Route Handlers ──
 
 // handleConfig returns the current agent configuration.
@@ -244,6 +233,47 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// resolveAndValidatePath validates that a requested path stays within the
+// working directory after both absolute and symlink resolution.
+// Returns the symlink-resolved path and the clean workdir on success.
+func resolveAndValidatePath(workdir, path string) (resolvedReal string, cleanWorkdir string, ok bool) {
+	absPath := filepath.Clean(filepath.Join(workdir, path))
+	cleanWorkdir = filepath.Clean(workdir)
+	if absPath != cleanWorkdir && !strings.HasPrefix(absPath, cleanWorkdir+string(os.PathSeparator)) {
+		return "", "", false
+	}
+	resolvedReal, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", "", false
+	}
+	workdirReal, err := filepath.EvalSymlinks(cleanWorkdir)
+	if err != nil {
+		return "", "", false
+	}
+	if resolvedReal != workdirReal && !strings.HasPrefix(resolvedReal, workdirReal+string(os.PathSeparator)) {
+		return "", "", false
+	}
+	return resolvedReal, cleanWorkdir, true
+}
+
+// respondSessionList is a generic helper for session sub-resource list endpoints.
+// It validates the session, fetches items, wraps them via the wrap function,
+// and responds with the typed envelope.
+func respondSessionList[T any, R any](w http.ResponseWriter, r *http.Request, s *Server, fetch func(sessionID string) []T, wrap func([]T) R) {
+	id, ok := s.requireSession(w, r)
+	if !ok {
+		return
+	}
+	var items []T
+	if s.sessionData != nil {
+		items = fetch(id)
+	}
+	if items == nil {
+		items = []T{}
+	}
+	respondJSON(w, 200, wrap(items))
+}
+
 // decodeJSON decodes a JSON request body.
 func decodeJSON(r *http.Request, v interface{}) error {
 	return json.NewDecoder(r.Body).Decode(v)
@@ -281,18 +311,9 @@ func requireSessionAndBody[T any](s *Server, w http.ResponseWriter, r *http.Requ
 
 // handleListApprovals returns pending approval requests for a session.
 func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireSession(w, r)
-	if !ok {
-		return
-	}
-	var items []protocol.ApprovalRequest
-	if s.sessionData != nil {
-		items = s.sessionData.ListApprovals(id)
-	}
-	if items == nil {
-		items = []protocol.ApprovalRequest{}
-	}
-	respondJSON(w, 200, rest.ListApprovalsResponse{Items: items})
+	respondSessionList(w, r, s,
+		func(id string) []protocol.ApprovalRequest { return s.sessionData.ListApprovals(id) },
+		func(items []protocol.ApprovalRequest) any { return rest.ListApprovalsResponse{Items: items} })
 }
 
 // handleResolveApproval resolves a pending approval request.
@@ -316,18 +337,9 @@ func (s *Server) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 
 // handleListQuestions returns pending question requests for a session.
 func (s *Server) handleListQuestions(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireSession(w, r)
-	if !ok {
-		return
-	}
-	var items []protocol.QuestionRequest
-	if s.sessionData != nil {
-		items = s.sessionData.ListQuestions(id)
-	}
-	if items == nil {
-		items = []protocol.QuestionRequest{}
-	}
-	respondJSON(w, 200, rest.ListQuestionsResponse{Items: items})
+	respondSessionList(w, r, s,
+		func(id string) []protocol.QuestionRequest { return s.sessionData.ListQuestions(id) },
+		func(items []protocol.QuestionRequest) any { return rest.ListQuestionsResponse{Items: items} })
 }
 
 // handleResolveQuestion resolves a pending question.
@@ -353,66 +365,30 @@ func (s *Server) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 
 // handleListTasks returns background tasks for a session.
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireSession(w, r)
-	if !ok {
-		return
-	}
-	var items []rest.TaskInfo
-	if s.sessionData != nil {
-		items = s.sessionData.ListTasks(id)
-	}
-	if items == nil {
-		items = []rest.TaskInfo{}
-	}
-	respondJSON(w, 200, rest.ListTasksResponse{Items: items})
+	respondSessionList(w, r, s,
+		func(id string) []rest.TaskInfo { return s.sessionData.ListTasks(id) },
+		func(items []rest.TaskInfo) any { return rest.ListTasksResponse{Items: items} })
 }
 
 // handleListTools returns registered tools for a session.
 func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireSession(w, r)
-	if !ok {
-		return
-	}
-	var items []rest.ToolDescriptor
-	if s.sessionData != nil {
-		items = s.sessionData.ListTools(id)
-	}
-	if items == nil {
-		items = []rest.ToolDescriptor{}
-	}
-	respondJSON(w, 200, rest.ListToolsResponse{Items: items})
+	respondSessionList(w, r, s,
+		func(id string) []rest.ToolDescriptor { return s.sessionData.ListTools(id) },
+		func(items []rest.ToolDescriptor) any { return rest.ListToolsResponse{Items: items} })
 }
 
 // handleListTerminals returns active terminals for a session.
 func (s *Server) handleListTerminals(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireSession(w, r)
-	if !ok {
-		return
-	}
-	var items []rest.TerminalInfo
-	if s.sessionData != nil {
-		items = s.sessionData.ListTerminals(id)
-	}
-	if items == nil {
-		items = []rest.TerminalInfo{}
-	}
-	respondJSON(w, 200, rest.ListTerminalsResponse{Items: items})
+	respondSessionList(w, r, s,
+		func(id string) []rest.TerminalInfo { return s.sessionData.ListTerminals(id) },
+		func(items []rest.TerminalInfo) any { return rest.ListTerminalsResponse{Items: items} })
 }
 
 // handleListSkills returns discovered skills for a session.
 func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireSession(w, r)
-	if !ok {
-		return
-	}
-	var items []rest.SkillDescriptor
-	if s.sessionData != nil {
-		items = s.sessionData.ListSkills(id)
-	}
-	if items == nil {
-		items = []rest.SkillDescriptor{}
-	}
-	respondJSON(w, 200, rest.ListSkillsResponse{Items: items})
+	respondSessionList(w, r, s,
+		func(id string) []rest.SkillDescriptor { return s.sessionData.ListSkills(id) },
+		func(items []rest.SkillDescriptor) any { return rest.ListSkillsResponse{Items: items} })
 }
 
 // handleListTranscript returns transcript entries for a session.
@@ -441,28 +417,13 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 	if path == "" {
 		path = "."
 	}
-	// Resolve the requested path relative to workdir and enforce containment.
-	resolved := filepath.Clean(filepath.Join(workdir, path))
-	cleanWorkdir := filepath.Clean(workdir)
-	if resolved != cleanWorkdir && !strings.HasPrefix(resolved, cleanWorkdir+string(os.PathSeparator)) {
+	resolvedReal, cleanWorkdir, ok := resolveAndValidatePath(workdir, path)
+	if !ok {
 		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "path outside working directory")
 		return
 	}
-	// C2b fix: resolve symlinks and re-validate containment.
-	resolvedReal, err := filepath.EvalSymlinks(resolved)
-	if err != nil {
-		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "cannot resolve path")
-		return
-	}
-	workdirReal, err := filepath.EvalSymlinks(cleanWorkdir)
-	if err != nil {
-		respondError(w, 500, protocol.ErrorCodeInternalError, "cannot resolve working directory")
-		return
-	}
-	if resolvedReal != workdirReal && !strings.HasPrefix(resolvedReal, workdirReal+string(os.PathSeparator)) {
-		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "path resolves outside working directory")
-		return
-	}
+	// Compute display base (non-symlink-resolved) for relative paths.
+	resolvedDisplay := filepath.Clean(filepath.Join(workdir, path))
 	entries, err := os.ReadDir(resolvedReal)
 	if err != nil {
 		respondError(w, 500, protocol.ErrorCodeInternalError, err.Error())
@@ -474,19 +435,12 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 		if len(items) >= maxEntries {
 			break
 		}
-		// N4 fix: use DirEntry.IsDir() directly (avoids stat for directory check).
 		isDir := e.IsDir()
-		entryPath := filepath.Join(resolved, e.Name())
-		// S6 fix: return paths relative to workdir to avoid leaking server structure.
-		relPath, err := filepath.Rel(cleanWorkdir, entryPath)
+		relPath, err := filepath.Rel(cleanWorkdir, filepath.Join(resolvedDisplay, e.Name()))
 		if err != nil {
-			continue // R5 fix: skip entries that can't be made relative
+			continue // skip entries that can't be made relative
 		}
-		fi := rest.FileInfo{
-			Path:  relPath,
-			IsDir: isDir,
-		}
-		// Only stat if we need size/modtime (skip for directories).
+		fi := rest.FileInfo{Path: relPath, IsDir: isDir}
 		if !isDir {
 			if info, err := e.Info(); err == nil {
 				fi.Size = int(info.Size())
@@ -538,45 +492,19 @@ func (s *Server) handleListWorkspaces(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleCreateWorkspace creates a new workspace.
-// W6 fix: validate path is within server workdir.
+// W6 fix: validate path is within server workDir.
 func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	var req rest.CreateWorkspaceRequest
 	if err := decodeJSON(r, &req); err != nil {
 		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid request")
 		return
 	}
-	// Containment check: workspace path must be within server workDir.
 	workdir := s.workDir
 	if workdir == "" {
 		workdir, _ = os.Getwd()
 	}
-	absPath, err := filepath.Abs(req.Path)
-	if err != nil {
-		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid path")
-		return
-	}
-	absWork, err := filepath.Abs(workdir)
-	if err != nil {
-		respondError(w, 500, protocol.ErrorCodeInternalError, "cannot resolve workdir")
-		return
-	}
-	if absPath != absWork && !strings.HasPrefix(absPath, absWork+string(filepath.Separator)) {
+	if _, _, ok := resolveAndValidatePath(workdir, req.Path); !ok {
 		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "workspace path outside working directory")
-		return
-	}
-	// R1 fix: resolve symlinks and re-validate (same as handleBrowseFS).
-	realPath, err := filepath.EvalSymlinks(absPath)
-	if err != nil {
-		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "cannot resolve path")
-		return
-	}
-	realWork, err := filepath.EvalSymlinks(absWork)
-	if err != nil {
-		respondError(w, 500, protocol.ErrorCodeInternalError, "cannot resolve working directory")
-		return
-	}
-	if realPath != realWork && !strings.HasPrefix(realPath, realWork+string(filepath.Separator)) {
-		respondError(w, 403, protocol.ErrorCodeFSPermissionDenied, "workspace path resolves outside working directory")
 		return
 	}
 	respondJSON(w, 201, rest.Workspace{ID: req.Name, Name: req.Name, Path: req.Path})

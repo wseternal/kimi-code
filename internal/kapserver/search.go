@@ -11,6 +11,7 @@ import (
 	"time"
 )
 
+
 // SearchService provides code search with snippet extraction.
 type SearchService struct {
 	workDir string
@@ -52,30 +53,12 @@ func (s *SearchService) Search(ctx context.Context, q SearchQuery) (*SearchRespo
 	if searchPath == "" {
 		searchPath = s.workDir
 	}
-	// Containment check: search path must be within workDir.
-	absSearch, err := filepath.Abs(searchPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve search path: %w", err)
-	}
-	absWork, err := filepath.Abs(s.workDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve work dir: %w", err)
-	}
-	if absSearch != absWork && !strings.HasPrefix(absSearch, absWork+string(filepath.Separator)) {
+	// Reuse the shared path validation helper (abs + symlink containment).
+	resolvedSearch, _, ok := resolveAndValidatePath(s.workDir, searchPath)
+	if !ok {
 		return nil, fmt.Errorf("search path %q is outside working directory", searchPath)
 	}
-	// C2a fix: resolve symlinks and re-validate containment.
-	resolvedSearch, err := filepath.EvalSymlinks(absSearch)
-	if err != nil {
-		return nil, fmt.Errorf("resolve symlinks: %w", err)
-	}
-	resolvedWork, err := filepath.EvalSymlinks(absWork)
-	if err != nil {
-		return nil, fmt.Errorf("resolve work symlinks: %w", err)
-	}
-	if resolvedSearch != resolvedWork && !strings.HasPrefix(resolvedSearch, resolvedWork+string(filepath.Separator)) {
-		return nil, fmt.Errorf("search path %q resolves outside working directory", searchPath)
-	}
+	_ = resolvedSearch // resolvedSearch is used only for validation; rg uses the original searchPath
 
 	args := []string{
 		"--json", "--hidden",
