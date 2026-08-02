@@ -265,12 +265,38 @@ func decodeJSON(r *http.Request, v interface{}) error {
 
 // ── Approval & Question Handlers ──
 
+// requireSession validates that the session exists and returns its ID.
+// Returns ("", false) and writes a 404 error if the session is not found.
+func (s *Server) requireSession(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := r.PathValue("id")
+	if _, ok := s.sessionManager.Get(id); !ok {
+		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
+		return "", false
+	}
+	return id, true
+}
+
+// requireSessionAndBody validates the session and decodes the JSON request body.
+// Returns ("", zero-value, false) and writes an error on failure.
+func requireSessionAndBody[T any](s *Server, w http.ResponseWriter, r *http.Request) (string, T, bool) {
+	id, ok := s.requireSession(w, r)
+	if !ok {
+		var zero T
+		return "", zero, false
+	}
+	var req T
+	if err := decodeJSON(r, &req); err != nil {
+		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid request")
+		var zero T
+		return "", zero, false
+	}
+	return id, req, true
+}
+
 // handleListApprovals returns pending approval requests for a session.
 func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	id, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
 	var items []protocol.ApprovalRequest
@@ -285,18 +311,11 @@ func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request) {
 
 // handleResolveApproval resolves a pending approval request.
 func (s *Server) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	approvalID := r.PathValue("approval_id")
-	_, ok := s.sessionManager.Get(id)
+	id, req, ok := requireSessionAndBody[rest.ResolveApprovalRequest](s, w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	var req rest.ResolveApprovalRequest
-	if err := decodeJSON(r, &req); err != nil {
-		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid request")
-		return
-	}
+	approvalID := r.PathValue("approval_id")
 	if s.sessionData != nil {
 		if err := s.sessionData.ResolveApproval(id, approvalID, req); err != nil {
 			respondError(w, 404, protocol.ErrorCodeApprovalNotFound, err.Error())
@@ -311,10 +330,8 @@ func (s *Server) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 
 // handleListQuestions returns pending question requests for a session.
 func (s *Server) handleListQuestions(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	id, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
 	var items []protocol.QuestionRequest
@@ -329,18 +346,11 @@ func (s *Server) handleListQuestions(w http.ResponseWriter, r *http.Request) {
 
 // handleResolveQuestion resolves a pending question.
 func (s *Server) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	questionID := r.PathValue("question_id")
-	_, ok := s.sessionManager.Get(id)
+	id, req, ok := requireSessionAndBody[rest.ResolveQuestionRequest](s, w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
-	var req rest.ResolveQuestionRequest
-	if err := decodeJSON(r, &req); err != nil {
-		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid request")
-		return
-	}
+	questionID := r.PathValue("question_id")
 	if s.sessionData != nil {
 		if err := s.sessionData.ResolveQuestion(id, questionID, req); err != nil {
 			respondError(w, 404, protocol.ErrorCodeQuestionNotFound, err.Error())
@@ -357,10 +367,8 @@ func (s *Server) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 
 // handleListTasks returns background tasks for a session.
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	id, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
 	var items []rest.TaskInfo
@@ -375,10 +383,8 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 
 // handleListTools returns registered tools for a session.
 func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	id, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
 	var items []rest.ToolDescriptor
@@ -393,10 +399,8 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 
 // handleListTerminals returns active terminals for a session.
 func (s *Server) handleListTerminals(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	id, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
 	var items []rest.TerminalInfo
@@ -411,10 +415,8 @@ func (s *Server) handleListTerminals(w http.ResponseWriter, r *http.Request) {
 
 // handleListSkills returns discovered skills for a session.
 func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	id, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
 	var items []rest.SkillDescriptor
@@ -429,10 +431,8 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 
 // handleListTranscript returns transcript entries for a session.
 func (s *Server) handleListTranscript(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	_, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
 	respondJSON(w, 200, rest.ListTranscriptResponse{Items: []rest.TranscriptEntry{}, HasMore: false})
@@ -441,10 +441,8 @@ func (s *Server) handleListTranscript(w http.ResponseWriter, r *http.Request) {
 // handleBrowseFS browses the filesystem for a session's working directory.
 // Paths are restricted to the server's working directory to prevent traversal.
 func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	_, ok := s.sessionManager.Get(id)
+	_, ok := s.requireSession(w, r)
 	if !ok {
-		respondError(w, 404, protocol.ErrorCodeSessionNotFound, "session not found")
 		return
 	}
 	workdir, _ := os.Getwd()
