@@ -437,7 +437,7 @@ func copySnapshot(state *Snapshot) *Snapshot {
 	if state.Meta.Custom != nil {
 		custom := make(map[string]any, len(state.Meta.Custom))
 		for k, v := range state.Meta.Custom {
-			custom[k] = v
+			custom[k] = deepCopyAny(v)
 		}
 		s.Meta.Custom = custom
 	}
@@ -549,4 +549,26 @@ func copyWith(state *Snapshot, fn func(*Snapshot)) *Snapshot {
 	s := copySnapshot(state)
 	fn(s)
 	return s
+}
+
+// deepCopyAny recursively deep-copies a value. Handles maps, slices, and
+// primitive types. Pointers are not followed (copied by reference) since
+// transcript Custom maps typically contain only JSON-compatible values.
+func deepCopyAny(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		m := make(map[string]any, len(val))
+		for k, v2 := range val {
+			m[k] = deepCopyAny(v2)
+		}
+		return m
+	case []any:
+		s := make([]any, len(val))
+		for i, v2 := range val {
+			s[i] = deepCopyAny(v2)
+		}
+		return s
+	default:
+		return v // primitives (string, float64, bool, nil) are immutable
+	}
 }

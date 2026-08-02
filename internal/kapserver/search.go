@@ -58,7 +58,7 @@ func (s *SearchService) Search(ctx context.Context, q SearchQuery) (*SearchRespo
 	if !ok {
 		return nil, fmt.Errorf("search path %q is outside working directory", searchPath)
 	}
-	_ = resolvedSearch // resolvedSearch is used only for validation; rg uses the original searchPath
+	// Use the resolved path for rg to prevent symlink-based path traversal.
 
 	args := []string{
 		"--json", "--hidden",
@@ -70,7 +70,7 @@ func (s *SearchService) Search(ctx context.Context, q SearchQuery) (*SearchRespo
 		args = append(args, "--glob", q.Glob)
 	}
 	// W4 fix: insert "--" sentinel to prevent argument injection.
-	args = append(args, "--", q.Pattern, searchPath)
+	args = append(args, "--", q.Pattern, resolvedSearch)
 
 	// W2 fix: apply context with timeout to prevent hanging.
 	searchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -172,12 +172,25 @@ func (s *SearchService) SearchByGlob(pattern string, limit int) ([]string, error
 	if limit <= 0 {
 		limit = 100
 	}
+	// Reject patterns containing path traversal sequences.
+	if strings.Contains(pattern, "..") {
+		return nil, fmt.Errorf("glob pattern %q contains path traversal", pattern)
+	}
 	matches, err := filepath.Glob(filepath.Join(s.workDir, pattern))
 	if err != nil {
 		return nil, err
 	}
-	if len(matches) > limit {
-		matches = matches[:limit]
+	// Validate all matches are within the working directory.
+	cleanWorkdir := filepath.Clean(s.workDir)
+	var safe []string
+	for _, m := range matches {
+		clean := filepath.Clean(m)
+		if clean == cleanWorkdir || strings.HasPrefix(clean, cleanWorkdir+string(filepath.Separator)) {
+			safe = append(safe, m)
+		}
 	}
-	return matches, nil
+	if len(safe) > limit {
+		safe = safe[:limit]
+	}
+	return safe, nil
 }

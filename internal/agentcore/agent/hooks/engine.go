@@ -80,10 +80,21 @@ func (e *Engine) TriggerBlock(ctx context.Context, event EventType, input HookIn
 
 // FireAndForget triggers hooks in a background goroutine.
 // Useful for PostToolUse, PostCompact, and other non-blocking events.
+// Pointer fields in HookInput are defensively copied to prevent
+// concurrent mutation by the caller.
 func (e *Engine) FireAndForget(ctx context.Context, event EventType, input HookInput) {
 	matched := e.matchHooks(event, input)
 	if len(matched) == 0 {
 		return
+	}
+	// Defensive copy of pointer fields to isolate from caller mutations.
+	if input.Tool != nil {
+		tool := *input.Tool
+		input.Tool = &tool
+	}
+	if input.Session != nil {
+		sess := *input.Session
+		input.Session = &sess
 	}
 	go func() {
 		for _, def := range matched {

@@ -1,17 +1,23 @@
 package kapserver
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
 	"github.com/visdomtech/kimi-code/internal/protocol"
 	"github.com/visdomtech/kimi-code/internal/protocol/rest"
 )
+
+// promptSeq is an atomic counter for unique prompt IDs.
+var promptSeq atomic.Uint64
 
 // SnapshotService captures point-in-time session snapshots.
 type SnapshotService struct {
@@ -170,7 +176,7 @@ func (s *Server) handleSubmitPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	promptID := "prompt_" + time.Now().Format("20060102150405")
+	promptID := fmt.Sprintf("prompt_%d_%d", time.Now().UnixMilli(), promptSeq.Add(1))
 	if s.onPromptSubmit != nil {
 		_, err := s.onPromptSubmit(r.Context(), id, req.Text)
 		if err != nil {
@@ -224,13 +230,19 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	var req rest.ShutdownRequest
 	_ = decodeJSON(r, &req)
 	respondJSON(w, 200, rest.ShutdownResponse{ShuttingDown: true})
-	// Trigger shutdown via context cancellation if wired
-	if s.cancelFunc != nil {
-		go func() {
-			time.Sleep(100 * time.Millisecond) // allow response to flush
+	// Trigger graceful shutdown after response flushes.
+	go func() {
+		time.Sleep(100 * time.Millisecond) // allow response to flush
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.Stop(shutdownCtx); err != nil {
+			s.logger.Error("graceful shutdown failed", "error", err)
+		}
+		// Fall back to context cancellation if Stop didn't trigger it.
+		if s.cancelFunc != nil {
 			s.cancelFunc()
-		}()
-	}
+		}
+	}()
 }
 
 // resolveAndValidatePath validates that a requested path stays within the
@@ -469,11 +481,6 @@ func (s *Server) handleOAuthStatus(w http.ResponseWriter, _ *http.Request) {
 // handleOAuthLogin initiates an OAuth device flow login.
 // W5 fix: return 501 until OAuth manager is wired.
 func (s *Server) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
-	var req rest.OAuthLoginRequest
-	if err := decodeJSON(r, &req); err != nil {
-		respondError(w, 400, protocol.ErrorCodeValidationFailed, "invalid request")
-		return
-	}
 	respondError(w, http.StatusNotImplemented, protocol.ErrorCodeInternalError, "OAuth login not yet implemented")
 }
 

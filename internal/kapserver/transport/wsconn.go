@@ -192,9 +192,9 @@ func (wc *wsConn) readFrame() (byte, []byte, error) {
 		return 0, nil, fmt.Errorf("frame too large: %d bytes (max %d)", length, maxFrameSize)
 	}
 
-	// RFC 6455 §5.1: client-to-server frames MUST be masked.
-	if !masked && (opcode == opText || opcode == opBinary || opcode == opContinuation) {
-		return 0, nil, errors.New("client frame not masked per RFC 6455")
+	// RFC 6455 §5.1: ALL client-to-server frames MUST be masked.
+	if !masked {
+		return 0, nil, errors.New("client frame not masked per RFC 6455 §5.1")
 	}
 
 	// Read mask key if present (client frames are always masked).

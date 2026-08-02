@@ -218,12 +218,13 @@ func (t *SetGoalBudgetTool) Execute(_ context.Context, input json.RawMessage, _ 
 		TurnBudget:        params.TurnBudget,
 		WallClockBudgetMs: params.WallClockBudgetMs,
 	}
-	t.Tracker.SetBudgetLimits(limits)
 
 	snap := t.Tracker.Current()
 	if snap == nil {
 		return &Result{Output: "No goal is currently set.", IsError: true}, nil
 	}
+	t.Tracker.SetBudgetLimits(limits)
+	snap = t.Tracker.Current()
 	out, _ := json.Marshal(snap)
 	return &Result{Output: fmt.Sprintf("Budget updated.\n%s", string(out))}, nil
 }

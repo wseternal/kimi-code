@@ -8,12 +8,16 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/visdomtech/kimi-code/internal/agentcore/session"
 	"github.com/visdomtech/kimi-code/internal/protocol"
 	"github.com/visdomtech/kimi-code/internal/protocol/rest"
 )
+
+// sessionSeq is an atomic counter for unique session IDs.
+var sessionSeq atomic.Uint64
 
 // PromptSubmitFunc is called when a prompt is submitted via REST.
 // Returns a prompt ID and optional error.
@@ -60,6 +64,7 @@ type Server struct {
 	cancelFunc      context.CancelFunc // for shutdown
 	tokenStore      *TokenStore
 	securityConfig  SecurityConfig
+	security        *SecurityMiddleware
 	snapshotSvc     *SnapshotService
 	searchSvc       *SearchService
 }
@@ -217,6 +222,9 @@ func (s *Server) Start(_ context.Context) error {
 
 // Stop gracefully stops the server.
 func (s *Server) Stop(ctx context.Context) error {
+	if s.security != nil {
+		s.security.Stop()
+	}
 	return s.httpServer.Shutdown(ctx)
 }
 
@@ -228,6 +236,7 @@ func (s *Server) Addr() string {
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	// Apply security middleware (CORS origin validation, host checks, rate limiting).
 	sec := NewSecurityMiddleware(s.securityConfig)
+	s.security = sec
 	handler := sec.Wrap(next)
 
 	// Apply bearer auth middleware when a token store is configured.
@@ -341,7 +350,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := fmt.Sprintf("sess_%d", time.Now().UnixNano())
+	id := fmt.Sprintf("sess_%d_%d", time.Now().UnixMilli(), sessionSeq.Add(1))
 	sess, err := s.sessionManager.Create(r.Context(), id, req.Title)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, protocol.ErrorCodeInternalError, err.Error())

@@ -391,10 +391,23 @@ func (m *Manager) acquireLock(ctx context.Context) (func(), error) {
 			}
 		}
 
-		if !contextSleep(ctx, 500*time.Millisecond) {
+		if !m.contextSleepFunc(ctx, 500*time.Millisecond) {
 			return nil, ctx.Err()
 		}
 	}
 
 	return nil, fmt.Errorf("failed to acquire lock after 60s")
+}
+
+// contextSleepFunc sleeps for d or until ctx is cancelled, using the injectable
+// sleepFunc for testability. Returns false if the context was cancelled.
+func (m *Manager) contextSleepFunc(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

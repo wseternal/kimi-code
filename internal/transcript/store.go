@@ -127,15 +127,17 @@ func (s *Store) Persist() error {
 		return fmt.Errorf("write operations tmp: %w", err)
 	}
 
-	// Atomic rename both files
-	if err := os.Rename(snapTmp, snapPath); err != nil {
+	// Rename operations first, then snapshot. If snapshot rename fails,
+	// the old snapshot + new operations can be recovered on reload by
+	// re-applying operations to the old snapshot (COW is idempotent).
+	if err := os.Rename(opsTmp, opsPath); err != nil {
 		os.Remove(snapTmp)
 		os.Remove(opsTmp)
-		return fmt.Errorf("rename snapshot: %w", err)
-	}
-	if err := os.Rename(opsTmp, opsPath); err != nil {
-		os.Remove(opsTmp)
 		return fmt.Errorf("rename operations: %w", err)
+	}
+	if err := os.Rename(snapTmp, snapPath); err != nil {
+		os.Remove(snapTmp)
+		return fmt.Errorf("rename snapshot: %w", err)
 	}
 
 	return nil

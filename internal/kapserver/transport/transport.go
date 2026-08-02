@@ -259,8 +259,7 @@ func (c *Connection) Close() {
 		return
 	}
 	c.closed = true
-	close(c.done)
-	close(c.send) // S7: close send channel to unblock writePump
+	close(c.done) // signal writePump to send close frame and exit
 }
 
 // Broadcaster manages per-session event broadcasting with journal replay.
@@ -497,21 +496,16 @@ func (c *Connection) writePump() error {
 	defer ticker.Stop()
 	for {
 		select {
-		case msg, ok := <-c.send:
-			if !ok {
-				// S7: send channel closed, connection is shutting down.
-				c.ws.writeClose(1001, "server shutting down")
-				return nil
-			}
+		case msg := <-c.send:
 			c.ws.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := c.ws.writeText(string(msg)); err != nil {
-				c.logger.Error("writePump: write failed", "error", err) // W12b
+				c.logger.Error("writePump: write failed", "error", err)
 				return err
 			}
 		case <-ticker.C:
 			c.ws.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := c.ws.writePing(nil); err != nil {
-				c.logger.Error("writePump: ping failed", "error", err) // W12b
+				c.logger.Error("writePump: ping failed", "error", err)
 				return err
 			}
 		case <-c.done:
