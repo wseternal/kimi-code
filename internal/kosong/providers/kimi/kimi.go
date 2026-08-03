@@ -409,11 +409,12 @@ func (p *Provider) WithMaxCompletionTokens(maxTokens int, _ *kosong.MaxCompletio
 func (p *Provider) UploadVideo(ctx context.Context, input interface{}, opts *kosong.GenerateOptions) (*kosong.VideoURLPart, error) {
 	var filename string
 	var mimeType string
-	var data []byte
+	var reader io.Reader
+	var contentLength int64
 
 	switch v := input.(type) {
 	case string:
-		// File path
+		// File path — stream via io.Pipe to avoid double-buffering.
 		info, err := os.Stat(v)
 		if err != nil {
 			return nil, fmt.Errorf("video file not found: %s", v)
@@ -426,10 +427,13 @@ func (p *Provider) UploadVideo(ctx context.Context, input interface{}, opts *kos
 		if mimeType == "" || !strings.HasPrefix(mimeType, "video/") {
 			return nil, fmt.Errorf("file extension does not indicate a video type: %s", filename)
 		}
-		data, err = os.ReadFile(v)
+		f, err := os.Open(v)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read video file: %w", err)
+			return nil, fmt.Errorf("failed to open video file: %w", err)
 		}
+		defer f.Close()
+		reader = f
+		contentLength = info.Size()
 	case *kosong.VideoUploadInput:
 		if v == nil {
 			return nil, fmt.Errorf("nil video upload input")
@@ -438,7 +442,8 @@ func (p *Provider) UploadVideo(ctx context.Context, input interface{}, opts *kos
 			return nil, fmt.Errorf("expected a video mime type, got %s", v.MIMEType)
 		}
 		mimeType = v.MIMEType
-		data = v.Data
+		reader = bytes.NewReader(v.Data)
+		contentLength = int64(len(v.Data))
 		if v.Filename != nil {
 			filename = *v.Filename
 		} else {
@@ -449,7 +454,8 @@ func (p *Provider) UploadVideo(ctx context.Context, input interface{}, opts *kos
 			return nil, fmt.Errorf("expected a video mime type, got %s", v.MIMEType)
 		}
 		mimeType = v.MIMEType
-		data = v.Data
+		reader = bytes.NewReader(v.Data)
+		contentLength = int64(len(v.Data))
 		if v.Filename != nil {
 			filename = *v.Filename
 		} else {
@@ -468,31 +474,36 @@ func (p *Provider) UploadVideo(ctx context.Context, input interface{}, opts *kos
 		return nil, fmt.Errorf("kimi provider: API key is required for video upload")
 	}
 
-	// Build multipart form body
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
+	// Build multipart form body using io.Pipe for streaming.
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
 
-	// Add purpose field
-	if err := writer.WriteField("purpose", "video"); err != nil {
-		return nil, fmt.Errorf("failed to write purpose field: %w", err)
-	}
-
-	// Add file field
-	part, err := writer.CreateFormFile("file", filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create form file: %w", err)
-	}
-	if _, err := part.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to write file data: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
-	}
+	// Write the multipart form in a goroutine so the HTTP client can
+	// stream the request body without buffering the entire file.
+	go func() {
+		defer pw.Close()
+		if err := writer.WriteField("purpose", "video"); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		part, err := writer.CreateFormFile("file", filename)
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(part, reader); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		if err := writer.Close(); err != nil {
+			pw.CloseWithError(err)
+		}
+	}()
 
 	// Build request URL
 	uploadURL := p.baseURL + "/files"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, pr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create upload request: %w", err)
 	}
@@ -512,7 +523,7 @@ func (p *Provider) UploadVideo(ctx context.Context, input interface{}, opts *kos
 	}
 
 	if trace.Enabled() {
-		trace.Log("http", "video_upload_request", map[string]any{"url": uploadURL, "filename": filename, "size": len(data)})
+		trace.Log("http", "video_upload_request", map[string]any{"url": uploadURL, "filename": filename, "size": contentLength})
 	}
 
 	resp, err := p.httpClient.Do(req)
@@ -521,7 +532,7 @@ func (p *Provider) UploadVideo(ctx context.Context, input interface{}, opts *kos
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read upload response: %w", err)
 	}

@@ -9,11 +9,18 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// maxResponseBodySize is the cap for fallback response reads (10 MB).
+const maxResponseBodySize = 10 * 1024 * 1024
+
+// DefaultHTTPClientVersion is the version sent in MCP clientInfo.
+const DefaultHTTPClientVersion = "0.3.0"
 
 // HTTPClient connects to an MCP server via HTTP/SSE transport.
 // Supports both the "http" (Streamable HTTP) and "sse" (legacy SSE) transports
@@ -24,6 +31,7 @@ type HTTPClient struct {
 	logger        *slog.Logger
 	httpClient    *http.Client
 	headers       map[string]string
+	clientVersion string
 
 	mu          sync.Mutex
 	nextID      atomic.Int64
@@ -33,6 +41,7 @@ type HTTPClient struct {
 	// SSE transport state
 	sseEndpoint string // endpoint URL for POST requests (discovered via SSE)
 	sseCancel   context.CancelFunc
+	sseBody     io.Closer // held so connectSSE can clean up
 
 	toolTimeout    time.Duration
 	startupTimeout time.Duration
@@ -65,6 +74,11 @@ func WithHTTPToolTimeout(d time.Duration) HTTPOption {
 	return func(c *HTTPClient) { c.toolTimeout = d }
 }
 
+// WithHTTPClientVersion sets the client version sent in MCP clientInfo.
+func WithHTTPClientVersion(version string) HTTPOption {
+	return func(c *HTTPClient) { c.clientVersion = version }
+}
+
 // NewHTTPClient creates a new HTTP/SSE MCP client.
 func NewHTTPClient(url string, transportType string, opts ...HTTPOption) *HTTPClient {
 	if transportType != "http" && transportType != "sse" {
@@ -76,6 +90,7 @@ func NewHTTPClient(url string, transportType string, opts ...HTTPOption) *HTTPCl
 		logger:         slog.Default(),
 		httpClient:     &http.Client{Timeout: 120 * time.Second},
 		headers:        make(map[string]string),
+		clientVersion:  DefaultHTTPClientVersion,
 		toolTimeout:    60 * time.Second,
 		startupTimeout: 30 * time.Second,
 	}
@@ -104,7 +119,7 @@ func (c *HTTPClient) Initialize(ctx context.Context) error {
 		"capabilities":    map[string]any{},
 		"clientInfo": map[string]any{
 			"name":    "kimi-code",
-			"version": "0.1.0",
+			"version": c.clientVersion,
 		},
 	}
 
@@ -122,8 +137,8 @@ func (c *HTTPClient) Initialize(ctx context.Context) error {
 		c.serverInfo = &initResult.ServerInfo
 	}
 
-	// Send initialized notification
-	if err := c.sendNotification("notifications/initialized", nil); err != nil {
+	// Send initialized notification (best-effort; log but don't block)
+	if err := c.sendNotification(initCtx, "notifications/initialized", nil); err != nil {
 		c.logger.Warn("mcp: failed to send initialized notification", "error", err)
 	}
 
@@ -200,6 +215,10 @@ func (c *HTTPClient) Close() error {
 		c.sseCancel()
 		c.sseCancel = nil
 	}
+	if c.sseBody != nil {
+		c.sseBody.Close()
+		c.sseBody = nil
+	}
 	c.initialized = false
 	return nil
 }
@@ -265,8 +284,8 @@ func (c *HTTPClient) callLocked(ctx context.Context, method string, params inter
 		return c.parseSSEResponse(ctx, resp.Body, id)
 	}
 
-	// Fallback: try JSON first, then SSE
-	body, err := io.ReadAll(resp.Body)
+	// Fallback: try JSON first, then SSE (bounded read to avoid OOM)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("mcp: read response: %w", err)
 	}
@@ -285,7 +304,7 @@ func (c *HTTPClient) callLocked(ctx context.Context, method string, params inter
 }
 
 // sendNotification sends a JSON-RPC notification (no ID, no response expected).
-func (c *HTTPClient) sendNotification(method string, params interface{}) error {
+func (c *HTTPClient) sendNotification(ctx context.Context, method string, params interface{}) error {
 	msg := map[string]any{
 		"jsonrpc": "2.0",
 		"method":  method,
@@ -304,7 +323,7 @@ func (c *HTTPClient) sendNotification(method string, params interface{}) error {
 		targetURL = c.sseEndpoint
 	}
 
-	httpReq, err := http.NewRequest("POST", targetURL, bytes.NewReader(data))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("mcp: create notification request: %w", err)
 	}
@@ -341,16 +360,28 @@ func (c *HTTPClient) connectSSE(ctx context.Context) error {
 		return fmt.Errorf("mcp sse: connect: %w", err)
 	}
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		cancel()
 		return fmt.Errorf("mcp sse: unexpected status %d", resp.StatusCode)
 	}
 
 	c.sseCancel = cancel
+	c.sseBody = resp.Body
 
-	// Read the initial "endpoint" event to discover the POST URL
+	// Derive the base URL host for SSRF validation of the discovered endpoint.
+	baseURL, err := url.Parse(c.url)
+	if err != nil {
+		resp.Body.Close()
+		cancel()
+		return fmt.Errorf("mcp sse: invalid base url: %w", err)
+	}
+
+	// Read the initial "endpoint" event to discover the POST URL.
+	// Use a bounded scanner to avoid reading forever if the server misbehaves.
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
 	var eventType, eventData string
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -361,19 +392,17 @@ func (c *HTTPClient) connectSSE(ctx context.Context) error {
 		} else if line == "" {
 			// End of event
 			if eventType == "endpoint" && eventData != "" {
-				// The endpoint may be relative — resolve against base URL
-				endpoint := eventData
-				if !strings.HasPrefix(endpoint, "http") {
-					// Resolve relative URL
-					baseURL := c.url
-					if idx := strings.LastIndex(baseURL, "/"); idx >= 0 {
-						endpoint = baseURL[:idx+1] + strings.TrimPrefix(endpoint, "/")
-					}
+				endpoint, err := c.resolveSSEEndpoint(eventData, baseURL)
+				if err != nil {
+					resp.Body.Close()
+					cancel()
+					return err
 				}
 				c.sseEndpoint = endpoint
 				c.logger.Debug("mcp sse: discovered endpoint", "endpoint", endpoint)
-				// Keep the SSE connection open in background for server notifications
-				go c.drainSSE(scanner)
+				// Keep the SSE connection open in background for server notifications.
+				// drainSSE will close resp.Body when done.
+				go c.drainSSE(scanner, resp.Body)
 				return nil
 			}
 			eventType = ""
@@ -382,16 +411,43 @@ func (c *HTTPClient) connectSSE(ctx context.Context) error {
 	}
 
 	if err := scanner.Err(); err != nil {
+		resp.Body.Close()
 		cancel()
 		return fmt.Errorf("mcp sse: read events: %w", err)
 	}
 
+	resp.Body.Close()
 	cancel()
 	return fmt.Errorf("mcp sse: no endpoint event received")
 }
 
+// resolveSSEEndpoint resolves a (possibly relative) endpoint URL and validates
+// it stays on the same host to prevent SSRF via a malicious MCP server.
+func (c *HTTPClient) resolveSSEEndpoint(endpoint string, baseURL *url.URL) (string, error) {
+	if !strings.HasPrefix(endpoint, "http") {
+		// Resolve relative URL against the base.
+		ref, err := url.Parse(endpoint)
+		if err != nil {
+			return "", fmt.Errorf("mcp sse: invalid endpoint %q: %w", endpoint, err)
+		}
+		resolved := baseURL.ResolveReference(ref)
+		return resolved.String(), nil
+	}
+	// Absolute URL — must match the same host.
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("mcp sse: invalid endpoint URL %q: %w", endpoint, err)
+	}
+	if parsed.Host != baseURL.Host {
+		return "", fmt.Errorf("mcp sse: endpoint host %q does not match base host %q (SSRF guard)", parsed.Host, baseURL.Host)
+	}
+	return endpoint, nil
+}
+
 // drainSSE reads remaining SSE events (server notifications) in background.
-func (c *HTTPClient) drainSSE(scanner *bufio.Scanner) {
+// It closes body when the stream ends to prevent resource leaks.
+func (c *HTTPClient) drainSSE(scanner *bufio.Scanner, body io.Closer) {
+	defer body.Close()
 	for scanner.Scan() {
 		// Server notifications — log and discard for now.
 		// A full implementation would dispatch these to the agent.
@@ -400,11 +456,14 @@ func (c *HTTPClient) drainSSE(scanner *bufio.Scanner) {
 			c.logger.Debug("mcp sse: notification", "line", line)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		c.logger.Debug("mcp sse: drain ended", "error", err)
+	}
 }
 
 // parseJSONResponse parses a JSON-RPC response from a reader.
 func (c *HTTPClient) parseJSONResponse(r io.Reader, expectedID int64) (json.RawMessage, error) {
-	body, err := io.ReadAll(r)
+	body, err := io.ReadAll(io.LimitReader(r, maxResponseBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("mcp: read json response: %w", err)
 	}
@@ -426,11 +485,19 @@ func (c *HTTPClient) parseJSONResponse(r io.Reader, expectedID int64) (json.RawM
 }
 
 // parseSSEResponse reads SSE events until we find the response for our request ID.
-func (c *HTTPClient) parseSSEResponse(_ context.Context, r io.Reader, expectedID int64) (json.RawMessage, error) {
+// Respects context cancellation to avoid hanging on a stalled server stream.
+func (c *HTTPClient) parseSSEResponse(ctx context.Context, r io.Reader, expectedID int64) (json.RawMessage, error) {
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var eventData string
 
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("mcp: sse stream cancelled: %w", ctx.Err())
+		default:
+		}
+
 		line := scanner.Text()
 
 		if strings.HasPrefix(line, "data:") {

@@ -3590,7 +3590,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Cycle 8: Agent commands
-	case strings.HasPrefix(input, "/goal"):
+	case input == "/goal" || strings.HasPrefix(input, "/goal "):
 		args := strings.TrimSpace(strings.TrimPrefix(input, "/goal"))
 		m.messages = append(m.messages, chatMessage{"user", input})
 
@@ -3643,6 +3643,22 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 					sb.WriteString("\n")
 				}
 				m.messages = append(m.messages, chatMessage{"system", sb.String()})
+			}
+
+		case args == "next clear":
+			// /goal next clear — remove all queued goals
+			n := m.svc.GoalTracker().ClearQueue()
+			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Cleared %d queued goal(s).", n)})
+
+		case strings.HasPrefix(args, "next remove "):
+			// /goal next remove <id> — remove a specific queued goal
+			id := strings.TrimSpace(strings.TrimPrefix(args, "next remove "))
+			if id == "" {
+				m.messages = append(m.messages, chatMessage{"system", "Usage: /goal next remove <id>"})
+			} else if m.svc.GoalTracker().RemoveFromQueue(id) {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed queued goal: %s", id)})
+			} else {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("No queued goal with ID: %s", id)})
 			}
 
 		case strings.HasPrefix(args, "next "):

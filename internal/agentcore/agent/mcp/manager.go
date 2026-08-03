@@ -197,15 +197,17 @@ func createClient(name string, cfg config.McpServerConfig, logger *slog.Logger) 
 		}
 		var opts []HTTPOption
 		opts = append(opts, WithHTTPLogger(logger.With("mcp_server", name)))
-		if len(cfg.Env) > 0 {
-			headers := make(map[string]string)
-			if bearerEnv, ok := cfg.Env["BEARER_TOKEN_ENV"]; ok {
-				if tok := lookupEnv(bearerEnv); tok != "" {
-					headers["Authorization"] = "Bearer " + tok
-				}
+		// Resolve bearer token: prefer explicit BearerTokenEnv field,
+		// fall back to legacy "BEARER_TOKEN_ENV" key in Env map.
+		bearerEnvName := cfg.BearerTokenEnv
+		if bearerEnvName == "" {
+			if v, ok := cfg.Env["BEARER_TOKEN_ENV"]; ok {
+				bearerEnvName = v
 			}
-			if len(headers) > 0 {
-				opts = append(opts, WithHTTPHeaders(headers))
+		}
+		if bearerEnvName != "" {
+			if tok := lookupEnv(bearerEnvName); tok != "" {
+				opts = append(opts, WithHTTPHeaders(map[string]string{"Authorization": "Bearer " + tok}))
 			}
 		}
 		if cfg.StartupTimeoutMs > 0 {
