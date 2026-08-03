@@ -133,11 +133,16 @@ func GenerateCall(
 }
 
 // generateWithCallbacks assembles a stream into a Message, firing OnMessagePart
-// for each part as it arrives.
+// for each part as it arrives. Supports parallel tool call routing via
+// index-based argument delta routing (Gap #13).
 func generateWithCallbacks(ctx context.Context, stream *StreamedMessage, callbacks *GenerateCallbacks) (*Message, error) {
 	var content []ContentPart
 	var toolCalls []ToolCall
 	var pending *StreamedMessagePart
+
+	// Index-based routing for parallel tool call argument deltas.
+	// Maps provider streaming index (number or string) to position in toolCalls slice.
+	toolCallIndexMap := make(map[interface{}]int)
 
 	for part := range stream.Parts {
 		select {
@@ -163,12 +168,37 @@ func generateWithCallbacks(ctx context.Context, stream *StreamedMessage, callbac
 			callbacks.OnMessagePart(part)
 		}
 
+		// Index-based routing for parallel tool call argument deltas.
+		// When a tool_call_part arrives with an index that maps to an existing
+		// tool call, route the argument delta directly to that call, bypassing
+		// the sequential pending/merge flow. This prevents argument
+		// cross-contamination when the provider interleaves deltas from
+		// multiple concurrent tool calls.
+		if part.Type == "tool_call_part" && part.Index != nil && pending != nil && pending.Type == "function" {
+			if !isPendingToolCallAtIndex(pending, part.Index) {
+				if arrayIdx, ok := toolCallIndexMap[part.Index]; ok && arrayIdx < len(toolCalls) {
+					if part.ArgumentsPart != nil {
+						if toolCalls[arrayIdx].Arguments == nil {
+							toolCalls[arrayIdx].Arguments = part.ArgumentsPart
+						} else {
+							combined := *toolCalls[arrayIdx].Arguments + *part.ArgumentsPart
+							toolCalls[arrayIdx].Arguments = &combined
+						}
+					}
+					continue
+				}
+				// Unknown index — register it and fall through to sequential logic.
+				// The pending function header will be flushed, then the argument
+				// delta will be associated correctly.
+			}
+		}
+
 		// Try to merge with pending part
 		if pending != nil {
 			if MergeInPlace(pending, &part) {
 				continue
 			}
-			flushPart(pending, &content, &toolCalls)
+			flushPart(pending, &content, &toolCalls, toolCallIndexMap)
 		}
 
 		// Set new pending
@@ -178,7 +208,7 @@ func generateWithCallbacks(ctx context.Context, stream *StreamedMessage, callbac
 
 	// Flush final pending
 	if pending != nil {
-		flushPart(pending, &content, &toolCalls)
+		flushPart(pending, &content, &toolCalls, toolCallIndexMap)
 	}
 
 	msg := &Message{
@@ -238,7 +268,8 @@ func Generate(ctx context.Context, stream *StreamedMessage) (*Message, error) {
 }
 
 // flushPart converts a StreamedMessagePart to ContentPart or ToolCall and appends.
-func flushPart(part *StreamedMessagePart, content *[]ContentPart, toolCalls *[]ToolCall) {
+// For function-type parts, registers the index mapping for parallel tool call routing.
+func flushPart(part *StreamedMessagePart, content *[]ContentPart, toolCalls *[]ToolCall, toolCallIndexMap map[interface{}]int) {
 	switch part.Type {
 	case "text":
 		*content = append(*content, ContentPart{Type: "text", Text: part.Text})
@@ -251,6 +282,7 @@ func flushPart(part *StreamedMessagePart, content *[]ContentPart, toolCalls *[]T
 	case "video_url":
 		*content = append(*content, ContentPart{Type: "video_url", VideoURL: part.VideoURL})
 	case "function":
+		idx := len(*toolCalls)
 		*toolCalls = append(*toolCalls, ToolCall{
 			Type:      "function",
 			ID:        part.ID,
@@ -258,7 +290,21 @@ func flushPart(part *StreamedMessagePart, content *[]ContentPart, toolCalls *[]T
 			Arguments: part.Arguments,
 			Extras:    part.Extras,
 		})
+		// Register the index mapping for parallel tool call routing.
+		if part.Index != nil {
+			toolCallIndexMap[part.Index] = idx
+		}
 	}
+}
+
+// isPendingToolCallAtIndex checks whether the pending part is a tool call at
+// the given index. Used for parallel tool call routing to determine if an
+// argument delta belongs to the currently pending tool call or a different one.
+func isPendingToolCallAtIndex(pending *StreamedMessagePart, index interface{}) bool {
+	if pending == nil || pending.Type != "function" {
+		return false
+	}
+	return pending.Index == index
 }
 
 // CollectParts drains a stream and returns all parts as a slice.

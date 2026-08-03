@@ -11,8 +11,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -403,8 +406,192 @@ func (p *Provider) WithMaxCompletionTokens(maxTokens int, _ *kosong.MaxCompletio
 	return &cp
 }
 
-func (p *Provider) UploadVideo(_ context.Context, _ interface{}, _ *kosong.GenerateOptions) (*kosong.VideoURLPart, error) {
-	return nil, fmt.Errorf("video upload not supported by kimi provider")
+func (p *Provider) UploadVideo(ctx context.Context, input interface{}, opts *kosong.GenerateOptions) (*kosong.VideoURLPart, error) {
+	var filename string
+	var mimeType string
+	var data []byte
+
+	switch v := input.(type) {
+	case string:
+		// File path
+		info, err := os.Stat(v)
+		if err != nil {
+			return nil, fmt.Errorf("video file not found: %s", v)
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("path is a directory, not a file: %s", v)
+		}
+		filename = filepath.Base(v)
+		mimeType = guessMIMEFromExt(filename)
+		if mimeType == "" || !strings.HasPrefix(mimeType, "video/") {
+			return nil, fmt.Errorf("file extension does not indicate a video type: %s", filename)
+		}
+		data, err = os.ReadFile(v)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read video file: %w", err)
+		}
+	case *kosong.VideoUploadInput:
+		if v == nil {
+			return nil, fmt.Errorf("nil video upload input")
+		}
+		if !strings.HasPrefix(v.MIMEType, "video/") {
+			return nil, fmt.Errorf("expected a video mime type, got %s", v.MIMEType)
+		}
+		mimeType = v.MIMEType
+		data = v.Data
+		if v.Filename != nil {
+			filename = *v.Filename
+		} else {
+			filename = guessFilename(mimeType)
+		}
+	case kosong.VideoUploadInput:
+		if !strings.HasPrefix(v.MIMEType, "video/") {
+			return nil, fmt.Errorf("expected a video mime type, got %s", v.MIMEType)
+		}
+		mimeType = v.MIMEType
+		data = v.Data
+		if v.Filename != nil {
+			filename = *v.Filename
+		} else {
+			filename = guessFilename(mimeType)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported video upload input type: %T", input)
+	}
+
+	// Resolve API key
+	apiKey := p.apiKey
+	if opts != nil && opts.Auth != nil && opts.Auth.APIKey != nil {
+		apiKey = *opts.Auth.APIKey
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("kimi provider: API key is required for video upload")
+	}
+
+	// Build multipart form body
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	// Add purpose field
+	if err := writer.WriteField("purpose", "video"); err != nil {
+		return nil, fmt.Errorf("failed to write purpose field: %w", err)
+	}
+
+	// Add file field
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create form file: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return nil, fmt.Errorf("failed to write file data: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	// Build request URL
+	uploadURL := p.baseURL + "/files"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &buf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	// Apply default headers
+	for k, v := range p.defaultHeaders {
+		req.Header.Set(k, v)
+	}
+
+	// Apply auth headers from opts
+	if opts != nil && opts.Auth != nil {
+		for k, v := range opts.Auth.Headers {
+			req.Header.Set(k, v)
+		}
+	}
+
+	if trace.Enabled() {
+		trace.Log("http", "video_upload_request", map[string]any{"url": uploadURL, "filename": filename, "size": len(data)})
+	}
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("video upload request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read upload response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("video upload failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse upload response: %w", err)
+	}
+	if result.ID == "" {
+		return nil, fmt.Errorf("upload response missing file id")
+	}
+
+	if trace.Enabled() {
+		trace.Log("http", "video_upload_response", map[string]any{"file_id": result.ID})
+	}
+
+	return &kosong.VideoURLPart{
+		Type: "video_url",
+		VideoURL: struct {
+			URL string  `json:"url"`
+			ID  *string `json:"id,omitempty"`
+		}{
+			URL: "ms://" + result.ID,
+			ID:  &result.ID,
+		},
+	}, nil
+}
+
+// ── MIME type helpers for video upload ──
+
+var mimeToExt = map[string]string{
+	"video/mp4":      "mp4",
+	"video/mpeg":     "mpeg",
+	"video/quicktime": "mov",
+	"video/webm":     "webm",
+	"video/x-matroska": "mkv",
+	"video/x-msvideo": "avi",
+	"video/x-flv":    "flv",
+	"video/3gpp":     "3gp",
+}
+
+var extToMIME = map[string]string{}
+
+func init() {
+	for mime, ext := range mimeToExt {
+		extToMIME[ext] = mime
+	}
+}
+
+func guessFilename(mimeType string) string {
+	ext, ok := mimeToExt[strings.ToLower(mimeType)]
+	if !ok {
+		ext = "bin"
+	}
+	return "upload." + ext
+}
+
+func guessMIMEFromExt(filename string) string {
+	dot := strings.LastIndex(filename, ".")
+	if dot < 0 {
+		return ""
+	}
+	ext := strings.ToLower(filename[dot+1:])
+	return extToMIME[ext]
 }
 
 // Generate sends a chat completion request with Kimi-specific enhancements.
