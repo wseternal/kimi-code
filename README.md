@@ -38,7 +38,7 @@ Pre-built binaries for macOS, Linux, and Windows are available on the [releases 
 
 ```sh
 cd your-project
-kimi
+gkimi
 ```
 
 On first launch, run `/login` inside the TUI and choose your preferred authentication method. Then try:
@@ -51,18 +51,18 @@ Take a look at this project and explain its main directories.
 
 - **Single binary.** No Node.js, no runtime dependencies. One executable, ready in milliseconds.
 - **Interactive TUI.** Built with [bubbletea](https://github.com/charmbracelet/bubbletea) — streaming output, collapsible thinking/tool blocks, readline keybindings, syntax-aware rendering.
-- **Session persistence.** Sessions are saved to disk automatically. Resume with `kimi -S <id>`, continue the last session with `kimi -c`, or pick from a list with `/sessions`.
+- **Session persistence.** Sessions are saved to disk automatically. Resume with `gkimi -S <id>`, continue the last session with `gkimi -c`, or pick from a list with `/sessions`.
 - **34+ slash commands.** Session management (`/fork`, `/title`, `/undo`, `/compact`, `/export-md`), agent control (`/goal`, `/swarm`), configuration (`/model`, `/provider`, `/auto`), and more.
 - **Built-in tools.** Bash execution, file read/write/edit, glob pattern matching, ripgrep-backed search, web fetch (with SSRF guard), web search, background tasks, and todo list management.
 - **Permission system.** 8-policy approval chain with interactive TUI prompts, session-scoped approval, auto mode, and sensitive file detection.
 - **Context management.** Token tracking, automatic compaction, undo support, and real-time usage display.
 - **Skill discovery.** Custom skills from `.agents/skills/*/SKILL.md` are auto-discovered and exposed as `/skill:name` commands.
-- **Headless mode.** Run `kimi -p "your prompt"` for non-interactive scripting and CI pipelines.
+- **Headless mode.** Run `gkimi -p "your prompt"` for non-interactive scripting and CI pipelines.
 - **OpenAI-compatible providers.** Works with Kimi, OpenAI, Anthropic, Google, or any compatible endpoint via TOML config.
 
 ## Configuration
 
-Kimi Code CLI reads configuration from `~/.kimi-code/config.toml` (compatible with the original TS CLI format). Key sections:
+Kimi Code CLI reads configuration from `~/.gkimi-code/config.toml`. Key sections:
 
 ```toml
 default_model = "kimi-latest"
