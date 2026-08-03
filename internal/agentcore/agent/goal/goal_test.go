@@ -201,26 +201,6 @@ func TestCreateGoalValidation(t *testing.T) {
 	}
 }
 
-func TestParseGoalCommand(t *testing.T) {
-	tests := []struct {
-		input string
-		text  string
-		clear bool
-	}{
-		{"", "", true},
-		{"Build API", "Build API", false},
-		{"  ", "", true},
-	}
-
-	for _, tt := range tests {
-		text, clear := ParseGoalCommand(tt.input)
-		if text != tt.text || clear != tt.clear {
-			t.Errorf("ParseGoalCommand(%q) = (%q, %v), want (%q, %v)",
-				tt.input, text, clear, tt.text, tt.clear)
-		}
-	}
-}
-
 func TestStatusString(t *testing.T) {
 	tr := NewTracker()
 	if s := tr.StatusString(); s != "No goal set" {
@@ -405,5 +385,150 @@ func TestContinuationDriverDoubleEnqueue(t *testing.T) {
 	p3 := driver.OnTurnEnded("turn1", false, false)
 	if p3 == nil {
 		t.Error("expected prompt after clear pending")
+	}
+}
+
+// ── Queue Operations Tests ──
+
+func TestQueueGoal(t *testing.T) {
+	tr := NewTracker()
+
+	q := tr.QueueGoal("Build feature A", "Tests pass", BudgetLimits{})
+	if q.ID == "" {
+		t.Error("queued goal should have an ID")
+	}
+	if q.Objective != "Build feature A" {
+		t.Errorf("Objective = %q", q.Objective)
+	}
+	if q.CompletionCriterion != "Tests pass" {
+		t.Errorf("CompletionCriterion = %q", q.CompletionCriterion)
+	}
+	if q.QueuedAt.IsZero() {
+		t.Error("QueuedAt should be set")
+	}
+}
+
+func TestListQueue(t *testing.T) {
+	tr := NewTracker()
+
+	if queue := tr.ListQueue(); len(queue) != 0 {
+		t.Errorf("new tracker should have empty queue, got %d", len(queue))
+	}
+
+	tr.QueueGoal("Task 1", "", BudgetLimits{})
+	tr.QueueGoal("Task 2", "", BudgetLimits{})
+
+	queue := tr.ListQueue()
+	if len(queue) != 2 {
+		t.Fatalf("expected 2 queued goals, got %d", len(queue))
+	}
+	if queue[0].Objective != "Task 1" {
+		t.Errorf("queue[0].Objective = %q", queue[0].Objective)
+	}
+	if queue[1].Objective != "Task 2" {
+		t.Errorf("queue[1].Objective = %q", queue[1].Objective)
+	}
+}
+
+func TestPopQueue(t *testing.T) {
+	tr := NewTracker()
+
+	// Pop from empty queue
+	if q := tr.PopQueue(); q != nil {
+		t.Error("PopQueue on empty should return nil")
+	}
+
+	tr.QueueGoal("First", "", BudgetLimits{})
+	tr.QueueGoal("Second", "", BudgetLimits{})
+
+	q := tr.PopQueue()
+	if q == nil {
+		t.Fatal("PopQueue should return non-nil")
+	}
+	if q.Objective != "First" {
+		t.Errorf("expected First, got %q", q.Objective)
+	}
+
+	// Only one left
+	if len(tr.ListQueue()) != 1 {
+		t.Errorf("expected 1 remaining, got %d", len(tr.ListQueue()))
+	}
+
+	q2 := tr.PopQueue()
+	if q2 == nil || q2.Objective != "Second" {
+		t.Errorf("expected Second, got %v", q2)
+	}
+
+	// Empty again
+	if q3 := tr.PopQueue(); q3 != nil {
+		t.Error("should be nil after popping all")
+	}
+}
+
+func TestRemoveFromQueue(t *testing.T) {
+	tr := NewTracker()
+
+	q1 := tr.QueueGoal("Task A", "", BudgetLimits{})
+	q2 := tr.QueueGoal("Task B", "", BudgetLimits{})
+	tr.QueueGoal("Task C", "", BudgetLimits{})
+
+	// Remove middle item
+	if !tr.RemoveFromQueue(q2.ID) {
+		t.Error("RemoveFromQueue should return true for existing ID")
+	}
+	queue := tr.ListQueue()
+	if len(queue) != 2 {
+		t.Fatalf("expected 2 remaining, got %d", len(queue))
+	}
+	if queue[0].ID != q1.ID {
+		t.Errorf("first should be Task A")
+	}
+
+	// Remove first item
+	if !tr.RemoveFromQueue(q1.ID) {
+		t.Error("RemoveFromQueue should return true")
+	}
+
+	// Non-existent ID
+	if tr.RemoveFromQueue("nonexistent") {
+		t.Error("RemoveFromQueue should return false for unknown ID")
+	}
+
+	if len(tr.ListQueue()) != 1 {
+		t.Errorf("expected 1 remaining, got %d", len(tr.ListQueue()))
+	}
+}
+
+func TestClearQueue(t *testing.T) {
+	tr := NewTracker()
+
+	// Clear empty queue
+	if n := tr.ClearQueue(); n != 0 {
+		t.Errorf("ClearQueue on empty should return 0, got %d", n)
+	}
+
+	tr.QueueGoal("A", "", BudgetLimits{})
+	tr.QueueGoal("B", "", BudgetLimits{})
+	tr.QueueGoal("C", "", BudgetLimits{})
+
+	n := tr.ClearQueue()
+	if n != 3 {
+		t.Errorf("ClearQueue should return 3, got %d", n)
+	}
+	if len(tr.ListQueue()) != 0 {
+		t.Error("queue should be empty after ClearQueue")
+	}
+}
+
+func TestQueueWithBudget(t *testing.T) {
+	tr := NewTracker()
+	budget := BudgetLimits{TokenBudget: intPtr(5000), TurnBudget: intPtr(10)}
+
+	q := tr.QueueGoal("Budgeted task", "Done", budget)
+	if q.BudgetLimits.TokenBudget == nil || *q.BudgetLimits.TokenBudget != 5000 {
+		t.Error("budget should be preserved in queued goal")
+	}
+	if q.BudgetLimits.TurnBudget == nil || *q.BudgetLimits.TurnBudget != 10 {
+		t.Error("turn budget should be preserved")
 	}
 }

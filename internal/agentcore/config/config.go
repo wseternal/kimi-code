@@ -121,14 +121,18 @@ type SecondaryModelConfig struct {
 // McpServerConfig describes an MCP server connection.
 // Transport is "stdio", "http", or "sse".
 type McpServerConfig struct {
-	Transport    string            `toml:"transport"`
-	Command      string            `toml:"command,omitempty"`
-	Args         []string          `toml:"args,omitempty"`
-	URL          string            `toml:"url,omitempty"`
-	Env          map[string]string `toml:"env,omitempty"`
-	EnabledTools []string          `toml:"enabled_tools,omitempty"`
-	StartupTimeoutMs int           `toml:"startup_timeout_ms,omitempty"`
-	ToolTimeoutMs    int           `toml:"tool_timeout_ms,omitempty"`
+	Transport      string            `toml:"transport"`
+	Command        string            `toml:"command,omitempty"`
+	Args           []string          `toml:"args,omitempty"`
+	URL            string            `toml:"url,omitempty"`
+	Env            map[string]string `toml:"env,omitempty"`
+	EnabledTools   []string          `toml:"enabled_tools,omitempty"`
+	StartupTimeoutMs int             `toml:"startup_timeout_ms,omitempty"`
+	ToolTimeoutMs    int             `toml:"tool_timeout_ms,omitempty"`
+	// BearerTokenEnv names the environment variable whose value is the
+	// bearer token for HTTP/SSE transport. Replaces the legacy magic key
+	// "BEARER_TOKEN_ENV" in the Env map.
+	BearerTokenEnv string `toml:"bearer_token_env,omitempty"`
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -472,6 +476,9 @@ func mcpServersToMap(servers map[string]McpServerConfig) map[string]any {
 		}
 		if sc.ToolTimeoutMs != 0 {
 			m["tool_timeout_ms"] = sc.ToolTimeoutMs
+		}
+		if sc.BearerTokenEnv != "" {
+			m["bearer_token_env"] = sc.BearerTokenEnv
 		}
 		out[k] = m
 	}

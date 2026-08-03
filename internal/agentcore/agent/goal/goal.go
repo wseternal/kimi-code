@@ -79,10 +79,80 @@ type Change struct {
 type Tracker struct {
 	mu      sync.RWMutex
 	current *State
+	queue   []QueuedGoal
+}
+
+// QueuedGoal is a pending goal in the queue.
+type QueuedGoal struct {
+	ID                  string `json:"id"`
+	Objective           string `json:"objective"`
+	CompletionCriterion string `json:"completionCriterion,omitempty"`
+	BudgetLimits        BudgetLimits `json:"budgetLimits"`
+	QueuedAt            time.Time    `json:"queuedAt"`
 }
 
 // NewTracker creates a new goal tracker.
 func NewTracker() *Tracker { return &Tracker{} }
+
+// ── Queue Operations ──
+
+// QueueGoal adds a goal to the pending queue.
+func (t *Tracker) QueueGoal(objective, completionCriterion string, budget BudgetLimits) QueuedGoal {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	q := QueuedGoal{
+		ID:                  fmt.Sprintf("queued_%d", time.Now().UnixNano()),
+		Objective:           objective,
+		CompletionCriterion: completionCriterion,
+		BudgetLimits:        budget,
+		QueuedAt:            time.Now(),
+	}
+	t.queue = append(t.queue, q)
+	return q
+}
+
+// ListQueue returns all queued goals.
+func (t *Tracker) ListQueue() []QueuedGoal {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	result := make([]QueuedGoal, len(t.queue))
+	copy(result, t.queue)
+	return result
+}
+
+// PopQueue removes and returns the first queued goal, or nil.
+func (t *Tracker) PopQueue() *QueuedGoal {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.queue) == 0 {
+		return nil
+	}
+	q := t.queue[0]
+	t.queue = t.queue[1:]
+	return &q
+}
+
+// RemoveFromQueue removes a queued goal by ID.
+func (t *Tracker) RemoveFromQueue(id string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i, q := range t.queue {
+		if q.ID == id {
+			t.queue = append(t.queue[:i], t.queue[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// ClearQueue removes all queued goals.
+func (t *Tracker) ClearQueue() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := len(t.queue)
+	t.queue = nil
+	return n
+}
 
 // CreateGoal creates a new active goal. Objective max 4000 chars.
 func (t *Tracker) CreateGoal(objective, completionCriterion string, budget BudgetLimits, actor string) (*Snapshot, *Change, error) {
@@ -273,15 +343,6 @@ func (t *Tracker) StatusString() string {
 	elapsed := time.Since(t.current.CreatedAt).Round(time.Second)
 	return fmt.Sprintf("Goal: %s\nStatus: %s (set %s ago, %d turns, %d tokens)",
 		t.current.Objective, t.current.Status, elapsed, t.current.TurnsUsed, t.current.TokensUsed)
-}
-
-// ParseGoalCommand parses "/goal <text>" or "/goal" (clear).
-func ParseGoalCommand(args string) (text string, clear bool) {
-	args = strings.TrimSpace(args)
-	if args == "" {
-		return "", true
-	}
-	return args, false
 }
 
 // ── Internal ──

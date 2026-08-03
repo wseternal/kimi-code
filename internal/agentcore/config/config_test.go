@@ -697,6 +697,44 @@ func TestSaveToFile_OmitsZeroValues(t *testing.T) {
 	}
 }
 
+func TestParseMcpServerBearerTokenEnv(t *testing.T) {
+	toml := `
+[mcp_servers.myserver]
+transport = "http"
+url = "https://mcp.example.com"
+bearer_token_env = "MY_SECRET_TOKEN"
+
+[mcp_servers.legacy]
+transport = "sse"
+url = "https://mcp2.example.com"
+
+[mcp_servers.legacy.env]
+BEARER_TOKEN_ENV = "LEGACY_TOKEN"
+`
+	cfg, err := parseConfigString(toml, "test.toml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Explicit bearer_token_env field
+	srv := cfg.McpServers["myserver"]
+	if srv.BearerTokenEnv != "MY_SECRET_TOKEN" {
+		t.Errorf("expected bearer_token_env=MY_SECRET_TOKEN, got %s", srv.BearerTokenEnv)
+	}
+	if srv.Transport != "http" {
+		t.Errorf("expected transport=http, got %s", srv.Transport)
+	}
+
+	// Legacy env map approach
+	legacy := cfg.McpServers["legacy"]
+	if legacy.BearerTokenEnv != "" {
+		t.Errorf("expected empty bearer_token_env for legacy server, got %s", legacy.BearerTokenEnv)
+	}
+	if legacy.Env["BEARER_TOKEN_ENV"] != "LEGACY_TOKEN" {
+		t.Errorf("expected legacy env BEARER_TOKEN_ENV=LEGACY_TOKEN, got %s", legacy.Env["BEARER_TOKEN_ENV"])
+	}
+}
+
 func TestRoundTrip_SupportEfforts(t *testing.T) {
 	input := `[models.k3]
 provider = "kimi"

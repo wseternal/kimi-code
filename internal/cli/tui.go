@@ -3590,23 +3590,97 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Cycle 8: Agent commands
-	case strings.HasPrefix(input, "/goal"):
+	case input == "/goal" || strings.HasPrefix(input, "/goal "):
 		args := strings.TrimSpace(strings.TrimPrefix(input, "/goal"))
-		text, clear := goal.ParseGoalCommand(args)
 		m.messages = append(m.messages, chatMessage{"user", input})
-		if clear {
+
+		switch {
+		case args == "" :
+			// /goal — clear current goal
 			if _, _, err := m.svc.GoalTracker().CancelGoal("user"); err != nil {
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error clearing goal: %s", err)})
 			} else {
 				m.messages = append(m.messages, chatMessage{"system", "Goal cleared."})
 			}
-		} else {
-			if _, _, err := m.svc.GoalTracker().CreateGoal(text, "", goal.BudgetLimits{}, "user"); err != nil {
+
+		case args == "status":
+			m.messages = append(m.messages, chatMessage{"system", m.svc.GoalTracker().StatusString()})
+
+		case args == "pause":
+			if snap, _, err := m.svc.GoalTracker().PauseGoal("user"); err != nil {
+				m.messages = append(m.messages, chatMessage{"system", err.Error()})
+			} else {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal paused: %s", snap.Objective)})
+			}
+
+		case args == "resume":
+			if snap, _, err := m.svc.GoalTracker().ResumeGoal("user"); err != nil {
+				m.messages = append(m.messages, chatMessage{"system", err.Error()})
+			} else {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal resumed: %s", snap.Objective)})
+			}
+
+		case args == "cancel":
+			if snap, _, err := m.svc.GoalTracker().CancelGoal("user"); err != nil {
+				m.messages = append(m.messages, chatMessage{"system", err.Error()})
+			} else {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal cancelled: %s", snap.Objective)})
+			}
+
+		case strings.HasPrefix(args, "next manage"):
+			// /goal next manage — show queue
+			queue := m.svc.GoalTracker().ListQueue()
+			if len(queue) == 0 {
+				m.messages = append(m.messages, chatMessage{"system", "Goal queue is empty."})
+			} else {
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("Goal queue (%d items):\n", len(queue)))
+				for i, q := range queue {
+					sb.WriteString(fmt.Sprintf("  %d. [%s] %s", i+1, q.ID, q.Objective))
+					if q.CompletionCriterion != "" {
+						sb.WriteString(fmt.Sprintf(" (criterion: %s)", q.CompletionCriterion))
+					}
+					sb.WriteString("\n")
+				}
+				m.messages = append(m.messages, chatMessage{"system", sb.String()})
+			}
+
+		case args == "next clear":
+			// /goal next clear — remove all queued goals
+			n := m.svc.GoalTracker().ClearQueue()
+			m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Cleared %d queued goal(s).", n)})
+
+		case strings.HasPrefix(args, "next remove "):
+			// /goal next remove <id> — remove a specific queued goal
+			id := strings.TrimSpace(strings.TrimPrefix(args, "next remove "))
+			if id == "" {
+				m.messages = append(m.messages, chatMessage{"system", "Usage: /goal next remove <id>"})
+			} else if m.svc.GoalTracker().RemoveFromQueue(id) {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Removed queued goal: %s", id)})
+			} else {
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("No queued goal with ID: %s", id)})
+			}
+
+		case strings.HasPrefix(args, "next "):
+			// /goal next <objective> — queue upcoming goal
+			objective := strings.TrimPrefix(args, "next ")
+			objective = strings.TrimSpace(objective)
+			if objective == "" {
+				m.messages = append(m.messages, chatMessage{"system", "Usage: /goal next <objective>"})
+			} else {
+				q := m.svc.GoalTracker().QueueGoal(objective, "", goal.BudgetLimits{})
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal queued: [%s] %s", q.ID, objective)})
+			}
+
+		default:
+			// /goal <text> — set as current goal
+			if _, _, err := m.svc.GoalTracker().CreateGoal(args, "", goal.BudgetLimits{}, "user"); err != nil {
 				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Error setting goal: %s", err)})
 			} else {
-				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal set: %s", text)})
+				m.messages = append(m.messages, chatMessage{"system", fmt.Sprintf("Goal set: %s", args)})
 			}
 		}
+
 		m.input = ""
 		m.cursor = 0
 		m.showSuggestions = false

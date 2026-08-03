@@ -201,6 +201,8 @@ func (a *App) run() error {
 			return a.parseConvert(args[i+1:])
 		case arg == "sessions":
 			return a.runSessions()
+		case arg == "upgrade" || arg == "update":
+			return a.runUpgrade()
 		default:
 			if len(arg) > 0 && arg[0] != '-' {
 				opts.Prompt = arg
@@ -253,6 +255,7 @@ func (a *App) printHelp() error {
 	fmt.Println("  kimi export <session-id>      Export session as markdown")
 	fmt.Println("  kimi sessions                 List all sessions")
 	fmt.Println("  kimi convert -s <id> -o <file> Convert session audit to DuckDB")
+	fmt.Println("  kimi upgrade                  Check for and install updates")
 	fmt.Println("  kimi version                  Show version")
 	fmt.Println("  kimi --trace [file]           Enable event tracing to JSONL file")
 	fmt.Println("  kimi --agent <name>           Use a named agent profile")
