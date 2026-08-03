@@ -74,7 +74,7 @@ func (a *App) runUpgrade() error {
 	// Find matching asset for current OS/arch
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
-	assetName := fmt.Sprintf("kimi-%s-%s", goos, goarch)
+	assetName := fmt.Sprintf("gkimi-%s-%s", goos, goarch)
 	var downloadURL string
 	for _, asset := range release.Assets {
 		if strings.Contains(asset.Name, goos) && strings.Contains(asset.Name, goarch) {
@@ -86,9 +86,9 @@ func (a *App) runUpgrade() error {
 
 	if downloadURL != "" {
 		fmt.Printf("Download: %s (%s)\n", assetName, downloadURL)
-		fmt.Println("\nTo upgrade, download the binary above and replace your current kimi binary.")
+		fmt.Println("\nTo upgrade, download the binary above and replace your current gkimi binary.")
 		fmt.Println("Or run:")
-		fmt.Printf("  curl -L -o kimi %s && chmod +x kimi && sudo mv kimi $(which kimi)\n", downloadURL)
+		fmt.Printf("  curl -L -o gkimi %s && chmod +x gkimi && sudo mv gkimi $(which gkimi)\n", downloadURL)
 	} else {
 		fmt.Println("No pre-built binary found for your platform.")
 		fmt.Printf("Visit %s for manual download.\n", release.HTMLURL)

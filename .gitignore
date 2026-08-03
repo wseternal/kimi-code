@@ -1,5 +1,5 @@
 # Go build output
-build/kimi
+build/gkimi
 coverage.out
 coverage.html
 
@@ -85,4 +85,4 @@ handover.md
 *-mockup.html
 *-demo.html
 *-demos.html
-build/kimi
+build/gkimi
