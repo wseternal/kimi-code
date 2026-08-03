@@ -356,21 +356,55 @@ func TestConfigPath(t *testing.T) {
 func TestEnsureDataDir_CreatesAndMigrates(t *testing.T) {
 	home := t.TempDir()
 
-	// Create legacy directory with config.
+	// Create legacy directory with config, tui.toml, input_history, and credentials.
 	legacyDir := filepath.Join(home, LegacyDataDirName)
 	os.MkdirAll(legacyDir, 0755)
 	os.WriteFile(filepath.Join(legacyDir, "config.toml"), []byte("[providers.kimi]\ntype = \"kimi\"\n"), 0644)
+	os.WriteFile(filepath.Join(legacyDir, "tui.toml"), []byte("theme = \"dark\"\n"), 0644)
+	os.WriteFile(filepath.Join(legacyDir, "input_history"), []byte("cmd1\ncmd2\n"), 0644)
+	credsDir := filepath.Join(legacyDir, "credentials")
+	os.MkdirAll(credsDir, 0700)
+	os.WriteFile(filepath.Join(credsDir, "token1.json"), []byte("{\"access_token\":\"abc\"}"), 0600)
 
-	// EnsureDataDir should create the new directory and copy config.
+	// EnsureDataDir should create the new directory and copy all data.
 	EnsureDataDir(home)
 
-	newConfig := filepath.Join(home, DataDirName, "config.toml")
-	data, err := os.ReadFile(newConfig)
+	newDir := filepath.Join(home, DataDirName)
+
+	// Verify config.toml migrated.
+	data, err := os.ReadFile(filepath.Join(newDir, "config.toml"))
 	if err != nil {
 		t.Fatalf("expected config to be migrated: %v", err)
 	}
 	if !strings.Contains(string(data), "[providers.kimi]") {
 		t.Errorf("expected migrated config to contain provider section, got: %s", string(data))
+	}
+
+	// Verify tui.toml migrated.
+	tuiData, err := os.ReadFile(filepath.Join(newDir, "tui.toml"))
+	if err != nil {
+		t.Fatalf("expected tui.toml to be migrated: %v", err)
+	}
+	if !strings.Contains(string(tuiData), "theme") {
+		t.Errorf("expected tui.toml to contain theme, got: %s", string(tuiData))
+	}
+
+	// Verify input_history migrated.
+	histData, err := os.ReadFile(filepath.Join(newDir, "input_history"))
+	if err != nil {
+		t.Fatalf("expected input_history to be migrated: %v", err)
+	}
+	if !strings.Contains(string(histData), "cmd1") {
+		t.Errorf("expected input_history to contain cmd1, got: %s", string(histData))
+	}
+
+	// Verify credentials migrated.
+	tokenData, err := os.ReadFile(filepath.Join(newDir, "credentials", "token1.json"))
+	if err != nil {
+		t.Fatalf("expected credentials to be migrated: %v", err)
+	}
+	if !strings.Contains(string(tokenData), "access_token") {
+		t.Errorf("expected token file to contain access_token, got: %s", string(tokenData))
 	}
 }
 
