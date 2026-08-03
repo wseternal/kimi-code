@@ -21,13 +21,13 @@ Requirements: Go ≥ 1.24, [Taskfile](https://taskfile.dev) (optional).
 ```sh
 git clone https://github.com/wseternal/kimi-code.git
 cd kimi-code
-go build -o build/kimi ./cmd/kimi
+go build -o build/gkimi ./cmd/kimi
 ```
 
 Or with Taskfile:
 
 ```sh
-task go:build          # builds to build/kimi
+task go:build          # builds to build/gkimi
 ```
 
 ### Pre-built binaries
@@ -75,7 +75,7 @@ base_url = "https://api.moonshot.ai/v1"
 ## Development
 
 ```sh
-task go:build          # build the CLI binary to build/kimi
+task go:build          # build the CLI binary to build/gkimi
 task go:test           # run tests with race detector
 task go:lint           # golangci-lint
 task go:fmt            # go fmt
