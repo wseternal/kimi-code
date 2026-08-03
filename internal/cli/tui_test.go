@@ -554,7 +554,7 @@ func TestHandleSubmit_SkillRoutesThroughLLM(t *testing.T) {
 
 // TestNewTUIModel_UsesDefaultModel verifies that the TUI model field is set
 // from DefaultModel in config, not DefaultProvider. This ensures the CLI
-// startup Model matches the default_model defined in ~/.kimi-code/config.toml.
+// startup Model matches the default_model defined in ~/.gkimi-code/config.toml.
 func TestNewTUIModel_UsesDefaultModel(t *testing.T) {
 	tests := []struct {
 		name            string

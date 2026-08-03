@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 )
 
 const (
@@ -80,7 +82,7 @@ func NewDefaultManager() (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get home dir: %w", err)
 	}
-	configDir := filepath.Join(homeDir, ".kimi-code")
+	configDir := filepath.Join(homeDir, config.DataDirName)
 
 	return NewManager(ManagerOptions{
 		Config:    DefaultFlowConfig(),

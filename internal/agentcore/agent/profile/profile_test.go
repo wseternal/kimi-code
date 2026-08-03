@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 )
 
 func TestLoadTOML(t *testing.T) {
@@ -131,7 +133,7 @@ func TestApplyToSystemPrompt(t *testing.T) {
 
 func TestLoadNamed(t *testing.T) {
 	dir := t.TempDir()
-	agentDir := filepath.Join(dir, ".kimi-code", "agents")
+	agentDir := filepath.Join(dir, config.DataDirName, "agents")
 	os.MkdirAll(agentDir, 0755)
 
 	content := `name = "test-agent"

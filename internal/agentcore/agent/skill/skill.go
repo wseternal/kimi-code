@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 )
 
 // maxSkillScanDepth bounds recursion so a directory symlink cycle inside
@@ -103,7 +105,7 @@ func NewCatalog(skills []Skill) *Catalog {
 // It follows the TS scanner's search root resolution:
 //  1. <projectRoot>/.kimi-code/skills  (project)
 //  2. <projectRoot>/.agents/skills     (project)
-//  3. <userHome>/.kimi-code/skills     (user)
+//  3. <userHome>/.gkimi-code/skills    (user)
 //  4. <userHome>/.agents/skills        (user)
 //
 // First-wins: when two roots define a skill with the same name, the
@@ -122,7 +124,7 @@ func Discover(projectRoot string) (*Catalog, error) {
 
 	// User roots.
 	if home, err := os.UserHomeDir(); err == nil {
-		addRoot(&roots, filepath.Join(home, ".kimi-code", "skills"), "user")
+		addRoot(&roots, filepath.Join(home, config.DataDirName, "skills"), "user")
 		addRoot(&roots, filepath.Join(home, ".agents", "skills"), "user")
 	}
 

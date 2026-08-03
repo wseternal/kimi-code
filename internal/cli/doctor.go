@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -91,7 +92,7 @@ func checkNetwork() DoctorResult {
 
 func checkDiskSpace() DoctorResult {
 	home, _ := os.UserHomeDir()
-	dataDir := home + "/.kimi-code"
+	dataDir := filepath.Join(home, config.DataDirName)
 	info, err := os.Stat(dataDir)
 	if err != nil {
 		return DoctorResult{Name: "Data Directory", Status: "ok", Detail: fmt.Sprintf("%s (will be created on first use)", dataDir)}

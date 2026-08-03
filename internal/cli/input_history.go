@@ -21,7 +21,7 @@ type InputHistory struct {
 }
 
 // NewInputHistory creates a new history manager backed by a file
-// in the given config directory (typically ~/.kimi-code/).
+// in the given config directory (typically ~/.gkimi-code/).
 func NewInputHistory(configDir string) *InputHistory {
 	return &InputHistory{
 		file:  filepath.Join(configDir, inputHistoryFile),

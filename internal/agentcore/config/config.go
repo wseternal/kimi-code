@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -10,8 +12,16 @@ import (
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/hooks"
 )
 
+// DataDirName is the user-level data directory name.
+// Changed from ".kimi-code" to ".gkimi-code" to avoid conflicts with the
+// original TypeScript CLI.
+const DataDirName = ".gkimi-code"
+
+// LegacyDataDirName is the previous data directory name, used for migration.
+const LegacyDataDirName = ".kimi-code"
+
 // Config is the application configuration, compatible with the TS CLI's
-// ~/.kimi-code/config.toml format. Fields use TOML tags matching the
+// config.toml format. Fields use TOML tags matching the
 // snake_case keys used by the TS core's transformTomlData pipeline.
 type Config struct {
 	DefaultProvider string                      `toml:"default_provider,omitempty"`
@@ -487,7 +497,72 @@ func mcpServersToMap(servers map[string]McpServerConfig) map[string]any {
 
 // ConfigPath returns the default config.toml path under the given home dir.
 func ConfigPath(homeDir string) string {
-	return filepath.Join(homeDir, ".kimi-code", "config.toml")
+	return filepath.Join(homeDir, DataDirName, "config.toml")
+}
+
+// EnsureDataDir ensures the data directory exists, creating it and migrating
+// data from the legacy directory if needed.
+func EnsureDataDir(homeDir string) {
+	dataDir := filepath.Join(homeDir, DataDirName)
+	if _, err := os.Stat(dataDir); err == nil {
+		return // already exists
+	}
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		slog.Warn("failed to create data directory", "path", dataDir, "error", err)
+		return
+	}
+	legacyDir := filepath.Join(homeDir, LegacyDataDirName)
+	// Migrate individual data files from legacy directory.
+	for _, name := range []string{"config.toml", "tui.toml", "input_history"} {
+		src := filepath.Join(legacyDir, name)
+		if _, err := os.Stat(src); err == nil {
+			if data, err := os.ReadFile(src); err == nil {
+				if err := os.WriteFile(filepath.Join(dataDir, name), data, 0644); err != nil {
+					slog.Warn("failed to migrate data file", "file", name, "error", err)
+				}
+			}
+		}
+	}
+	// Migrate credentials directory (OAuth tokens).
+	legacyCreds := filepath.Join(legacyDir, "credentials")
+	if info, err := os.Stat(legacyCreds); err == nil && info.IsDir() {
+		newCreds := filepath.Join(dataDir, "credentials")
+		if err := copyDir(legacyCreds, newCreds); err != nil {
+			slog.Warn("failed to migrate credentials", "error", err)
+		}
+	}
+}
+
+// copyDir copies all regular files from src to dst, creating dst if needed.
+func copyDir(src, dst string) error {
+	if err := os.MkdirAll(dst, 0700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		in, err := os.Open(filepath.Join(src, e.Name()))
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(filepath.Join(dst, e.Name()), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		if err != nil {
+			in.Close()
+			return err
+		}
+		_, copyErr := io.Copy(out, in)
+		in.Close()
+		out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+	}
+	return nil
 }
 
 func trimSpace(s string) string {

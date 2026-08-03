@@ -72,6 +72,9 @@ func Execute() error {
 func (a *App) run() error {
 	home := homeDir()
 
+	// Ensure data directory exists (creates + migrates from legacy if needed).
+	config.EnsureDataDir(home)
+
 	// Load config
 	cfg := config.DefaultConfig()
 	configPath := config.ConfigPath(home)
@@ -164,7 +167,7 @@ func (a *App) run() error {
 				opts.TracePath = args[i+1]
 				i += 2
 			} else {
-				opts.TracePath = filepath.Join(home, ".kimi-code", fmt.Sprintf("trace_%d.jsonl", time.Now().Unix()))
+				opts.TracePath = filepath.Join(home, config.DataDirName, fmt.Sprintf("trace_%d.jsonl", time.Now().Unix()))
 				i++
 			}
 		case arg == "--agent":
@@ -373,7 +376,7 @@ func (a *App) runHeadless(opts CLIOptions) error {
 
 	// Resolve provider from config
 	if !providers.IsConfigured(a.Config) {
-		return fmt.Errorf("no provider configured. Add to ~/.kimi-code/config.toml or run 'kimi login'")
+		return fmt.Errorf("no provider configured. Add to ~/.%s/config.toml or run 'kimi login'", config.DataDirName)
 	}
 
 	// Apply profile model override
@@ -586,7 +589,7 @@ func homeDir() string {
 // resolveSessionsDir returns the path to the sessions directory, creating it if needed.
 func resolveSessionsDir() string {
 	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".kimi-code", "sessions")
+	dir := filepath.Join(home, config.DataDirName, "sessions")
 	_ = os.MkdirAll(dir, 0755)
 	return dir
 }
@@ -595,7 +598,7 @@ func resolveSessionsDir() string {
 var _ = strings.TrimSpace
 
 // openAuditStore opens a per-session BadgerDB for the audit trail.
-// Data is stored at ~/.kimi-code/sessions/{sessionID}/badger/.
+// Data is stored at ~/.gkimi-code/sessions/{sessionID}/badger/.
 func (a *App) openAuditStore(sessionID, home string) {
 	dir := filepath.Join(sessionsDir(home), sessionID, "badger")
 	if err := os.MkdirAll(dir, 0700); err != nil {
