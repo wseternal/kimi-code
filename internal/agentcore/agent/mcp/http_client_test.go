@@ -439,6 +439,49 @@ func TestResolveSSEEndpoint_Relative(t *testing.T) {
 	}
 }
 
+func TestResolveSSEEndpoint_PrivateIPRejected(t *testing.T) {
+	client := NewHTTPClient("http://example.com/sse", "sse")
+	// Loopback IP should be rejected.
+	_, err := client.resolveSSEEndpoint("http://127.0.0.1/messages", mustParseURL(t, "http://example.com/sse"))
+	if err == nil {
+		t.Error("expected loopback IP to be rejected by SSRF guard")
+	}
+	if !strings.Contains(err.Error(), "SSRF") && !strings.Contains(err.Error(), "loopback") {
+		t.Errorf("expected SSRF error, got: %v", err)
+	}
+
+	// Private IP should be rejected.
+	_, err = client.resolveSSEEndpoint("http://10.0.0.1/internal", mustParseURL(t, "http://example.com/sse"))
+	if err == nil {
+		t.Error("expected private IP to be rejected by SSRF guard")
+	}
+}
+
+func TestRejectPrivateHost(t *testing.T) {
+	tests := []struct {
+		host    string
+		wantErr bool
+	}{
+		{"127.0.0.1", true},
+		{"10.0.0.1", true},
+		{"192.168.1.1", true},
+		{"172.16.0.1", true},
+		{"[::1]", true}, // IPv6 loopback (brackets required in URL Host)
+		{"8.8.8.8", false},
+		{"1.1.1.1", false},
+	}
+	for _, tc := range tests {
+		u := &url.URL{Scheme: "http", Host: tc.host}
+		err := rejectPrivateHost(u)
+		if tc.wantErr && err == nil {
+			t.Errorf("rejectPrivateHost(%q) should have returned error", tc.host)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("rejectPrivateHost(%q) unexpected error: %v", tc.host, err)
+		}
+	}
+}
+
 // ── Helpers ──
 
 func mustMarshal(t *testing.T, v any) json.RawMessage {

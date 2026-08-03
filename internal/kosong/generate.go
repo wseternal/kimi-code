@@ -300,11 +300,13 @@ func flushPart(part *StreamedMessagePart, content *[]ContentPart, toolCalls *[]T
 // isPendingToolCallAtIndex checks whether the pending part is a tool call at
 // the given index. Used for parallel tool call routing to determine if an
 // argument delta belongs to the currently pending tool call or a different one.
+// It normalizes interface{} values via fmt.Sprintf to handle type mismatches
+// (e.g. int vs float64 from JSON deserialization).
 func isPendingToolCallAtIndex(pending *StreamedMessagePart, index interface{}) bool {
 	if pending == nil || pending.Type != "function" {
 		return false
 	}
-	return pending.Index == index
+	return fmt.Sprintf("%v", pending.Index) == fmt.Sprintf("%v", index)
 }
 
 // CollectParts drains a stream and returns all parts as a slice.

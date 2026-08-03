@@ -345,15 +345,6 @@ func (t *Tracker) StatusString() string {
 		t.current.Objective, t.current.Status, elapsed, t.current.TurnsUsed, t.current.TokensUsed)
 }
 
-// ParseGoalCommand parses "/goal <text>" or "/goal" (clear).
-func ParseGoalCommand(args string) (text string, clear bool) {
-	args = strings.TrimSpace(args)
-	if args == "" {
-		return "", true
-	}
-	return args, false
-}
-
 // ── Internal ──
 
 func (t *Tracker) foldWallClock() {

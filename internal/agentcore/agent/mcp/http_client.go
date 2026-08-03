@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -336,7 +337,12 @@ func (c *HTTPClient) sendNotification(ctx context.Context, method string, params
 	if err != nil {
 		return fmt.Errorf("mcp: notification request: %w", err)
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		c.logger.Warn("mcp: notification returned non-2xx status",
+			"method", method, "status", resp.StatusCode, "body", string(body))
+	}
 	return nil
 }
 
@@ -423,25 +429,85 @@ func (c *HTTPClient) connectSSE(ctx context.Context) error {
 
 // resolveSSEEndpoint resolves a (possibly relative) endpoint URL and validates
 // it stays on the same host to prevent SSRF via a malicious MCP server.
+// It also rejects endpoints that resolve to private/loopback addresses,
+// unless the base URL itself is a private address (e.g. local testing).
 func (c *HTTPClient) resolveSSEEndpoint(endpoint string, baseURL *url.URL) (string, error) {
+	var resolved *url.URL
 	if !strings.HasPrefix(endpoint, "http") {
 		// Resolve relative URL against the base.
 		ref, err := url.Parse(endpoint)
 		if err != nil {
 			return "", fmt.Errorf("mcp sse: invalid endpoint %q: %w", endpoint, err)
 		}
-		resolved := baseURL.ResolveReference(ref)
-		return resolved.String(), nil
+		resolved = baseURL.ResolveReference(ref)
+	} else {
+		// Absolute URL — must match the same host.
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			return "", fmt.Errorf("mcp sse: invalid endpoint URL %q: %w", endpoint, err)
+		}
+		if parsed.Host != baseURL.Host {
+			return "", fmt.Errorf("mcp sse: endpoint host %q does not match base host %q (SSRF guard)", parsed.Host, baseURL.Host)
+		}
+		resolved = parsed
 	}
-	// Absolute URL — must match the same host.
-	parsed, err := url.Parse(endpoint)
+	// Reject private/loopback IPs to prevent SSRF to internal services.
+	// Skip when the base URL itself is a private address (local dev/test servers).
+	if !isPrivateHost(baseURL) {
+		if err := rejectPrivateHost(resolved); err != nil {
+			return "", fmt.Errorf("mcp sse: %w", err)
+		}
+	}
+	return resolved.String(), nil
+}
+
+// isPrivateHost returns true if the URL's hostname resolves to a private or
+// loopback IP address.
+func isPrivateHost(u *url.URL) bool {
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+	}
+	ips, err := net.LookupIP(host)
 	if err != nil {
-		return "", fmt.Errorf("mcp sse: invalid endpoint URL %q: %w", endpoint, err)
+		return false
 	}
-	if parsed.Host != baseURL.Host {
-		return "", fmt.Errorf("mcp sse: endpoint host %q does not match base host %q (SSRF guard)", parsed.Host, baseURL.Host)
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return true
+		}
 	}
-	return endpoint, nil
+	return false
+}
+
+// rejectPrivateHost returns an error if the URL's host resolves to a private
+// or loopback IP address, preventing SSRF attacks targeting internal services.
+func rejectPrivateHost(u *url.URL) error {
+	host := u.Hostname()
+	if host == "" {
+		return nil // let the request fail naturally
+	}
+	// Try parsing as an IP literal first.
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("endpoint resolves to private/loopback address %s (SSRF guard)", ip)
+		}
+		return nil
+	}
+	// DNS lookup — check all resolved IPs.
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil // let the request handle DNS errors
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("endpoint host %q resolves to private/loopback address %s (SSRF guard)", host, ip)
+		}
+	}
+	return nil
 }
 
 // drainSSE reads remaining SSE events (server notifications) in background.

@@ -388,6 +388,25 @@ func TestIsPendingToolCallAtIndex(t *testing.T) {
 	}
 }
 
+func TestIsPendingToolCallAtIndex_TypeNormalization(t *testing.T) {
+	// int vs float64 — common when JSON deserializes numbers as float64.
+	f := &StreamedMessagePart{Type: "function", ID: "1", Name: "t", Index: 0}
+	if !isPendingToolCallAtIndex(f, float64(0)) {
+		t.Error("int 0 should match float64(0) after normalization")
+	}
+	if isPendingToolCallAtIndex(f, float64(1)) {
+		t.Error("int 0 should not match float64(1)")
+	}
+	// string index should still work
+	fs := &StreamedMessagePart{Type: "function", ID: "1", Name: "t", Index: "idx_0"}
+	if !isPendingToolCallAtIndex(fs, "idx_0") {
+		t.Error("string index should match")
+	}
+	if isPendingToolCallAtIndex(fs, "idx_1") {
+		t.Error("different string index should not match")
+	}
+}
+
 // ── Model catalog tests ──
 
 func TestCatalogModelToCapability(t *testing.T) {

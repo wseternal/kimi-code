@@ -201,26 +201,6 @@ func TestCreateGoalValidation(t *testing.T) {
 	}
 }
 
-func TestParseGoalCommand(t *testing.T) {
-	tests := []struct {
-		input string
-		text  string
-		clear bool
-	}{
-		{"", "", true},
-		{"Build API", "Build API", false},
-		{"  ", "", true},
-	}
-
-	for _, tt := range tests {
-		text, clear := ParseGoalCommand(tt.input)
-		if text != tt.text || clear != tt.clear {
-			t.Errorf("ParseGoalCommand(%q) = (%q, %v), want (%q, %v)",
-				tt.input, text, clear, tt.text, tt.clear)
-		}
-	}
-}
-
 func TestStatusString(t *testing.T) {
 	tr := NewTracker()
 	if s := tr.StatusString(); s != "No goal set" {
