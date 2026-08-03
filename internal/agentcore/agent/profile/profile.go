@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 )
 
 // AgentProfile defines an agent's behavioral configuration.
@@ -125,9 +127,9 @@ func loadMarkdown(path string) (*AgentProfile, error) {
 }
 
 // LoadNamed loads a named agent profile from standard directories.
-// Searches: ~/.kimi-code/agents/<name>.toml, then .md
+// Searches: ~/.gkimi-code/agents/<name>.toml, then .md
 func LoadNamed(name string, homeDir string) (*AgentProfile, error) {
-	agentDir := filepath.Join(homeDir, ".kimi-code", "agents")
+	agentDir := filepath.Join(homeDir, config.DataDirName, "agents")
 
 	// Try TOML first
 	tomlPath := filepath.Join(agentDir, name+".toml")

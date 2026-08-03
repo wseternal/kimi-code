@@ -161,7 +161,7 @@ func createOAuthManager(ref *config.OAuthRef) (*oauth.Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	configDir := filepath.Join(homeDir, ".kimi-code")
+	configDir := filepath.Join(homeDir, config.DataDirName)
 
 	return oauth.NewManager(oauth.ManagerOptions{
 		Config: oauth.FlowConfig{

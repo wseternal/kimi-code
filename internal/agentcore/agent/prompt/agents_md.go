@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 )
 
 // maxAgentsMdBytes is the soft budget for AGENTS.md content.
@@ -19,7 +21,7 @@ var agentsMdFiles = []string{
 
 // LoadAgentsMd discovers and loads AGENTS.md content from standard locations.
 // Discovery order:
-//  1. Brand-level: ~/.kimi-code/AGENTS.md
+//  1. Brand-level: ~/.gkimi-code/AGENTS.md
 //  2. Generic user-level: ~/.agents/AGENTS.md or ~/.agents/agents.md
 //  3. Project-level: project root (found via .git) walking to workDir
 //
@@ -29,9 +31,9 @@ func LoadAgentsMd(workDir, homeDir string) (content string, warning string) {
 	var parts []string
 	totalSize := 0
 
-	// 1. Brand-level: ~/.kimi-code/AGENTS.md
+	// 1. Brand-level: ~/.gkimi-code/AGENTS.md
 	if homeDir != "" {
-		brandPath := filepath.Join(homeDir, ".kimi-code", "AGENTS.md")
+		brandPath := filepath.Join(homeDir, config.DataDirName, "AGENTS.md")
 		if data, err := os.ReadFile(brandPath); err == nil {
 			text := string(data)
 			parts = append(parts, annotateSource(brandPath, text))

@@ -8,7 +8,7 @@ import (
 
 // Store manages a BadgerDB instance for session audit data.
 // Each session gets its own Store backed by a directory under
-// the session's data path (e.g. ~/.kimi-code/sessions/{id}/badger/).
+// the session's data path (e.g. ~/.gkimi-code/sessions/{id}/badger/).
 type Store struct {
 	db *badger.DB
 }

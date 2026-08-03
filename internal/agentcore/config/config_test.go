@@ -347,9 +347,52 @@ func TestSaveToFile(t *testing.T) {
 
 func TestConfigPath(t *testing.T) {
 	path := ConfigPath("/home/testuser")
-	expected := filepath.Join("/home/testuser", ".kimi-code", "config.toml")
+	expected := filepath.Join("/home/testuser", DataDirName, "config.toml")
 	if path != expected {
 		t.Errorf("expected %s, got %s", expected, path)
+	}
+}
+
+func TestEnsureDataDir_CreatesAndMigrates(t *testing.T) {
+	home := t.TempDir()
+
+	// Create legacy directory with config.
+	legacyDir := filepath.Join(home, LegacyDataDirName)
+	os.MkdirAll(legacyDir, 0755)
+	os.WriteFile(filepath.Join(legacyDir, "config.toml"), []byte("[providers.kimi]\ntype = \"kimi\"\n"), 0644)
+
+	// EnsureDataDir should create the new directory and copy config.
+	EnsureDataDir(home)
+
+	newConfig := filepath.Join(home, DataDirName, "config.toml")
+	data, err := os.ReadFile(newConfig)
+	if err != nil {
+		t.Fatalf("expected config to be migrated: %v", err)
+	}
+	if !strings.Contains(string(data), "[providers.kimi]") {
+		t.Errorf("expected migrated config to contain provider section, got: %s", string(data))
+	}
+}
+
+func TestEnsureDataDir_SkipsIfExists(t *testing.T) {
+	home := t.TempDir()
+
+	// Create the new directory already.
+	newDir := filepath.Join(home, DataDirName)
+	os.MkdirAll(newDir, 0755)
+	os.WriteFile(filepath.Join(newDir, "config.toml"), []byte("existing"), 0644)
+
+	// Also create legacy with different content.
+	legacyDir := filepath.Join(home, LegacyDataDirName)
+	os.MkdirAll(legacyDir, 0755)
+	os.WriteFile(filepath.Join(legacyDir, "config.toml"), []byte("legacy"), 0644)
+
+	EnsureDataDir(home)
+
+	// Should not overwrite existing config.
+	data, _ := os.ReadFile(filepath.Join(newDir, "config.toml"))
+	if string(data) != "existing" {
+		t.Errorf("expected existing config to be preserved, got: %s", string(data))
 	}
 }
 

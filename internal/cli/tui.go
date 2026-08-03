@@ -368,7 +368,7 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	home, _ := os.UserHomeDir()
 	cronDir := ""
 	if home != "" {
-		cronDir = filepath.Join(home, ".kimi-code")
+		cronDir = filepath.Join(home, config.DataDirName)
 	}
 	cronMgr := cron.NewCronManager(cron.NewStore(cronDir), nil)
 	tools.RegisterCronTools(toolReg, cronMgr)
@@ -428,7 +428,7 @@ func newTUIModel(app *App, sess *session.Session) tuiModel {
 	// Initialize input history
 	var inputHist *InputHistory
 	if home != "" {
-		inputHist = NewInputHistory(filepath.Join(home, ".kimi-code"))
+		inputHist = NewInputHistory(filepath.Join(home, config.DataDirName))
 		_ = inputHist.Load()
 	}
 
@@ -963,7 +963,7 @@ func (m *tuiModel) runLLMStream(prompt string, isOverflowRetry bool) tea.Cmd {
 		defer close(ch)
 
 		if provider == nil {
-			ch <- streamEvent{kind: "error", text: "no provider configured. Set API key in ~/.kimi-code/config.toml"}
+			ch <- streamEvent{kind: "error", text: fmt.Sprintf("no provider configured. Set API key in ~/%s/config.toml", config.DataDirName)}
 			return
 		}
 
@@ -3233,8 +3233,8 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	case input == "/settings":
 		m.messages = append(m.messages, chatMessage{"user", input})
 		m.messages = append(m.messages, chatMessage{"system",
-			"Settings are managed via ~/.kimi-code/config.toml (runtime)\n" +
-				"and ~/.kimi-code/tui.toml (UI preferences).\n" +
+			"Settings are managed via ~/" + config.DataDirName + "/config.toml (runtime)\n" +
+				"and ~/" + config.DataDirName + "/tui.toml (UI preferences).\n" +
 				"Edit and restart to apply changes."})
 		m.input = ""
 		m.cursor = 0
@@ -3934,7 +3934,7 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 
 		// Fallback: no provider configured
 		m.messages = append(m.messages, chatMessage{"system",
-			"No provider configured. Run /login or add to ~/.kimi-code/config.toml:\n" +
+			"No provider configured. Run /login or add to ~/" + config.DataDirName + "/config.toml:\n" +
 				"  [providers.kimi]\n  type = \"kimi\"\n  api_key = \"YOUR_KEY\""})
 		return m, nil
 	}
@@ -5774,7 +5774,7 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 	simpleHome, _ := os.UserHomeDir()
 	simpleCronDir := ""
 	if simpleHome != "" {
-		simpleCronDir = filepath.Join(simpleHome, ".kimi-code")
+		simpleCronDir = filepath.Join(simpleHome, config.DataDirName)
 	}
 	cronMgr := cron.NewCronManager(cron.NewStore(simpleCronDir), nil)
 	tools.RegisterCronTools(toolReg, cronMgr)
@@ -5858,7 +5858,7 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 			fmt.Println("Permission modes: yolo (auto-approve), manual (ask first)")
 			fmt.Println("Use /yolo to toggle, or set rules in config.toml.")
 		case "/settings":
-			fmt.Println("Settings: ~/.kimi-code/config.toml (runtime), ~/.kimi-code/tui.toml (UI)")
+			fmt.Println("Settings: ~/" + config.DataDirName + "/config.toml (runtime), ~/" + config.DataDirName + "/tui.toml (UI)")
 		case "/clear":
 			history = nil
 			fmt.Println("History cleared.")
@@ -5981,7 +5981,7 @@ func (a *App) runSimpleTUI(sess *session.Session) error {
 
 				fmt.Println()
 			} else {
-				fmt.Println("⚠ No provider configured. Add to ~/.kimi-code/config.toml")
+				fmt.Println("⚠ No provider configured. Add to ~/" + config.DataDirName + "/config.toml")
 			}
 		}
 	}

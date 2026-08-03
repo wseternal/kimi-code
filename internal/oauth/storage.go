@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/visdomtech/kimi-code/internal/agentcore/config"
 )
 
 // TokenStorage defines the interface for OAuth token persistence.
@@ -29,13 +31,13 @@ func NewFileTokenStorage(dir string) *FileTokenStorage {
 	return &FileTokenStorage{dir: dir}
 }
 
-// NewDefaultTokenStorage creates a FileTokenStorage at ~/.kimi-code/credentials.
+// NewDefaultTokenStorage creates a FileTokenStorage at ~/.gkimi-code/credentials.
 func NewDefaultTokenStorage() (*FileTokenStorage, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	return NewFileTokenStorage(filepath.Join(home, ".kimi-code", "credentials")), nil
+	return NewFileTokenStorage(filepath.Join(home, config.DataDirName, "credentials")), nil
 }
 
 // ensureDir creates the storage directory with proper permissions.

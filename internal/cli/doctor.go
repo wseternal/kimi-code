@@ -91,7 +91,7 @@ func checkNetwork() DoctorResult {
 
 func checkDiskSpace() DoctorResult {
 	home, _ := os.UserHomeDir()
-	dataDir := home + "/.kimi-code"
+	dataDir := home + "/" + config.DataDirName
 	info, err := os.Stat(dataDir)
 	if err != nil {
 		return DoctorResult{Name: "Data Directory", Status: "ok", Detail: fmt.Sprintf("%s (will be created on first use)", dataDir)}

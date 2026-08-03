@@ -10,8 +10,16 @@ import (
 	"github.com/visdomtech/kimi-code/internal/agentcore/agent/hooks"
 )
 
+// DataDirName is the user-level data directory name.
+// Changed from ".kimi-code" to ".gkimi-code" to avoid conflicts with the
+// original TypeScript CLI.
+const DataDirName = ".gkimi-code"
+
+// LegacyDataDirName is the previous data directory name, used for migration.
+const LegacyDataDirName = ".kimi-code"
+
 // Config is the application configuration, compatible with the TS CLI's
-// ~/.kimi-code/config.toml format. Fields use TOML tags matching the
+// config.toml format. Fields use TOML tags matching the
 // snake_case keys used by the TS core's transformTomlData pipeline.
 type Config struct {
 	DefaultProvider string                      `toml:"default_provider,omitempty"`
@@ -487,7 +495,26 @@ func mcpServersToMap(servers map[string]McpServerConfig) map[string]any {
 
 // ConfigPath returns the default config.toml path under the given home dir.
 func ConfigPath(homeDir string) string {
-	return filepath.Join(homeDir, ".kimi-code", "config.toml")
+	return filepath.Join(homeDir, DataDirName, "config.toml")
+}
+
+// EnsureDataDir ensures the data directory exists, creating it and migrating
+// the config from the legacy directory if needed.
+func EnsureDataDir(homeDir string) {
+	dataDir := filepath.Join(homeDir, DataDirName)
+	if _, err := os.Stat(dataDir); err == nil {
+		return // already exists
+	}
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return
+	}
+	// Migrate config from legacy directory if present.
+	legacyConfig := filepath.Join(homeDir, LegacyDataDirName, "config.toml")
+	if _, err := os.Stat(legacyConfig); err == nil {
+		if data, err := os.ReadFile(legacyConfig); err == nil {
+			_ = os.WriteFile(filepath.Join(dataDir, "config.toml"), data, 0644)
+		}
+	}
 }
 
 func trimSpace(s string) string {

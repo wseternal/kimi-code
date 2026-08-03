@@ -204,5 +204,5 @@ func hasAnyAuth(cfg *config.Config) bool {
 
 // sessionsDir returns the sessions storage directory.
 func sessionsDir(homeDir string) string {
-	return filepath.Join(homeDir, ".kimi-code", "sessions")
+	return filepath.Join(homeDir, config.DataDirName, "sessions")
 }
