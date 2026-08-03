@@ -63,7 +63,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: cd dist && sha256sum kimi-* > checksums.txt
+        run: cd dist && sha256sum gkimi-* > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
